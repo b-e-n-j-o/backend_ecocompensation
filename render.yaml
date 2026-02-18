@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: kerelia-ecocomp-api
+    runtime: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE_HOST
+        sync: false
+      - key: SUPABASE_PORT
+        value: "6543"
+      - key: SUPABASE_DB
+        value: postgres
+      - key: SUPABASE_USER
+        sync: false
+      - key: SUPABASE_PASSWORD
+        sync: false
+    healthCheckPath: /api/layers
+    # Render free tier s'endort après 15min d'inactivité
+    # → passer sur Starter ($7/mois) pour un service continu
+    # Les fetches WFS peuvent durer plusieurs minutes : nécessite un
+    # service "always on" (pas de spin-down).
