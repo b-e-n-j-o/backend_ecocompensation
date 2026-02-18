@@ -45,12 +45,16 @@ from sqlalchemy import text
 from orchestrator import run_orchestration
 from layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
+from routers.foncier_router import router as foncier_router
 
 # vrai_filtre et scoring (tes scripts actuels, importés directement)
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from vrai_filtre import FiltreOptions, run as run_filtre
 from vrai_filtre_puis_scoring import _score_parcelle
+
+
+
 
 # ─────────────────────────────────────────────
 # Config
@@ -162,6 +166,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Routes supplémentaires (foncier, autres outils…)
+app.include_router(foncier_router, prefix="/api/foncier")
 
 # Servir le front Vite buildé (si dist/ existe)
 _dist = Path(__file__).parent.parent / "frontend" / "dist"
