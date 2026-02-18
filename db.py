@@ -14,6 +14,7 @@ from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 
 # Charger les variables d'environnement
 load_dotenv(Path(__file__).parent / ".env")
@@ -37,13 +38,16 @@ def get_engine():
     """Retourne l'engine SQLAlchemy (singleton)."""
     global _engine
     if _engine is None:
-        # prepare_threshold=None désactive les prepared statements côté serveur (psycopg3).
-        # Évite DuplicatePreparedStatement quand une connexion du pool est réutilisée.
+        # pgBouncer (Supabase pooler) = transaction pooling : on ne pool pas côté SQLAlchemy.
+        # NullPool = pas de pool, nouvelle connexion à chaque usage → pgBouncer gère tout.
+        # prepare_threshold=None = pas de prepared statements (incompatibles avec le pooler).
         _engine = create_engine(
             DB_URL,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
-            connect_args={"prepare_threshold": None},
+            poolclass=NullPool,
+            connect_args={
+                "prepare_threshold": None,
+                "sslmode": "require",
+            },
         )
     return _engine

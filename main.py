@@ -149,9 +149,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="KERELIA Ecocompensation API", version="1.0.0", lifespan=lifespan)
 
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://ecocompensation-frontend-khub.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # restreindre en prod
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -468,6 +474,39 @@ def run_filter(project_id: str, body: FilterRequest):
 
     cx, cy = row["cx"], row["cy"]
     options = _dto_to_filtre_options(opts_dto)
+
+    # Comptage des parcelles candidates dans l'AOI (best-effort, ne doit jamais faire planter)
+    parcelles_total: int | None = None
+    try:
+        with engine.begin() as conn:
+            parcelles_total = conn.execute(
+                text("""
+                    SELECT COUNT(*)
+                    FROM ecocompensation_results.parcelles p
+                    WHERE p.aoi_id = :aid
+                """),
+                {"aid": aoi_id},
+            ).scalar()
+    except Exception:
+        logger.debug("Impossible de compter cadastre.parcelles (table absente ?)", exc_info=True)
+
+    if parcelles_total is not None:
+        try:
+            # On est dans un thread de worker (run_in_threadpool) : il faut
+            # planifier le broadcast sur la boucle asyncio principale.
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(
+                asyncio.ensure_future,
+                ws_manager.broadcast(
+                    project_id,
+                    {
+                        "event": "parcelles_total",
+                        "total": int(parcelles_total or 0),
+                    },
+                ),
+            )
+        except Exception:
+            logger.debug("Impossible d'envoyer l'event parcelles_total", exc_info=True)
 
     ram_before_mb = _get_process_memory_mb()
     logger.info("Filtre: RAM avant run_filtre = %.2f Mo", ram_before_mb)
