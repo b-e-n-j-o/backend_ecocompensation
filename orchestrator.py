@@ -91,6 +91,7 @@ async def run_orchestration(
                 "timestamp": datetime.now(timezone.utc).isoformat()})
 
     t_global = time.perf_counter()
+    loop = asyncio.get_running_loop()
 
     for i, layer_cfg in enumerate(LAYER_REGISTRY, 1):
         key = layer_cfg["key"]
@@ -102,18 +103,23 @@ async def run_orchestration(
         # Le callback synchrone du layer_runner → on le convertit en push async
         def make_cb(k: str):
             def cb(msg: str):
-                # On schedule l'envoi sans bloquer le thread sync
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    asyncio.ensure_future,
-                    push({"event": "progress", "layer_key": k, "message": msg,
-                          "timestamp": datetime.now(timezone.utc).isoformat()})
+                # On schedule l'envoi sur la boucle principale sans bloquer le thread sync
+                loop.call_soon_threadsafe(
+                    asyncio.create_task,
+                    push(
+                        {
+                            "event": "progress",
+                            "layer_key": k,
+                            "message": msg,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ),
                 )
             return cb
 
         # Exécution dans un thread pool pour ne pas bloquer la boucle asyncio
-        loop = asyncio.get_event_loop()
         result: LayerResult = await loop.run_in_executor(
-            None, fn, engine, aoi_id, make_cb(key)
+            None, fn, engine, project_id, aoi_id, make_cb(key)
         )
         results[key] = result
 

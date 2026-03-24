@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import geopandas as gpd
+from sqlalchemy import text
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine
@@ -23,11 +24,12 @@ if TYPE_CHECKING:
 
 def export_classement_shp(
     engine: "Engine",
-    aoi_id: str,
+    project_id: str,
     parcelles: list[dict],
     options,  # FiltreOptions
     final_radius_km: float,
     output_path: Path,
+    aoi_id: str | None = None,
 ) -> None:
     """
     Exporte les parcelles classées en un Shapefile (une couche).
@@ -35,27 +37,32 @@ def export_classement_shp(
                 surface_ha, miller, distance_km, dist_hydro_m, score, score_details.
     """
     if not parcelles:
-        return
+        raise ValueError("Liste de parcelles vide.")
 
-    idus = [p.get("idu") for p in parcelles if p.get("idu")]
+    idus = [str(p.get("idu")) for p in parcelles if p.get("idu")]
 
     if not idus:
-        return
+        raise ValueError("Aucun identifiant parcelle (idu) dans le classement.")
 
-    # Récupérer les géométries (read_postgis gère le type geometry correctement)
-    sql_geom = """
-        SELECT idu, geom_2154
-        FROM ecocompensation_results.parcelles
-        WHERE aoi_id = %(aoi_id)s AND idu = ANY(%(idus)s)
-    """
-    gdf_geom = gpd.read_postgis(
-        sql_geom, engine, geom_col="geom_2154",
-        params={"aoi_id": aoi_id, "idus": idus},
-    )
-    idu_to_geom = gdf_geom.set_index("idu", drop=False)["geom_2154"].to_dict()
-    # Clés peuvent être str ou autre selon le driver ; on accepte les deux
+    # Même logique que /geojson parcelles : lier par project_id OU aoi_id (psycopg3 + text()).
+    aoi_id_str = str(aoi_id or "")
+    sql_geom = text("""
+        SELECT p.idu, p.geom_2154
+        FROM ecocompensation_results.parcelles p
+        WHERE (p.project_id = :pid OR p.aoi_id = :aoi_id_str)
+          AND p.idu = ANY(:idus)
+    """)
+    with engine.connect() as conn:
+        gdf_geom = gpd.read_postgis(
+            sql_geom,
+            conn,
+            geom_col="geom_2154",
+            params={"pid": project_id, "aoi_id_str": aoi_id_str, "idus": idus},
+        )
+    idu_to_geom = {str(row["idu"]): row["geom_2154"] for _, row in gdf_geom.iterrows()}
+
     def get_geom(idu_val):
-        return idu_to_geom.get(idu_val) or idu_to_geom.get(str(idu_val))
+        return idu_to_geom.get(str(idu_val))
 
     # Libellés des paramètres du filtre (pour les colonnes attributaires)
     zdv_str = ", ".join(options.zdv_natures) if options.zdv_natures else "—"
@@ -108,7 +115,10 @@ def export_classement_shp(
         })
 
     if not geoms:
-        return
+        raise ValueError(
+            "Aucune géométrie parcelle trouvée en base pour ce classement. "
+            "Vérifiez que les parcelles sont bien chargées (couche parcelles / même projet ou AOI)."
+        )
 
     gdf = gpd.GeoDataFrame(
         rows_attr,

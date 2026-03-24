@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Récupère les tronçons de route BDTOPO (WFS data.geopf.fr) intersectant l'AOI
+et les insère dans ecocompensation_results.routes.
+Attributs conservés : nature, sens_de_circulation, vitesse_moyenne_vl, cleabs, nom_voie_ban_gauche.
+"""
 
 import os
 import time
@@ -10,36 +15,42 @@ import geopandas as gpd
 import requests
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from shapely import force_2d
 
 # =============================
 # CONFIG
 # =============================
 
-# WFS IGN – BDTOPO Surfaces hydrographiques
 WFS_URL = "https://data.geopf.fr/wfs/ows"
-TYPE_NAME = "BDTOPO_V3:surface_hydrographique"
-SRS_WFS = "EPSG:3857"   # comme indiqué
+TYPE_NAME = "BDTOPO_V3:troncon_de_route"
+SRS_WFS = "EPSG:3857"
 SRS_TARGET = "EPSG:2154"
 
-# Pagination WFS
+ROUTES_COLUMNS = [
+    "nature",
+    "sens_de_circulation",
+    "vitesse_moyenne_vl",
+    "cleabs",
+    "nom_voie_ban_gauche",
+]
+
 PAGE_LIMIT = 5000
 SLEEP_BETWEEN_PAGES = 2.0
 
 
 def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
-    Récupère les surfaces hydro BDTOPO intersectant l'AOI donnée
-    et les insère dans ecocompensation_results.surfaces_hydro.
+    Récupère les tronçons de route BDTOPO intersectant l'AOI
+    et les insère dans ecocompensation_results.routes.
 
     :param engine: Engine SQLAlchemy déjà connecté.
     :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
     :param aoi_id: Identifiant de l'AOI pour l'intersection géométrique.
     :param cb: Callback de log optionnel (cb(str)).
-    :return: Nombre total de surfaces insérées.
+    :return: Nombre total de tronçons insérés.
     """
     log = cb or (lambda msg: None)
 
-    # 1) AOI depuis la base (geom_2154) pour CE aoi_id
     log("📥 Chargement AOI depuis ecocompensation.aoi ...")
     aoi = gpd.read_postgis(
         """
@@ -60,14 +71,11 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         aoi = aoi.set_crs("EPSG:2154", allow_override=True)
 
     aoi_union = aoi.union_all()
-
-    # AOI en 3857 pour la BBOX WFS
     aoi_3857 = aoi.to_crs(SRS_WFS)
     minx, miny, maxx, maxy = aoi_3857.total_bounds
-    log(f"🔗 AOI utilisée pour le lien : id={aoi_id}")
+    log(f"🔗 AOI utilisée : id={aoi_id}")
     log(f"🧭 BBOX AOI en {SRS_WFS} : {minx}, {miny}, {maxx}, {maxy}")
 
-    # 3) Pagination WFS IGN avec bbox + startIndex/count
     total_inserted = 0
     page = 0
     start_index = 0
@@ -75,12 +83,12 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     with engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS ecocompensation_results;"))
         try:
-            conn.execute(text("DELETE FROM ecocompensation_results.surfaces_hydro WHERE project_id = :pid"), {"pid": project_id})
+            conn.execute(text("DELETE FROM ecocompensation_results.routes WHERE project_id = :pid"), {"pid": project_id})
         except Exception:
             pass
 
     log(
-        f"📡 Requêtes WFS BDTOPO surface_hydrographique sur BBOX AOI "
+        f"📡 Requêtes WFS BDTOPO troncon_de_route sur BBOX AOI "
         f"(pagination, PAGE_LIMIT={PAGE_LIMIT}) ..."
     )
 
@@ -115,14 +123,14 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         if gdf.crs is None or gdf.crs.to_string() != SRS_WFS:
             gdf = gdf.set_crs(SRS_WFS, allow_override=True)
 
-        log(f"🧮 Surfaces brutes dans la BBOX AOI (page {page}) : {len(gdf)}")
+        log(f"🧮 Tronçons de route bruts dans la BBOX (page {page}) : {len(gdf)}")
 
-        # 4) Reprojection en 2154, intersection exacte avec AOI
         gdf_2154 = gdf.to_crs(SRS_TARGET)
         gdf_2154 = gdf_2154.rename_geometry("geom_2154")
+        gdf_2154["geom_2154"] = gdf_2154["geom_2154"].apply(force_2d)
 
         gdf_2154 = gdf_2154[gdf_2154.geom_2154.intersects(aoi_union)]
-        log(f"🎯 Surfaces après intersection AOI (page {page}) : {len(gdf_2154)}")
+        log(f"🎯 Tronçons après intersection AOI (page {page}) : {len(gdf_2154)}")
 
         if gdf_2154.empty:
             if len(gdf) < PAGE_LIMIT:
@@ -132,14 +140,19 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             time.sleep(SLEEP_BETWEEN_PAGES)
             continue
 
-        # Liaison project_id
         gdf_2154["project_id"] = project_id
 
-        # 5) Insertion dans ecocompensation_results.surfaces_hydro
-        log("🏗️ Insertion dans ecocompensation_results.surfaces_hydro ...")
+        # Ne garder que les colonnes attendues par ecocompensation_results.routes
+        for col in ROUTES_COLUMNS:
+            if col not in gdf_2154.columns:
+                gdf_2154[col] = None
+        cols_final = ["project_id"] + ROUTES_COLUMNS + ["geom_2154"]
+        gdf_2154 = gdf_2154[[c for c in cols_final if c in gdf_2154.columns]]
+
+        log("🏗️ Insertion dans ecocompensation_results.routes ...")
         t0 = time.perf_counter()
         gdf_2154.to_postgis(
-            name="surfaces_hydro",
+            name="routes",
             con=engine,
             schema="ecocompensation_results",
             if_exists="append",
@@ -149,12 +162,11 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         t1 = time.perf_counter()
 
         log(
-            f"✅ {len(gdf_2154)} surfaces insérées (page {page}) "
-            f"dans ecocompensation_results.surfaces_hydro (en {t1 - t0:.2f} s)."
+            f"✅ {len(gdf_2154)} tronçons insérés (page {page}) "
+            f"dans ecocompensation_results.routes (en {t1 - t0:.2f} s)."
         )
         total_inserted += len(gdf_2154)
 
-        # Si la page renvoyée est incomplète, on a fini
         if len(gdf) < PAGE_LIMIT:
             log("   ✅ Dernière page incomplète → fin de pagination.")
             break
@@ -162,14 +174,11 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         start_index += PAGE_LIMIT
         time.sleep(SLEEP_BETWEEN_PAGES)
 
-    log(f"\n🎯 Ingestion terminée. Total surfaces insérées : {total_inserted}")
+    log(f"\n🎯 Ingestion terminée. Total tronçons de route insérés : {total_inserted}")
     return total_inserted
 
 
 def main():
-    """
-    Entrée CLI : construit son propre engine et utilise la dernière AOI.
-    """
     BASE_DIR = Path(__file__).resolve().parent
     load_dotenv(BASE_DIR / ".env")
 
@@ -180,7 +189,7 @@ def main():
     SUPABASE_PASSWORD = os.getenv("SUPABASE_PASSWORD")
 
     if not all([SUPABASE_HOST, SUPABASE_DB, SUPABASE_USER, SUPABASE_PASSWORD]):
-        raise RuntimeError("Variables de connexion à la base manquantes dans le .env (HYDRO).")
+        raise RuntimeError("Variables de connexion à la base manquantes dans le .env.")
 
     password_quoted = quote_plus(SUPABASE_PASSWORD)
     db_url = (
@@ -189,7 +198,6 @@ def main():
     )
     engine = create_engine(db_url)
 
-    # Dernier projet et son AOI
     with engine.begin() as conn:
         row = conn.execute(
             text(

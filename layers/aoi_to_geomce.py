@@ -22,7 +22,7 @@ Les entités intersectant l'AOI sont copiées dans le schéma
 
 Chaque table de résultats contient :
 
-    id uuid (PK), aoi_id, toutes les colonnes attributaires d'origine,
+    id uuid (PK), project_id, toutes les colonnes attributaires d'origine,
     geom_2154, created_at.
 """
 
@@ -74,7 +74,7 @@ def ensure_results_table(conn, dst_table: str):
             f"""
             CREATE TABLE IF NOT EXISTS {dst_table} (
                 id uuid NOT NULL DEFAULT gen_random_uuid(),
-                aoi_id text NOT NULL,
+                project_id uuid NULL,
                 categorie text NULL,
                 classe text NULL,
                 type text NULL,
@@ -99,20 +99,21 @@ def ensure_results_table(conn, dst_table: str):
                 ON {dst_table}
                 USING GIST (geom_2154);
 
-            CREATE INDEX IF NOT EXISTS idx_{table}_aoi
-                ON {dst_table} (aoi_id);
+            CREATE INDEX IF NOT EXISTS idx_{table}_project
+                ON {dst_table} (project_id);
             """
         )
     )
 
 
-def run(engine, aoi_id: str, cb=None) -> int:
+def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
     Intersecte l'AOI donnée avec les tables GEOMCE et insère
     dans les tables ecocompensation_results.mesures_compensatoire_*.
 
     :param engine: Engine SQLAlchemy déjà connecté.
-    :param aoi_id: Identifiant de l'AOI à traiter.
+    :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
+    :param aoi_id: Identifiant de l'AOI pour l'intersection géométrique.
     :param cb: Callback de log optionnel (cb(str)).
     :return: Nombre total d'entités insérées (toutes tables confondues).
     """
@@ -199,12 +200,12 @@ def run(engine, aoi_id: str, cb=None) -> int:
         t2 = time.perf_counter()
         with engine.begin() as conn:
             ensure_results_table(conn, dst)
-
+            conn.execute(text(f"DELETE FROM {dst} WHERE project_id = :pid"), {"pid": project_id})
             res = conn.execute(
                 text(
                     f"""
                     INSERT INTO {dst} (
-                        aoi_id,
+                        project_id,
                         categorie,
                         classe,
                         type,
@@ -223,7 +224,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
                         geom_2154
                     )
                     SELECT
-                        :aoi_id AS aoi_id,
+                        :pid AS project_id,
                         s.categorie,
                         s.classe,
                         s.type,
@@ -247,14 +248,14 @@ def run(engine, aoi_id: str, cb=None) -> int:
                     );
                     """
                 ),
-                {"aoi_id": aoi_id, "wkt_aoi": aoi_wkt},
+                {"project_id": project_id, "wkt_aoi": aoi_wkt},
             )
         t3 = time.perf_counter()
 
         rows_inserted = res.rowcount if res.rowcount is not None else count
         log(
             f"[RESULTS-{label.upper()}] {rows_inserted} entités insérées dans {dst} "
-            f"pour aoi_id={aoi_id} (en {t3 - t2:.2f} s)."
+            f"pour project_id={project_id} (en {t3 - t2:.2f} s)."
         )
         total_inserted += rows_inserted
 
@@ -284,16 +285,21 @@ def main():
     )
     engine = create_engine(db_url)
 
-    # Dernière AOI
+    # Dernier projet et son AOI
     with engine.begin() as conn:
-        aoi_id = conn.execute(
+        row = conn.execute(
             text(
-                "SELECT id FROM ecocompensation.aoi "
-                "ORDER BY created_at DESC LIMIT 1;"
+                "SELECT id, aoi_id FROM ecocompensation.projects "
+                "WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1;"
             )
-        ).scalar_one()
+        ).mappings().one_or_none()
+    if not row:
+        print("Aucun projet avec AOI trouvé.")
+        return
+    project_id = str(row["id"])
+    aoi_id = str(row["aoi_id"])
 
-    n = run(engine, str(aoi_id), cb=print)
+    n = run(engine, project_id, aoi_id, cb=print)
     print(f"Total inséré (toutes tables GEOMCE) : {n}")
 
 

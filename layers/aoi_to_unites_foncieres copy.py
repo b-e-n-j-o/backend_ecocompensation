@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+aoi_to_unites_foncieres.py  (schéma v2 — une ligne par parcelle membre)
+========================================================================
+
+Schéma cible :
+    ecocompensation_results.unites_foncieres
+        id, project_id, uf_id, siren, denomination, forme_juridique,
+        nb_parcelles, surface_ha_uf,          ← infos cluster répétées
+        idu, surface_ha, geom_2154            ← infos parcelle individuelle
+
+Une UF de 3 parcelles → 3 lignes avec le même uf_id.
+
+Deux bases distinctes :
+  - engine_ppm  : contient public.parcelles_personnes_morales  (lecture seule)
+  - engine_core : contient ecocompensation.* + ecocompensation_results.*  (lecture/écriture)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from collections import defaultdict
+from pathlib import Path
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger(__name__)
+
+PARCELLES_PM_TABLE = os.getenv("PARCELLES_PM_TABLE", "public.parcelles_personnes_morales")
+
+
+# ─────────────────────────────────────────────
+# Union-Find
+# ─────────────────────────────────────────────
+
+class UnionFind:
+    def __init__(self):
+        self._parent: dict[str, str] = {}
+
+    def find(self, x: str) -> str:
+        if x not in self._parent:
+            self._parent[x] = x
+        if self._parent[x] != x:
+            self._parent[x] = self.find(self._parent[x])
+        return self._parent[x]
+
+    def union(self, a: str, b: str):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self._parent[rb] = ra
+
+    def clusters(self, nodes: list[str]) -> dict[str, list[str]]:
+        groups: dict[str, list[str]] = defaultdict(list)
+        for n in nodes:
+            groups[self.find(n)].append(n)
+        return dict(groups)
+
+
+# ─────────────────────────────────────────────
+# Helpers DB — base ecocompensation (core)
+# ─────────────────────────────────────────────
+
+def _get_aoi_geom_wkt_2154(conn_core, aoi_id: str) -> str:
+    row = conn_core.execute(
+        text("SELECT ST_AsText(geom_2154) FROM ecocompensation.aoi WHERE id = :aid"),
+        {"aid": aoi_id},
+    ).one_or_none()
+    if not row or not row[0]:
+        raise RuntimeError(f"AOI introuvable pour aoi_id={aoi_id}")
+    return str(row[0])
+
+
+# ─────────────────────────────────────────────
+# Helpers DB — base PPM (lecture seule)
+# ─────────────────────────────────────────────
+
+def _count_ppm_in_aoi(conn_ppm, aoi_wkt: str) -> tuple[int, int]:
+    row = conn_ppm.execute(
+        text(f"""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE geom_2154 && ST_GeomFromText(:w, 2154)
+                      AND ST_Intersects(geom_2154, ST_GeomFromText(:w, 2154))
+                      AND siren IS NOT NULL AND siren != '' AND geom_2154 IS NOT NULL
+                ) AS total,
+                COUNT(*) FILTER (
+                    WHERE code_insee LIKE '33%'
+                      AND geom_2154 && ST_GeomFromText(:w, 2154)
+                      AND ST_Intersects(geom_2154, ST_GeomFromText(:w, 2154))
+                      AND siren IS NOT NULL AND siren != '' AND geom_2154 IS NOT NULL
+                ) AS kept
+            FROM {PARCELLES_PM_TABLE}
+        """),
+        {"w": aoi_wkt},
+    ).one()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def _fetch_ppm_in_aoi(conn_ppm, aoi_wkt: str) -> list[dict]:
+    """
+    Récupère toutes les parcelles PM dans l'AOI avec leur géométrie individuelle.
+    On ramène geom_wkt pour l'insérer ensuite dans la base core.
+    """
+    rows = conn_ppm.execute(
+        text(f"""
+            SELECT
+                idu,
+                siren,
+                denomination,
+                forme_juridique,
+                ST_Area(geom_2154)   AS area_m2,
+                ST_AsText(geom_2154) AS geom_wkt
+            FROM {PARCELLES_PM_TABLE}
+            WHERE code_insee LIKE '33%'
+              AND geom_2154 && ST_GeomFromText(:w, 2154)
+              AND ST_Intersects(geom_2154, ST_GeomFromText(:w, 2154))
+              AND siren IS NOT NULL AND siren != ''
+              AND geom_2154 IS NOT NULL
+        """),
+        {"w": aoi_wkt},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _find_touching_pairs_sql(conn_ppm, idus: list[str]) -> list[tuple[str, str]]:
+    """Paires contiguës parmi les IDU donnés (frontière linéaire, pas juste un coin)."""
+    if len(idus) < 2:
+        return []
+    rows = conn_ppm.execute(
+        text(f"""
+            SELECT a.idu, b.idu
+            FROM {PARCELLES_PM_TABLE} a
+            JOIN {PARCELLES_PM_TABLE} b
+              ON a.idu < b.idu
+             AND a.geom_2154 && b.geom_2154
+             AND (
+                 ST_Touches(a.geom_2154, b.geom_2154)
+                 OR ST_Relate(a.geom_2154, b.geom_2154, 'F***1****')
+             )
+            WHERE a.idu = ANY(:idus)
+              AND b.idu = ANY(:idus)
+        """),
+        {"idus": idus},
+    ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+def _compute_union_surface_sql(conn_ppm, idus: list[str]) -> float:
+    """Surface de l'union géométrique d'un cluster (en m²)."""
+    row = conn_ppm.execute(
+        text(f"""
+            SELECT ST_Area(ST_Union(geom_2154))
+            FROM {PARCELLES_PM_TABLE}
+            WHERE idu = ANY(:idus)
+        """),
+        {"idus": idus},
+    ).scalar()
+    return float(row or 0.0)
+
+
+# ─────────────────────────────────────────────
+# run()
+# ─────────────────────────────────────────────
+
+def run(engine_core, project_id: str, aoi_id: str, cb=None, engine_ppm=None) -> int:
+    """
+    Construit ecocompensation_results.unites_foncieres (schéma v2).
+
+    :param engine_core: Engine vers la base ecocompensation (AOI + résultats).
+    :param engine_ppm:  Engine vers la base parcelles_personnes_morales.
+                        Si None, on utilise engine_core (même base).
+    :return: Nombre de lignes insérées (= somme des nb_parcelles de toutes les UF).
+    """
+    log = cb or logger.info
+    engine_ppm = engine_ppm or engine_core
+    t0 = time.perf_counter()
+
+    # 1. Supprimer les anciennes lignes pour ce projet
+    with engine_core.begin() as conn:
+        deleted = conn.execute(
+            text("DELETE FROM ecocompensation_results.unites_foncieres WHERE project_id = :pid"),
+            {"pid": project_id},
+        ).rowcount
+    if deleted:
+        log(f"🧹 {deleted} lignes supprimées (projet {project_id})")
+
+    # 2. Récupérer la géométrie de l'AOI
+    with engine_core.begin() as conn:
+        aoi_wkt = _get_aoi_geom_wkt_2154(conn, aoi_id)
+
+    # 3. Comptage diagnostique
+    log("🔍 Comptage parcelles PM dans l'AOI...")
+    with engine_ppm.begin() as conn:
+        total, kept = _count_ppm_in_aoi(conn, aoi_wkt)
+    log(f"   → sans filtre INSEE : {total:,}  |  code_insee 33% : {kept:,}")
+
+    # 4. Fetch toutes les parcelles PM dans l'AOI (avec geom individuelle)
+    log("🔍 Chargement des parcelles PM (géométries individuelles)...")
+    t_fetch = time.perf_counter()
+    with engine_ppm.begin() as conn:
+        parcelles = _fetch_ppm_in_aoi(conn, aoi_wkt)
+    log(f"   → {len(parcelles):,} parcelles chargées en {time.perf_counter() - t_fetch:.1f}s")
+
+    if not parcelles:
+        log("⚠️ Aucune parcelle PM dans l'AOI.")
+        return 0
+
+    # 5. Grouper par SIREN, ne garder que les SIREN avec ≥ 2 parcelles
+    by_siren: dict[str, list[dict]] = defaultdict(list)
+    for p in parcelles:
+        by_siren[p["siren"]].append(p)
+    sirens_multi = {s: ps for s, ps in by_siren.items() if len(ps) >= 2}
+    log(f"   → {len(by_siren):,} SIREN  |  {len(sirens_multi):,} avec ≥ 2 parcelles")
+
+    if not sirens_multi:
+        log("⚠️ Aucun SIREN multi-parcelles → pas d'UF possible.")
+        return 0
+
+    # 6. Clustering par contigüité + calcul surface union
+    log("🔗 Détection des clusters contigus par SIREN...")
+    t_clust = time.perf_counter()
+
+    all_rows: list[dict] = []
+    by_size: dict[int, int] = defaultdict(int)
+
+    with engine_ppm.begin() as conn_ppm:
+        for siren, ps in sirens_multi.items():
+            idus = [p["idu"] for p in ps]
+            denom = ps[0].get("denomination") or ""
+            forme = ps[0].get("forme_juridique") or ""
+            idu_to_p = {p["idu"]: p for p in ps}
+
+            # Paires contiguës via SQL (index GIST)
+            pairs = _find_touching_pairs_sql(conn_ppm, idus)
+
+            # Union-Find → clusters contigus
+            uf = UnionFind()
+            for idu in idus:
+                uf.find(idu)
+            for a, b in pairs:
+                uf.union(a, b)
+
+            groups = uf.clusters(idus)
+            cluster_idx = 0
+
+            for root, members in groups.items():
+                if len(members) < 2:
+                    continue
+
+                cluster_idx += 1
+                uf_id = f"{siren}_{cluster_idx:03d}"
+                nb = len(members)
+
+                # Surface de l'union du cluster (sans chevauchement)
+                surface_ha_uf = round(
+                    _compute_union_surface_sql(conn_ppm, members) / 10_000, 4
+                )
+                by_size[nb] += 1
+
+                # Une ligne par parcelle membre — géométrie individuelle conservée
+                for idu in members:
+                    p = idu_to_p[idu]
+                    area_ha = round(float(p.get("area_m2") or 0) / 10_000, 4)
+                    all_rows.append({
+                        "project_id":    project_id,
+                        "uf_id":         uf_id,
+                        "siren":         siren,
+                        "denomination":  denom,
+                        "forme_juridique": forme,
+                        "nb_parcelles":  nb,
+                        "surface_ha_uf": surface_ha_uf,
+                        "idu":           idu,
+                        "surface_ha":    area_ha,
+                        "geom_wkt":      p["geom_wkt"],
+                    })
+
+    nb_ufs = sum(by_size.values())
+    log(f"   → {nb_ufs} UF  |  {len(all_rows)} lignes à insérer")
+    log(f"   → Clustering en {time.perf_counter() - t_clust:.1f}s")
+
+    # 7. Insertion en batch (500 lignes par transaction)
+    log("💾 Insertion dans ecocompensation_results.unites_foncieres...")
+    t_ins = time.perf_counter()
+    BATCH = 500
+    inserted = 0
+
+    with engine_core.begin() as conn:
+        for i in range(0, len(all_rows), BATCH):
+            batch = all_rows[i:i + BATCH]
+            conn.execute(
+                text("""
+                    INSERT INTO ecocompensation_results.unites_foncieres (
+                        project_id, uf_id, siren, denomination, forme_juridique,
+                        nb_parcelles, surface_ha_uf,
+                        idu, surface_ha, geom_2154
+                    ) VALUES (
+                        :project_id, :uf_id, :siren, :denomination, :forme_juridique,
+                        :nb_parcelles, :surface_ha_uf,
+                        :idu, :surface_ha,
+                        ST_GeomFromText(:geom_wkt, 2154)
+                    )
+                """),
+                batch,
+            )
+            inserted += len(batch)
+
+    log(f"   → {inserted:,} lignes insérées en {time.perf_counter() - t_ins:.1f}s")
+    log(f"✅ Terminé en {time.perf_counter() - t0:.1f}s total")
+
+    # 8. Stats
+    log("\n📊 Répartition des UF par nombre de parcelles :")
+    for k in sorted(by_size):
+        log(f"   {k:>4} parcelles : {by_size[k]:>5} UF")
+
+    return inserted
+
+
+# ─────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────
+
+def main():
+    BASE_DIR = Path(__file__).resolve().parent
+    load_dotenv(BASE_DIR / ".env")
+
+    from urllib.parse import quote_plus
+
+    def make_engine(host, port, db, user, password):
+        return create_engine(
+            f"postgresql+psycopg://{user}:{quote_plus(password)}@{host}:{port}/{db}"
+        )
+
+    # Base ecocompensation (core)
+    engine_core = make_engine(
+        os.getenv("SUPABASE_HOST"),
+        os.getenv("SUPABASE_PORT", "6543"),
+        os.getenv("SUPABASE_DB", "postgres"),
+        os.getenv("SUPABASE_USER"),
+        os.getenv("SUPABASE_PASSWORD"),
+    )
+
+    # Base PPM — fallback sur les mêmes variables si pas de SUPABASE_PPM_HOST
+    ppm_host = os.getenv("SUPABASE_PPM_HOST") or os.getenv("SUPABASE_HOST")
+    engine_ppm = make_engine(
+        ppm_host,
+        os.getenv("SUPABASE_PPM_PORT") or os.getenv("SUPABASE_PORT", "6543"),
+        os.getenv("SUPABASE_PPM_DB") or os.getenv("SUPABASE_DB", "postgres"),
+        os.getenv("SUPABASE_PPM_USER") or os.getenv("SUPABASE_USER"),
+        os.getenv("SUPABASE_PPM_PASSWORD") or os.getenv("SUPABASE_PASSWORD"),
+    )
+
+    # Projet cible — AOI forcée (passage en dur demandé)
+    aoi_id_forced = "9eecf06a-6227-4044-bc28-ca9e7978704a"
+
+    with engine_core.begin() as conn:
+        if aoi_id_forced:
+            row = conn.execute(
+                text("SELECT id, aoi_id FROM ecocompensation.projects WHERE aoi_id = :aid ORDER BY created_at DESC LIMIT 1"),
+                {"aid": aoi_id_forced},
+            ).mappings().one_or_none()
+        else:
+            row = conn.execute(
+                text("SELECT id, aoi_id FROM ecocompensation.projects WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1")
+            ).mappings().one_or_none()
+
+    if not row:
+        print("Aucun projet trouvé.")
+        return
+
+    project_id = str(row["id"])
+    aoi_id = str(row["aoi_id"])
+    print(f"🔗 Projet : {project_id} | AOI : {aoi_id}")
+
+    n = run(engine_core, project_id, aoi_id, cb=print, engine_ppm=engine_ppm)
+    print(f"\nTotal lignes insérées : {n}")
+
+
+if __name__ == "__main__":
+    main()

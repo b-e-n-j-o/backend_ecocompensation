@@ -10,12 +10,13 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 
-def run(engine, aoi_id: str, cb=None) -> int:
+def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
-    Lance le traitement AOI → ecocompensation_results.zone_humide pour l'aoi_id donné.
+    Lance le traitement AOI → ecocompensation_results.zone_humide pour le projet donné.
 
     :param engine: Engine SQLAlchemy déjà connecté.
-    :param aoi_id: Identifiant de l'AOI à traiter.
+    :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
+    :param aoi_id: Identifiant de l'AOI pour l'intersection géométrique.
     :param cb: Callback de log optionnel (cb(str)).
     :return: Nombre d'entités insérées.
     """
@@ -82,7 +83,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
 
                 CREATE TABLE IF NOT EXISTS ecocompensation_results.zone_humide (
                     id uuid NOT NULL DEFAULT gen_random_uuid(),
-                    aoi_id text NOT NULL,
+                    project_id uuid NULL,
                     source text NOT NULL,
                     inventaire_id text NULL,
                     libelle text NULL,
@@ -96,8 +97,8 @@ def run(engine, aoi_id: str, cb=None) -> int:
                     ON ecocompensation_results.zone_humide
                     USING GIST (geom_2154);
 
-                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_zh_aoi
-                    ON ecocompensation_results.zone_humide (aoi_id);
+                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_zh_project
+                    ON ecocompensation_results.zone_humide (project_id);
                 """
             )
         )
@@ -107,7 +108,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
             text(
                 """
                 INSERT INTO ecocompensation_results.zone_humide (
-                    aoi_id,
+                    project_id,
                     source,
                     inventaire_id,
                     libelle,
@@ -115,7 +116,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
                     geom_2154
                 )
                 SELECT
-                    :aoi_id AS aoi_id,
+                    :pid AS project_id,
                     z.source,
                     z.inventaire_id,
                     z.libelle,
@@ -128,7 +129,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
                 );
                 """
             ),
-            {"aoi_id": aoi_id, "wkt_aoi": aoi_wkt},
+            {"pid": project_id, "wkt_aoi": aoi_wkt},
         )
 
     t3 = time.perf_counter()
@@ -136,7 +137,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
     rows_inserted = res.rowcount if res.rowcount is not None else count
     log(
         f"[RESULTS] {rows_inserted} entités insérées dans "
-        f"ecocompensation_results.zone_humide pour aoi_id={aoi_id} "
+        f"ecocompensation_results.zone_humide pour project_id={project_id} "
         f"(en {t3 - t2:.2f} s)."
     )
     return rows_inserted
@@ -167,16 +168,21 @@ def main() -> None:
     )
     engine = create_engine(db_url)
 
-    # Dernière AOI
+    # Dernier projet et son AOI
     with engine.begin() as conn:
-        aoi_id = conn.execute(
+        row = conn.execute(
             _text(
-                "SELECT id FROM ecocompensation.aoi "
-                "ORDER BY created_at DESC LIMIT 1;"
+                "SELECT id, aoi_id FROM ecocompensation.projects "
+                "WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1;"
             )
-        ).scalar_one()
+        ).mappings().one_or_none()
+    if not row:
+        print("Aucun projet avec AOI trouvé.")
+        return
+    project_id = str(row["id"])
+    aoi_id = str(row["aoi_id"])
 
-    n = run(engine, str(aoi_id), cb=print)
+    n = run(engine, project_id, aoi_id, cb=print)
     print(f"Total inséré : {n}")
 
 

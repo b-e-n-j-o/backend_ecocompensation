@@ -37,13 +37,14 @@ SRS_WFS = "EPSG:3857"   # SCR de la couche (Pseudo-Mercator)
 SRS_TARGET = "EPSG:2154"
 CAP = 5000  # taille max de batch pour le carroyage
 
-def run(engine, aoi_id: str, cb=None) -> int:
+def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
     Récupère les EBC intersectant l'AOI donnée et les insère
     dans ecocompensation_results.ebc.
 
     :param engine: Engine SQLAlchemy déjà connecté.
-    :param aoi_id: Identifiant de l'AOI à traiter.
+    :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
+    :param aoi_id: Identifiant de l'AOI pour l'intersection géométrique.
     :param cb: Callback de log optionnel (cb(str)).
     :return: Nombre d'entités insérées.
     """
@@ -75,14 +76,11 @@ def run(engine, aoi_id: str, cb=None) -> int:
     aoi_3857 = aoi.to_crs(SRS_WFS)
     minx, miny, maxx, maxy = aoi_3857.total_bounds
     bbox_3857 = (minx, miny, maxx, maxy)
-    log("AOI utilisée pour le lien : id=%s", aoi_id)
-    log("BBOX AOI (EPSG:3857) : %s", bbox_3857)
+    log(f"AOI utilisée pour le lien : id={aoi_id}")
+    log(f"BBOX AOI (EPSG:3857) : {bbox_3857}")
 
     # 3) Récupération prescriptions surfaciques par carroyage adaptatif
-    log(
-        "Récupération prescriptions surfaciques (wfs_du:prescription_surf, carroyage adaptatif, cap=%s)...",
-        CAP,
-    )
+    log(f"Récupération prescriptions surfaciques (wfs_du:prescription_surf, carroyage adaptatif, cap={CAP})...")
 
     # On récupère la couche WFS sur la BBOX de l'AOI, SANS filtre côté WFS.
     gdf, _ = harvest_adaptive(URL, LAYER, bbox_3857, srs=SRS_WFS, cap=CAP)
@@ -100,7 +98,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
     mask = lib.str.contains("boise") | lib.str.contains("boisé")
     gdf = gdf[mask].copy()
 
-    log("Prescriptions après filtre 'boisé/boise' sur libelle : %s", len(gdf))
+    log(f"Prescriptions après filtre 'boisé/boise' sur libelle : {len(gdf)}")
     if gdf.empty:
         log("Aucune prescription 'boisée' trouvée dans la BBOX.")
         return 0
@@ -109,13 +107,13 @@ def run(engine, aoi_id: str, cb=None) -> int:
     gdf_2154 = gdf.to_crs(SRS_TARGET)
     gdf_2154 = gdf_2154.rename_geometry("geom_2154")
     gdf_2154 = gdf_2154[gdf_2154.geom_2154.intersects(aoi_union)]
-    log("Entités EBC après intersection AOI : %s", len(gdf_2154))
+    log(f"Entités EBC après intersection AOI : {len(gdf_2154)}")
 
     if gdf_2154.empty:
         log("Aucune entité EBC n'intersecte l'AOI.")
         return 0
 
-    gdf_2154["aoi_id"] = aoi_id
+    gdf_2154["project_id"] = project_id
 
     # 6) Création table results et insertion dans ecocompensation_results.ebc
     with engine.begin() as conn:
@@ -125,7 +123,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
                 CREATE SCHEMA IF NOT EXISTS ecocompensation_results;
                 CREATE TABLE IF NOT EXISTS ecocompensation_results.ebc (
                     id uuid NOT NULL DEFAULT gen_random_uuid(),
-                    aoi_id text NOT NULL,
+                    project_id uuid NULL,
                     libelle text,
                     insee text,
                     nature text,
@@ -139,11 +137,12 @@ def run(engine, aoi_id: str, cb=None) -> int:
                 );
                 CREATE INDEX IF NOT EXISTS idx_ecocomp_results_ebc_geom
                     ON ecocompensation_results.ebc USING GIST (geom_2154);
-                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_ebc_aoi
-                    ON ecocompensation_results.ebc (aoi_id);
+                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_ebc_project
+                    ON ecocompensation_results.ebc (project_id);
                 """
             )
         )
+        conn.execute(text("DELETE FROM ecocompensation_results.ebc WHERE project_id = :pid"), {"pid": project_id})
 
     # Colonnes qu'on envoie en base
     cols = []
@@ -151,7 +150,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
         if c in gdf_2154.columns:
             cols.append(c)
 
-    out = gdf_2154[["aoi_id"] + cols + ["geom_2154"]].copy()
+    out = gdf_2154[["project_id"] + cols + ["geom_2154"]].copy()
 
     out.to_postgis(
         name="ebc",
@@ -161,11 +160,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
         index=False,
         chunksize=2000,
     )
-    log(
-        "%s entités EBC insérées dans ecocompensation_results.ebc pour aoi_id=%s.",
-        len(out),
-        aoi_id,
-    )
+    log(f"{len(out)} entités EBC insérées dans ecocompensation_results.ebc pour project_id={project_id}.")
     return len(out)
 
 
@@ -191,16 +186,21 @@ def main():
     )
     engine = create_engine(db_url)
 
-    # Dernière AOI
+    # Dernier projet et son AOI
     with engine.begin() as conn:
-        aoi_id = conn.execute(
+        row = conn.execute(
             text(
-                "SELECT id FROM ecocompensation.aoi "
-                "ORDER BY created_at DESC LIMIT 1;"
+                "SELECT id, aoi_id FROM ecocompensation.projects "
+                "WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1;"
             )
-        ).scalar_one()
+        ).mappings().one_or_none()
+    if not row:
+        print("Aucun projet avec AOI trouvé.")
+        return
+    project_id = str(row["id"])
+    aoi_id = str(row["aoi_id"])
 
-    n = run(engine, str(aoi_id), cb=logging.info)
+    n = run(engine, project_id, aoi_id, cb=logging.info)
     print(f"Total EBC insérées : {n}")
 
 

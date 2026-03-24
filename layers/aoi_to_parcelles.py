@@ -31,7 +31,7 @@ logging.basicConfig(
 
 
 def create_results_table_if_not_exists(conn):
-    """Crée ecocompensation_results.parcelles si besoin (même structure que ecocompensation.parcelles + aoi_id)."""
+    """Crée ecocompensation_results.parcelles si besoin (même structure que ecocompensation.parcelles + project_id)."""
     conn.execute(text("CREATE SCHEMA IF NOT EXISTS ecocompensation_results;"))
 
     conn.execute(
@@ -52,7 +52,7 @@ def create_results_table_if_not_exists(conn):
                 contenance double precision NULL,
                 code_insee text NULL,
                 geom_2154 geometry(Geometry, 2154) NULL,
-                aoi_id text NULL
+                project_id uuid NULL
             );
             """
         )
@@ -71,19 +71,20 @@ def create_results_table_if_not_exists(conn):
     conn.execute(
         text(
             """
-            CREATE INDEX IF NOT EXISTS idx_parcelles_results_aoi_id
-                ON ecocompensation_results.parcelles (aoi_id);
+            CREATE INDEX IF NOT EXISTS idx_parcelles_results_project_id
+                ON ecocompensation_results.parcelles (project_id);
             """
         )
     )
 
 
-def run(engine, aoi_id: str, cb=None) -> int:
+def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
-    Construit ecocompensation_results.parcelles pour l'AOI donnée.
+    Construit ecocompensation_results.parcelles pour le projet donné (géométrie = AOI).
 
     :param engine: Engine SQLAlchemy déjà connecté.
-    :param aoi_id: Identifiant de l'AOI à traiter.
+    :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
+    :param aoi_id: Identifiant de l'AOI pour l'intersection géométrique.
     :param cb: Callback de log optionnel (cb(str)).
     :return: Nombre de parcelles insérées.
     """
@@ -114,14 +115,14 @@ def run(engine, aoi_id: str, cb=None) -> int:
     with engine.begin() as conn:
         create_results_table_if_not_exists(conn)
 
-    # 3) Supprimer les anciennes parcelles pour cette AOI (éviter doublons)
+    # 3) Supprimer les anciennes parcelles pour ce projet (éviter doublons)
     with engine.begin() as conn:
         deleted = conn.execute(
-            text("DELETE FROM ecocompensation_results.parcelles WHERE aoi_id = :aid"),
-            {"aid": aoi_id},
+            text("DELETE FROM ecocompensation_results.parcelles WHERE project_id = :pid"),
+            {"pid": project_id},
         ).rowcount
     if deleted and deleted > 0:
-        log(f"🧹 {deleted:,} anciennes parcelles supprimées pour aoi_id={aoi_id}")
+        log(f"🧹 {deleted:,} anciennes parcelles supprimées pour project_id={project_id}")
 
     # 4) Intersection en SQL : parcelles en base qui intersectent l'AOI → results
     # Optimisations :
@@ -142,21 +143,21 @@ def run(engine, aoi_id: str, cb=None) -> int:
                 INSERT INTO ecocompensation_results.parcelles (
                     id, gid, numero, feuille, section, code_dep, nom_com,
                     code_com, com_abs, code_arr, idu, contenance, code_insee,
-                    geom_2154, aoi_id
+                    geom_2154, project_id
                 )
                 SELECT
                     p.id, p.gid, p.numero, p.feuille, p.section, p.code_dep,
                     p.nom_com, p.code_com, p.com_abs, p.code_arr, p.idu,
                     p.contenance, p.code_insee,
                     ST_Multi(p.geom_2154) AS geom_2154,
-                    :aid AS aoi_id
+                    :pid AS project_id
                 FROM ecocompensation.parcelles p
                 CROSS JOIN aoi
                 WHERE p.geom_2154 && aoi.geom_2154
                   AND ST_Intersects(p.geom_2154, aoi.geom_2154);
                 """
             ),
-            {"aid": aoi_id},
+            {"aid": aoi_id, "pid": project_id},
         )
         inserted = result.rowcount if result.rowcount is not None else 0
 
@@ -164,7 +165,7 @@ def run(engine, aoi_id: str, cb=None) -> int:
 
     log(
         f"✅ {inserted:,} parcelles insérées dans ecocompensation_results.parcelles "
-        f"pour aoi_id={aoi_id} (en {t1 - t0:.2f} s)."
+        f"pour project_id={project_id} (en {t1 - t0:.2f} s)."
     )
 
     # 5) Taille de la table results (best-effort)
@@ -206,16 +207,21 @@ def main():
     )
     engine = create_engine(db_url)
 
-    # Dernière AOI
+    # Dernier projet et son AOI
     with engine.begin() as conn:
-        aoi_id = conn.execute(
+        row = conn.execute(
             text(
-                "SELECT id FROM ecocompensation.aoi "
-                "ORDER BY created_at DESC LIMIT 1;"
+                "SELECT id, aoi_id FROM ecocompensation.projects "
+                "WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1;"
             )
-        ).scalar_one()
+        ).mappings().one_or_none()
+    if not row:
+        print("Aucun projet avec AOI trouvé.")
+        return
+    project_id = str(row["id"])
+    aoi_id = str(row["aoi_id"])
 
-    n = run(engine, str(aoi_id), cb=print)
+    n = run(engine, project_id, aoi_id, cb=print)
     print(f"Total inséré : {n}")
 
 

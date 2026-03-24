@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-aoi_to_patrimoine_naturel.py
-============================
+aoi_to_znieff.py
+================
 
-À partir d'une AOI, interroge les couches
-de patrimoine naturel (PNR, PN, RNN, Natura 2000, ZNIEFF, etc.) via WFS
-avec carroyage adaptatif, puis insère dans :
+À partir d'une AOI, interroge uniquement les couches ZNIEFF (type I et II)
+via WFS avec carroyage adaptatif, puis insère dans :
 
-    ecocompensation_results.patrimoine_naturel
+    ecocompensation_results.znieff
 
 uniquement les entités qui intersectent l'AOI.
 """
@@ -34,60 +33,25 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 # -----------------------------
 
 CAP = 5000
-TABLE_FINAL = "ecocompensation_results.patrimoine_naturel"
+TABLE_FINAL = "ecocompensation_results.znieff"
 
 COUCHES = [
-    {"name": "Parcs naturels régionaux",
-     "layer": "PROTECTEDAREAS.PNR:pnr",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom"},
-    {"name": "Parcs nationaux",
-     "layer": "PROTECTEDAREAS.PN:pn",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom"},
-    {"name": "Réserves naturelles nationales",
-     "layer": "PROTECTEDAREAS.RNN:rnn",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom"},
-    {"name": "Sites Natura 2000 (Habitats)",
-     "layer": "PROTECTEDAREAS.SIC:sic",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "sitename"},
-    {"name": "Sites Natura 2000 (Oiseaux)",
-     "layer": "PROTECTEDAREAS.ZPS:zps",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "sitename"},
-    {"name": "Réserves naturelles régionales",
-     "layer": "PROTECTEDSITES.MNHN.RESERVES-REGIONALES:rnr",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom"},
-    {"name": "Périmètres de protection de réserves naturelles (PPRNN)",
-     "layer": "PROTECTEDAREAS.MNHN.RN.PERIMETER:pprnn",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom"},
-    {"name": "Inventaire National du Patrimoine Géologique (INPG)",
-     "layer": "PROTECTEDAREAS.INPG:inpg",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom_site"},
-    {"name": "Prairies et pâturages sensibles",
-     "layer": "PRAIRIES.SENSIBLES.BCAE:prairies_sensibles",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": None, "id_col": "id"},
-    {"name": "Terrains des Conservatoires d’espaces naturels",
-     "layer": "PROTECTEDAREAS.MNHN.CONSERVATOIRES:cen",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom", "id_col": "id_mnhn"},
-    {"name": "Conservatoire du littoral - sites sous responsabilité du conservatoire",
-     "layer": "PROTECTEDAREAS.MNHN.CDL.PARCELS:cdl",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "nom", "id_col": "id_mnhn"},
-    {"name": "Zones humides et tourbières BCAE",
-     "layer": "TOURBIERES_ZONES-HUMIDES.BCAE:bcae",
-     "url": "https://data.geopf.fr/wfs/ows",
-     "nom_col": "type_zone"},
+    {
+        "name": "ZNIEFF type I",
+        "layer": "patrinat_znieff1:znieff1",
+        "url": "https://data.geopf.fr/wfs/ows",
+        "nom_col": "nom_site",
+    },
+    {
+        "name": "ZNIEFF type II",
+        "layer": "patrinat_znieff2:znieff2",
+        "url": "https://data.geopf.fr/wfs/ows",
+        "nom_col": "nom_site",
+    },
 ]
 
 BASE_DIR = Path(__file__).resolve().parent
+
 
 # -----------------------------
 # Helpers
@@ -118,7 +82,9 @@ def fetch_layer(cfg: dict, bbox_wgs84, log=None) -> gpd.GeoDataFrame:
     """Carroyage + dédup + sélection colonnes, limité à la BBOX de l'AOI."""
     _log = log or logging.info
     _log(f"=== 🔎 {cfg['layer']} ===")
-    gdf, _ = harvest_adaptive(cfg["url"], cfg["layer"], bbox_wgs84, srs="EPSG:4326", cap=CAP)
+    gdf, _ = harvest_adaptive(
+        cfg["url"], cfg["layer"], bbox_wgs84, srs="EPSG:4326", cap=CAP
+    )
     if gdf.empty:
         _log(f"⚠️ Pas de données pour {cfg['layer']} dans la BBOX AOI")
         return gpd.GeoDataFrame()
@@ -141,8 +107,8 @@ def fetch_layer(cfg: dict, bbox_wgs84, log=None) -> gpd.GeoDataFrame:
 
 def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
-    Récupère le patrimoine naturel intersectant l'AOI donnée
-    et l'insère dans ecocompensation_results.patrimoine_naturel.
+    Récupère les ZNIEFF intersectant l'AOI donnée
+    et les insère dans ecocompensation_results.znieff.
 
     :param engine: Engine SQLAlchemy déjà connecté.
     :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
@@ -166,7 +132,9 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     )
 
     if aoi.empty:
-        log(f"⚠️ Aucune AOI trouvée dans ecocompensation.aoi pour id={aoi_id}, annulation.")
+        log(
+            f"⚠️ Aucune AOI trouvée dans ecocompensation.aoi pour id={aoi_id}, annulation."
+        )
         return 0
 
     if aoi.crs is None or aoi.crs.to_string() != "EPSG:2154":
@@ -180,7 +148,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     log(f"🔗 AOI utilisée : id={aoi_id}")
     log(f"🧭 BBOX AOI en WGS84 : {bbox_wgs84}")
 
-    # 2) Collecte des couches PN / Natura / ZNIEFF... sur la BBOX AOI
+    # 2) Collecte des couches ZNIEFF sur la BBOX AOI
     all_parts: list[gpd.GeoDataFrame] = []
     for i, cfg in enumerate(COUCHES, 1):
         log(f"[{i}/{len(COUCHES)}] {cfg['name']}...")
@@ -189,7 +157,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             all_parts.append(gdf)
 
     if not all_parts:
-        log("⚠️ Aucune géométrie de patrimoine naturel collectée dans la BBOX AOI.")
+        log("⚠️ Aucune géométrie ZNIEFF collectée dans la BBOX AOI.")
         return 0
 
     gdf_final = pd.concat(all_parts, ignore_index=True)
@@ -200,13 +168,13 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     before = len(gdf_2154)
     gdf_2154 = gdf_2154[gdf_2154.geom_2154.intersects(aoi_union)]
     after = len(gdf_2154)
-    log(f"🎯 Patrimoine naturel intersectant l'AOI : {after}/{before} entités")
+    log(f"🎯 ZNIEFF intersectant l'AOI : {after}/{before} entités")
 
     if gdf_2154.empty:
-        log("⚠️ Aucune entité de patrimoine naturel n'intersecte l'AOI.")
+        log("⚠️ Aucune entité ZNIEFF n'intersecte l'AOI.")
         return 0
 
-    # 4) Ajout de project_id et insertion dans ecocompensation_results.patrimoine_naturel
+    # 4) Ajout de project_id et insertion dans ecocompensation_results.znieff
     gdf_2154["project_id"] = project_id
 
     with engine.begin() as conn:
@@ -226,21 +194,23 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                     PRIMARY KEY (id)
                 );
 
-                CREATE INDEX IF NOT EXISTS patrimoine_naturel_geom_gix
+                CREATE INDEX IF NOT EXISTS znieff_geom_gix
                     ON {TABLE_FINAL}
                     USING GIST (geom_2154);
 
-                CREATE INDEX IF NOT EXISTS patrimoine_naturel_project_idx
+                CREATE INDEX IF NOT EXISTS znieff_project_idx
                     ON {TABLE_FINAL} (project_id);
                 """
             )
         )
         conn.execute(text(f"DELETE FROM {TABLE_FINAL} WHERE project_id = :pid"), {"pid": project_id})
 
-    log("🏗️ Insertion dans ecocompensation_results.patrimoine_naturel ...")
+    log("🏗️ Insertion dans ecocompensation_results.znieff ...")
     t0 = datetime.now().timestamp()
-    gdf_2154[["project_id", "uid", "type_patrimoine", "nom", "updated_at", "geom_2154"]].to_postgis(
-        name="patrimoine_naturel",
+    gdf_2154[
+        ["project_id", "uid", "type_patrimoine", "nom", "updated_at", "geom_2154"]
+    ].to_postgis(
+        name="znieff",
         con=engine,
         schema="ecocompensation_results",
         if_exists="append",
@@ -250,7 +220,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     t1 = datetime.now().timestamp()
     n = len(gdf_2154)
     log(
-        f"✅ {n} entités insérées dans ecocompensation_results.patrimoine_naturel "
+        f"✅ {n} entités insérées dans ecocompensation_results.znieff "
         f"pour project_id={project_id} (en {t1 - t0:.2f} s)."
     )
     return n
@@ -269,7 +239,9 @@ def main():
     SUPABASE_PASSWORD = os.getenv("SUPABASE_PASSWORD")
 
     if not all([SUPABASE_HOST, SUPABASE_DB, SUPABASE_USER, SUPABASE_PASSWORD]):
-        raise RuntimeError("Variables de connexion à la base manquantes dans le .env (PATRIMOINE_NATUREL).")
+        raise RuntimeError(
+            "Variables de connexion à la base manquantes dans le .env (ZNIEFF)."
+        )
 
     password_quoted = quote_plus(SUPABASE_PASSWORD)
     db_url = (
@@ -293,8 +265,9 @@ def main():
     aoi_id = str(row["aoi_id"])
 
     n = run(engine, project_id, aoi_id, cb=logging.info)
-    print(f"Total patrimoine naturel inséré : {n}")
+    print(f"Total ZNIEFF insérées : {n}")
 
 
 if __name__ == "__main__":
     main()
+

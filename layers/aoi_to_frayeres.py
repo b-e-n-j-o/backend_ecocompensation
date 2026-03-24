@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-aoi_to_arrachage_vignes.py
-==========================
-Intersection AOI × geo.arrachage_vignes → ecocompensation_results.arrachage_vignes.
+aoi_to_frayeres.py
+===================
+Intersection AOI × ecocompensation.frayeres → ecocompensation_results.frayeres.
 
-- Lit l’AOI depuis ecocompensation.aoi (dernière en date).
-- Insère en SQL les entités de geo.arrachage_vignes qui intersectent l’AOI.
-- À exécuter après l’ETL (etl_arrachage_vignes.py) qui remplit geo.arrachage_vignes.
+- Lit l’AOI depuis ecocompensation.aoi (pour un aoi_id donné).
+- Sélectionne, dans ecocompensation.frayeres, les frayères qui intersectent l’AOI.
+- Écrit le résultat dans ecocompensation_results.frayeres.
+
+Ce script suppose que l’ETL `etl_frayeres.py` a déjà rempli ecocompensation.frayeres
+avec une géométrie `geom_2154` en EPSG:2154.
 """
 
 import os
-import sys
 import time
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -19,14 +21,10 @@ from urllib.parse import quote_plus
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------
-# LOGIQUE ARACHAGE VIGNES
-# ---------------------------------------------------------------------
-
 
 def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     """
-    Intersection AOI × geo.arrachage_vignes → ecocompensation_results.arrachage_vignes.
+    Intersection AOI × ecocompensation.frayeres → ecocompensation_results.frayeres.
 
     :param engine: Engine SQLAlchemy déjà connecté.
     :param project_id: Identifiant du projet (écrit dans les lignes de résultat).
@@ -52,45 +50,50 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         ).mappings().one_or_none()
 
     if row_aoi is None:
-        log(f"[AOI] Aucune AOI trouvée dans ecocompensation.aoi pour id={aoi_id}, exécution annulée.")
+        log(
+            f"[FRAYERES] Aucune AOI trouvée dans ecocompensation.aoi pour id={aoi_id}, exécution annulée."
+        )
         return 0
 
     aoi_wkt = row_aoi["wkt_aoi"]
     aoi_area = row_aoi["area_m2"]
-    log(f"[AOI] AOI id={aoi_id}, surface ~ {aoi_area / 10_000:.2f} ha")
+    log(f"[FRAYERES] AOI id={aoi_id}, surface ~ {aoi_area / 10_000:.2f} ha")
 
-    # 2) Colonnes de geo.arrachage_vignes (pour créer la table results et l’INSERT)
+    # 2) Colonnes de ecocompensation.frayeres (pour créer la table results et l’INSERT)
     with engine.begin() as conn:
         cols = conn.execute(
             text(
                 """
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_schema = 'geo'
-                  AND table_name = 'arrachage_vignes'
+                WHERE table_schema = 'ecocompensation'
+                  AND table_name = 'frayeres'
                 ORDER BY ordinal_position;
                 """
             )
         ).scalars().all()
 
     if not cols:
-        log("[ARACHAGE] Table geo.arrachage_vignes introuvable ou vide. Exécuter d’abord etl_arrachage_vignes.py.")
+        log(
+            "[FRAYERES] Table ecocompensation.frayeres introuvable ou vide. "
+            "Exécuter d’abord etl_frayeres.py."
+        )
         return 0
 
     col_list = [c for c in cols]
     cols_str = ", ".join(col_list)
-    select_cols_str = ", ".join(f"a.{c}" for c in col_list)
+    select_cols_str = ", ".join(f"f.{c}" for c in col_list)
 
-    # 3) Schéma + table results (id, project_id + LIKE geo.arrachage_vignes)
+    # 3) Schéma + table results (id, project_id + LIKE ecocompensation.frayeres)
     with engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS ecocompensation_results;"))
         conn.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS ecocompensation_results.arrachage_vignes (
+                CREATE TABLE IF NOT EXISTS ecocompensation_results.frayeres (
                     id uuid NOT NULL DEFAULT gen_random_uuid(),
                     project_id uuid NULL,
-                    LIKE geo.arrachage_vignes INCLUDING DEFAULTS,
+                    LIKE ecocompensation.frayeres INCLUDING DEFAULTS,
                     PRIMARY KEY (id)
                 );
                 """
@@ -99,15 +102,15 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         conn.execute(
             text(
                 """
-                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_arrachage_geom
-                    ON ecocompensation_results.arrachage_vignes USING GIST (geom_2154);
-                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_arrachage_project
-                    ON ecocompensation_results.arrachage_vignes (project_id);
+                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_frayeres_geom
+                    ON ecocompensation_results.frayeres USING GIST (geom_2154);
+                CREATE INDEX IF NOT EXISTS idx_ecocomp_results_frayeres_project
+                    ON ecocompensation_results.frayeres (project_id);
                 """
             )
         )
         conn.execute(
-            text("DELETE FROM ecocompensation_results.arrachage_vignes WHERE project_id = :pid"),
+            text("DELETE FROM ecocompensation_results.frayeres WHERE project_id = :pid"),
             {"pid": project_id},
         )
 
@@ -117,9 +120,9 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             text(
                 """
                 SELECT count(*)
-                FROM geo.arrachage_vignes a
+                FROM ecocompensation.frayeres f
                 WHERE ST_Intersects(
-                    a.geom_2154,
+                    f.geom_2154,
                     ST_GeomFromText(:wkt_aoi, 2154)
                 );
                 """
@@ -127,10 +130,10 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             {"wkt_aoi": aoi_wkt},
         ).scalar_one()
 
-    log(f"[ARACHAGE] {count} entités de geo.arrachage_vignes intersectent l'AOI.")
+    log(f"[FRAYERES] {count} entités de ecocompensation.frayeres intersectent l'AOI.")
 
     if count == 0:
-        log("[ARACHAGE] Rien à insérer.")
+        log("[FRAYERES] Rien à insérer.")
         return 0
 
     t0 = time.perf_counter()
@@ -138,11 +141,11 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         res = conn.execute(
             text(
                 f"""
-                INSERT INTO ecocompensation_results.arrachage_vignes (project_id, {cols_str})
+                INSERT INTO ecocompensation_results.frayeres (project_id, {cols_str})
                 SELECT :project_id AS project_id, {select_cols_str}
-                FROM geo.arrachage_vignes a
+                FROM ecocompensation.frayeres f
                 WHERE ST_Intersects(
-                    a.geom_2154,
+                    f.geom_2154,
                     ST_GeomFromText(:wkt_aoi, 2154)
                 );
                 """
@@ -153,7 +156,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
 
     rows = res.rowcount if res.rowcount is not None else count
     log(
-        f"[RESULTS] {rows} entités insérées dans ecocompensation_results.arrachage_vignes "
+        f"[RESULTS FRAYERES] {rows} entités insérées dans ecocompensation_results.frayeres "
         f"(en {t1 - t0:.2f} s)."
     )
     return rows
@@ -173,7 +176,9 @@ def main():
     SUPABASE_PASSWORD = os.getenv("SUPABASE_PASSWORD")
 
     if not all([SUPABASE_HOST, SUPABASE_DB, SUPABASE_USER, SUPABASE_PASSWORD]):
-        raise RuntimeError("Variables de connexion à la base manquantes dans le .env (AOC).")
+        raise RuntimeError(
+            "Variables de connexion à la base manquantes dans le .env (FRAYERES)."
+        )
 
     password_quoted = quote_plus(SUPABASE_PASSWORD)
     db_url = (
@@ -197,7 +202,7 @@ def main():
     aoi_id = str(row["aoi_id"])
 
     n = run(engine, project_id, aoi_id, cb=print)
-    print(f"Total inséré : {n}")
+    print(f"Total frayères insérées : {n}")
 
 
 if __name__ == "__main__":
