@@ -77,6 +77,25 @@ BUFFER_DEFAULT_M = 12_000
 engine = get_engine()
 
 
+def _parse_cors_origins() -> list[str]:
+    """
+    Lit CORS_ORIGINS depuis l'env (CSV) et fusionne avec les origines par défaut.
+    Exemple:
+      CORS_ORIGINS=https://ecocompensation-frontend.vercel.app,https://xxx.vercel.app
+    """
+    default_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://ecocompensation-frontend.vercel.app/create-aoi",
+        "https://ecocompensation-frontend.vercel.app",
+    ]
+    raw = os.getenv("CORS_ORIGINS", "")
+    extra = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    merged = [o.rstrip("/") for o in default_origins] + extra
+    # Déduplication en conservant l'ordre
+    return list(dict.fromkeys(merged))
+
+
 # ─────────────────────────────────────────────
 # WebSocket manager
 # ─────────────────────────────────────────────
@@ -125,11 +144,7 @@ app = FastAPI(title="KERELIA Ecocompensation API", version="1.0.0", lifespan=lif
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://ecocompensation-frontend-khub.vercel.app",
-    ],
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
