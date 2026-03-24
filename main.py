@@ -88,6 +88,7 @@ def _parse_cors_origins() -> list[str]:
         "http://127.0.0.1:5173",
         "https://ecocompensation-frontend.vercel.app/create-aoi",
         "https://ecocompensation-frontend.vercel.app",
+        "https://ecocompensation-frontend-3nm5hbhou-matinducoins-projects.vercel.app",
     ]
     raw = os.getenv("CORS_ORIGINS", "")
     extra = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
