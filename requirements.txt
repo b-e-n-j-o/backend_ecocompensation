@@ -5,6 +5,7 @@ pydantic>=2.7.0
 sqlalchemy>=2.0.0
 psycopg[binary]>=3.1.0
 geopandas>=0.14.0
+geoalchemy2>=0.15.0
 shapely>=2.0.0
 pyproj>=3.6.0
 requests>=2.31.0
