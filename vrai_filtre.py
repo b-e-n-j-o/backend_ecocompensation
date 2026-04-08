@@ -10,6 +10,8 @@ d'une interface qui enverra les choix au process métier.
 Paramètres (dynamiques, surchargeables par une API plus tard) :
   - zdv_natures : liste de natures de zone de végétation (parcelle doit
     intersecter une ZDV avec l'une de ces natures). [] = pas de filtre ZDV.
+  - cesbio_libelles : libellés CESBIO (couverture sol). [] = pas de filtre CESBIO.
+  - carhab_nom_eunis : libellés EUNIS Carhab (nom_eunis). [] = pas de filtre Carhab.
   - troncon_hydro_mode : "none" | "intersect" | "within_radius"
   - troncon_hydro_radius_m : rayon (m) si mode "within_radius"
   - surface_hydro_mode : "none" | "intersect" | "within_radius"
@@ -20,8 +22,12 @@ Valeurs en dur pour l'instant :
   - Tronçon hydro : intersect (cours d'eau qui intersecte la parcelle)
   - Surface hydro : within_radius 500 m (surface d'eau à moins de 500 m)
 
-Conserve par ailleurs : GEOMCE, exclusion Natura 2000 (patrimoine), Miller ≥ 0.39, superficie ≥ 7 ha,
+Conserve par ailleurs : GEOMCE, Natura 2000 (table natura2000, mode intersect / exclure / ignorer par défaut),
+Miller ≥ 0.39, superficie ≥ 7 ha,
 puis descente du rayon jusqu'à ≤ TARGET_COUNT parcelles.
+
+Exclusion systématique (sans option UI) : les parcelles qui intersectent la géométrie du projet à compenser
+(``ecocompensation.foncier`` via ``projects.foncier_id``) sont exclues — sauf si aucun foncier n'est lié au projet.
 """
 
 from __future__ import annotations
@@ -53,28 +59,65 @@ ZDV_NATURES_DISPONIBLES = [
 ]
 
 HydroMode = Literal["none", "intersect", "within_radius"]
+ArrachageVignesMode = Literal["ignore", "intersect", "exclude"]
+ZoneHumideMode = Literal["ignore", "intersect", "exclude"]
+LayerIntersectMode = Literal["ignore", "intersect", "exclude"]
 
 
 @dataclass
 class FiltreOptions:
     """Options du filtre (passables par l'interface plus tard)."""
 
-    zdv_natures: list[str]
+    vegetation_hybride: dict
+    carhab_nom_eunis: list[str]
+    ebc_mode: LayerIntersectMode
+    natura2000_mode: LayerIntersectMode
+    reserves_naturelles_mode: LayerIntersectMode
+    znieff_mode: LayerIntersectMode
+    arrachage_vignes_mode: ArrachageVignesMode
+    zone_humide_mode: ZoneHumideMode
+    remontee_nappes_classefiab: list[str]
     troncon_hydro_mode: HydroMode
     troncon_hydro_radius_m: float
     surface_hydro_mode: HydroMode
     surface_hydro_radius_m: float
+    faune_criteria: list[dict]
 
     @staticmethod
     def defaut() -> FiltreOptions:
         """Valeurs en dur pour l'instant."""
         return FiltreOptions(
-            zdv_natures=["Forêt ouverte"],
+            vegetation_hybride={
+                "zdv_natures": [],
+                "cesbio_libelles": [],
+                "mode": "OR",
+            },
+            carhab_nom_eunis=[],
+            ebc_mode="ignore",
+            natura2000_mode="exclude",
+            reserves_naturelles_mode="ignore",
+            znieff_mode="ignore",
+            arrachage_vignes_mode="ignore",
+            zone_humide_mode="ignore",
+            remontee_nappes_classefiab=[],
             troncon_hydro_mode="intersect",
             troncon_hydro_radius_m=500.0,
             surface_hydro_mode="within_radius",
             surface_hydro_radius_m=500.0,
+            faune_criteria=[],
         )
+
+    @property
+    def zdv_natures(self) -> list[str]:
+        return list(self.vegetation_hybride.get("zdv_natures", []))
+
+    @property
+    def cesbio_libelles(self) -> list[str]:
+        return list(self.vegetation_hybride.get("cesbio_libelles", []))
+
+    @property
+    def vegetation_hybride_mode(self) -> str:
+        return str(self.vegetation_hybride.get("mode", "OR")).upper()
 
 
 def run(
@@ -86,6 +129,7 @@ def run(
     options: FiltreOptions,
     *,
     return_parcelles: bool = False,
+    funnel_mode: bool = False,
     miller_threshold: float = 0.39,
     min_area_ha: float = 7.0,
     target_count: int = 50,
@@ -106,10 +150,19 @@ def run(
         "ecocompensation_results.mesures_compensatoire_lin",
         "ecocompensation_results.mesures_compensatoire_pct",
         "ecocompensation_results.mesures_compensatoire_commune",
-        "ecocompensation_results.patrimoine_naturel",
+        "ecocompensation_results.natura2000",
+        "ecocompensation_results.ebc",
+        "ecocompensation_results.reserves_naturelles",
+        "ecocompensation_results.znieff",
         "ecocompensation_results.zone_de_vegetation",
+        "ecocompensation_results.cesbio",
+        "ecocompensation_results.carhab",
+        "ecocompensation_results.arrachage_vignes",
+        "ecocompensation_results.zone_humide",
+        "ecocompensation_results.remontee_de_nappes",
         "ecocompensation_results.troncons_hydro",
         "ecocompensation_results.surfaces_hydro",
+        "ecocompensation_results.fauna",
     ]
     exists: dict[str, bool] = {}
     with engine.begin() as conn:
@@ -121,6 +174,40 @@ def run(
 
     def has(table: str) -> bool:
         return exists.get(table, False)
+
+    def _resolve_taxnomval_column(conn, full_table: str) -> str | None:
+        if "." not in full_table:
+            return None
+        schema, table = full_table.split(".", 1)
+        # Priorité : ancienne convention taxnomval, puis colonnes présentes
+        # (ex: nom_vernaculaire dans ecocompensation.fauna).
+        candidates = ["taxnomval", "nom_vernaculaire", "nom_taxref", "tax_nom_val", "nom_vern"]
+        for cand in candidates:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = :schema
+                      AND table_name = :table
+                      AND lower(column_name) = :col
+                    LIMIT 1
+                    """
+                ),
+                {"schema": schema, "table": table, "col": cand},
+            ).mappings().one_or_none()
+            if row and row.get("column_name"):
+                col = str(row["column_name"])
+                return f'"{col}"' if col != col.lower() else col
+        return None
+
+    with engine.begin() as conn:
+        fauna_tax_col: dict[str, str | None] = {
+            t: _resolve_taxnomval_column(conn, t)
+            for t in (
+                "ecocompensation_results.fauna",
+            )
+        }
 
     where_clauses = [
         """
@@ -137,6 +224,9 @@ def run(
         "min_area_m2": min_area_m2,
         "miller_th": miller_threshold,
         "zdv_natures": options.zdv_natures,
+        "cesbio_libelles": options.cesbio_libelles,
+        "carhab_nom_eunis": options.carhab_nom_eunis,
+        "remontee_nappes_classefiab": options.remontee_nappes_classefiab,
         "troncon_hydro_radius_m": options.troncon_hydro_radius_m,
         "surface_hydro_radius_m": options.surface_hydro_radius_m,
     }
@@ -160,16 +250,49 @@ def run(
                 p,
             ).scalar_one()
 
+    def maybe_count(clauses: list[str], extra_params: dict | None = None) -> int:
+        if not funnel_mode:
+            return -1
+        return count_with_clauses(clauses, extra_params)
+
     # --- 0) Parcelles brutes
     n0 = count_with_clauses(where_clauses)
     log(f"0) Parcelles brutes (project_id)                    → {n0} parcelles")
-    funnel.append({"step": 0, "label": "Parcelles brutes (project_id)", "count": n0})
+    step_idx = 0
+    if funnel_mode:
+        funnel.append({"step": step_idx, "label": "Parcelles brutes (project_id)", "count": n0})
 
     if n0 == 0:
         log("⚠️ Aucune parcelle pour cette AOI, arrêt.")
         return None if not return_parcelles else ([], 0.0, funnel)
 
-    # --- 1) Exclusion GEOMCE
+    # --- 1) Superficie ≥ min_area_ha (numérique)
+    area_clause = "ST_Area(p.geom_2154) >= :min_area_m2"
+    where_clauses.append(area_clause)
+    n1 = maybe_count(where_clauses)
+    log(f"1) Superficie ≥ {min_area_ha} ha                         → {n1} parcelles")
+    if funnel_mode:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": f"Après superficie ≥ {min_area_ha} ha", "count": n1})
+
+    # --- 2) Miller ≥ seuil (numérique)
+    miller_clause = """
+        (4 * PI() * ST_Area(p.geom_2154)) /
+        NULLIF(ST_Perimeter(p.geom_2154)^2, 0)::double precision
+        >= :miller_th
+    """
+    where_clauses.append(miller_clause)
+    n2 = maybe_count(where_clauses)
+    log(f"2) Miller ≥ {miller_threshold}                             → {n2} parcelles")
+    if funnel_mode:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": f"Après Miller ≥ {miller_threshold}", "count": n2})
+
+    if funnel_mode and n2 == 0:
+        log("⚠️ Aucune parcelle après Miller + superficie, arrêt.")
+        return None if not return_parcelles else ([], 0.0, funnel)
+
+    # --- 3) Exclusion GEOMCE
     if has("ecocompensation_results.mesures_compensatoire_surf"):
         where_clauses.append(
             """
@@ -206,72 +329,373 @@ def run(
             )
             """
         )
-    n1 = count_with_clauses(where_clauses)
-    log(f"1) Exclusion mesures compensatoires (GEOMCE)         → {n1} parcelles")
-    funnel.append({"step": 1, "label": "Après exclusion GEOMCE", "count": n1})
+    geomce_applied = (
+        has("ecocompensation_results.mesures_compensatoire_surf")
+        or has("ecocompensation_results.mesures_compensatoire_lin")
+        or has("ecocompensation_results.mesures_compensatoire_pct")
+        or has("ecocompensation_results.mesures_compensatoire_commune")
+    )
+    n3 = maybe_count(where_clauses)
+    log(f"3) Exclusion mesures compensatoires (GEOMCE)         → {n3} parcelles")
+    if funnel_mode and geomce_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après exclusion GEOMCE", "count": n3})
 
-    # --- 2) Exclusion patrimoine : uniquement Natura 2000 (aligné sur filtre_uf.py)
-    if has("ecocompensation_results.patrimoine_naturel"):
+    # --- 4) Natura 2000 (SIC / ZPS) : intersect / exclure / ignorer
+    if options.natura2000_mode == "intersect" and has("ecocompensation_results.natura2000"):
         where_clauses.append(
             """
-            NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.patrimoine_naturel pn
-                WHERE pn.project_id = :project_id
-                  AND pn.type_patrimoine = 'Natura 2000'
-                  AND p.geom_2154 && pn.geom_2154
-                  AND ST_Intersects(p.geom_2154, pn.geom_2154)
+            EXISTS (
+                SELECT 1 FROM ecocompensation_results.natura2000 n2
+                WHERE n2.project_id = CAST(:project_id AS uuid)
+                  AND p.geom_2154 && n2.geom_2154
+                  AND ST_Intersects(p.geom_2154, n2.geom_2154)
             )
             """
         )
-    n2 = count_with_clauses(where_clauses)
-    log(f"2) Exclusion patrimoine (Natura 2000)                 → {n2} parcelles")
-    funnel.append({"step": 2, "label": "Après exclusion patrimoine Natura 2000", "count": n2})
+    elif options.natura2000_mode == "exclude" and has("ecocompensation_results.natura2000"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1 FROM ecocompensation_results.natura2000 n2
+                WHERE n2.project_id = CAST(:project_id AS uuid)
+                  AND p.geom_2154 && n2.geom_2154
+                  AND ST_Intersects(p.geom_2154, n2.geom_2154)
+            )
+            """
+        )
+    n4 = maybe_count(where_clauses)
+    _natura_label = (
+        "intersection"
+        if options.natura2000_mode == "intersect"
+        else ("exclusion" if options.natura2000_mode == "exclude" else "ignoré")
+    )
+    log(f"4) Natura 2000 ({_natura_label})                          → {n4} parcelles")
+    natura_applied = options.natura2000_mode in ("intersect", "exclude") and has("ecocompensation_results.natura2000")
+    if funnel_mode and natura_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": f"Après filtre Natura 2000 ({_natura_label})", "count": n4})
 
-    # --- 3) Superficie ≥ 7 ha (comparaison numérique, pas de spatial)
-    area_clause = "ST_Area(p.geom_2154) >= :min_area_m2"
-    n3 = count_with_clauses(where_clauses + [area_clause])
-    log(f"3) Superficie ≥ 7 ha                                 → {n3} parcelles")
-    funnel.append({"step": 3, "label": "Après superficie ≥ 7 ha", "count": n3})
+    # --- 6) Vegetation hybride (BD TOPO + CESBIO)
+    has_hybrid = has("ecocompensation_results.bd_topo_et_cesbio")
+    has_zdv = bool(options.zdv_natures)
+    has_cesbio = bool(options.cesbio_libelles)
+    mode = options.vegetation_hybride_mode
+    if has_hybrid and (has_zdv or has_cesbio):
+        if mode == "AND" and has_zdv and has_cesbio:
+            where_clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM ecocompensation_results.bd_topo_et_cesbio v
+                    WHERE v.project_id = CAST(:project_id AS uuid)
+                      AND v.nature = ANY(:zdv_natures)
+                      AND p.geom_2154 && v.geom_2154
+                      AND ST_Intersects(p.geom_2154, v.geom_2154)
+                )
+                """
+            )
+            where_clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM ecocompensation_results.bd_topo_et_cesbio v
+                    WHERE v.project_id = CAST(:project_id AS uuid)
+                      AND v.libelle = ANY(:cesbio_libelles)
+                      AND p.geom_2154 && v.geom_2154
+                      AND ST_Intersects(p.geom_2154, v.geom_2154)
+                )
+                """
+            )
+        else:
+            where_clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM ecocompensation_results.bd_topo_et_cesbio v
+                    WHERE v.project_id = CAST(:project_id AS uuid)
+                      AND p.geom_2154 && v.geom_2154
+                      AND ST_Intersects(p.geom_2154, v.geom_2154)
+                      AND (
+                          v.nature = ANY(:zdv_natures)
+                          OR v.libelle = ANY(:cesbio_libelles)
+                      )
+                )
+                """
+            )
+        n_veget = maybe_count(where_clauses)
+        log(f"5) Vegetation hybride ({mode})                              → {n_veget} parcelles")
+    else:
+        n_veget = maybe_count(where_clauses)
+        log(f"5) Vegetation hybride (ignoree ou table absente)            → {n_veget} parcelles")
+    if funnel_mode and has_hybrid and (has_zdv or has_cesbio):
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre vegetation hybride", "count": n_veget})
 
-    # --- 4) Miller ≥ 0.39 (comparaison numérique, pas de spatial)
-    miller_clause = """
-        (4 * PI() * ST_Area(p.geom_2154)) /
-        NULLIF(ST_Perimeter(p.geom_2154)^2, 0)::double precision
-        >= :miller_th
-    """
-    n4 = count_with_clauses(where_clauses + [area_clause, miller_clause])
-    log(f"4) Miller ≥ 0.39                                     → {n4} parcelles")
-    funnel.append({"step": 4, "label": "Après Miller ≥ 0.39", "count": n4})
-
-    if n4 == 0:
-        log("⚠️ Aucune parcelle après Miller + superficie, arrêt.")
-        return None if not return_parcelles else ([], 0.0, funnel)
-
-    numeric_clauses = [area_clause, miller_clause]
-
-    # --- 5) ZDV : parcelle doit intersecter une zone de végétation (nature dans la liste)
-    if options.zdv_natures and has("ecocompensation_results.zone_de_vegetation"):
+    # --- 8) Carhab : intersection avec au moins un nom_eunis sélectionné
+    if options.carhab_nom_eunis and has("ecocompensation_results.carhab"):
         where_clauses.append(
             """
             EXISTS (
                 SELECT 1
-                FROM ecocompensation_results.zone_de_vegetation z
-                WHERE ST_Intersects(p.geom_2154, z.geom_2154)
-                  AND z.nature = ANY(:zdv_natures)
+                FROM ecocompensation_results.carhab ch
+                WHERE (ch.project_id = CAST(:project_id AS uuid) OR ch.aoi_id = CAST(:aoi_id_str AS uuid))
+                  AND p.geom_2154 && ch.geom_2154
+                  AND ST_Intersects(p.geom_2154, ch.geom_2154)
+                  AND ch.nom_eunis = ANY(:carhab_nom_eunis)
             )
             """
         )
-        n_zdv = count_with_clauses(where_clauses + numeric_clauses)
-        log(f"5) ZDV intersecte (nature in {options.zdv_natures})     → {n_zdv} parcelles")
+        n_carhab = maybe_count(where_clauses)
+        log(f"6) Carhab intersecte (nom_eunis sélectionnés)              → {n_carhab} parcelles")
     else:
-        n_zdv = count_with_clauses(where_clauses + numeric_clauses)
-        if not options.zdv_natures:
-            log("5) ZDV (aucune nature demandée → étape neutre)        → —")
+        n_carhab = maybe_count(where_clauses)
+        if not options.carhab_nom_eunis:
+            log("8) Carhab (aucun libellé demandé → étape neutre)       → —")
         else:
-            log(f"5) ZDV (table absente → étape neutre)                 → {n_zdv} parcelles")
-    funnel.append({"step": 5, "label": "Après filtre ZDV", "count": n_zdv})
+            log(f"6) Carhab (table absente → étape neutre)                → {n_carhab} parcelles")
+    if funnel_mode and options.carhab_nom_eunis and has("ecocompensation_results.carhab"):
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre Carhab", "count": n_carhab})
 
-    # --- 6) Tronçons hydro : intersect ou within_radius
+    # --- 9) Arrachage de vignes : intersect / exclure / ignorer
+    if options.arrachage_vignes_mode == "intersect" and has("ecocompensation_results.arrachage_vignes"):
+        where_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.arrachage_vignes av
+                WHERE av.project_id = CAST(:project_id AS uuid)
+                  AND av.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && av.geom_2154
+                  AND ST_Intersects(p.geom_2154, av.geom_2154)
+            )
+            """
+        )
+        n_av = maybe_count(where_clauses)
+        log(f"7) Arrachage vignes — doit intersecter                         → {n_av} parcelles")
+    elif options.arrachage_vignes_mode == "exclude" and has("ecocompensation_results.arrachage_vignes"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.arrachage_vignes av
+                WHERE av.project_id = CAST(:project_id AS uuid)
+                  AND av.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && av.geom_2154
+                  AND ST_Intersects(p.geom_2154, av.geom_2154)
+            )
+            """
+        )
+        n_av = maybe_count(where_clauses)
+        log(f"7) Arrachage vignes — ne doit pas intersecter                  → {n_av} parcelles")
+    else:
+        n_av = maybe_count(where_clauses)
+        if options.arrachage_vignes_mode == "ignore":
+            log(f"9) Arrachage vignes (ignoré)                               → {n_av} parcelles")
+        else:
+            log(f"7) Arrachage vignes (table absente → neutre)              → {n_av} parcelles")
+    arrachage_applied = options.arrachage_vignes_mode in ("intersect", "exclude") and has("ecocompensation_results.arrachage_vignes")
+    if funnel_mode and arrachage_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre arrachage vignes", "count": n_av})
+
+    # --- 10) Zones humides : intersect / exclure / ignorer
+    if options.zone_humide_mode == "intersect" and has("ecocompensation_results.zone_humide"):
+        where_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.zone_humide zh
+                WHERE zh.project_id = CAST(:project_id AS uuid)
+                  AND zh.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && zh.geom_2154
+                  AND ST_Intersects(p.geom_2154, zh.geom_2154)
+            )
+            """
+        )
+        n_zh = maybe_count(where_clauses)
+        log(f"8) Zones humides — doit intersecter                            → {n_zh} parcelles")
+    elif options.zone_humide_mode == "exclude" and has("ecocompensation_results.zone_humide"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.zone_humide zh
+                WHERE zh.project_id = CAST(:project_id AS uuid)
+                  AND zh.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && zh.geom_2154
+                  AND ST_Intersects(p.geom_2154, zh.geom_2154)
+            )
+            """
+        )
+        n_zh = maybe_count(where_clauses)
+        log(f"8) Zones humides — ne doit pas intersecter                     → {n_zh} parcelles")
+    else:
+        n_zh = maybe_count(where_clauses)
+        if options.zone_humide_mode == "ignore":
+            log(f"10) Zones humides (ignoré)                                 → {n_zh} parcelles")
+        else:
+            log(f"8) Zones humides (table absente → neutre)                → {n_zh} parcelles")
+    zh_applied = options.zone_humide_mode in ("intersect", "exclude") and has("ecocompensation_results.zone_humide")
+    if funnel_mode and zh_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre zones humides", "count": n_zh})
+
+    # --- 11) Remontée de nappes (filtrage sur CLASSEFIAB)
+    if options.remontee_nappes_classefiab and has("ecocompensation_results.remontee_de_nappes"):
+        where_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.remontee_de_nappes rdn
+                WHERE rdn.project_id = CAST(:project_id AS uuid)
+                  AND rdn.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && rdn.geom_2154
+                  AND ST_Intersects(p.geom_2154, rdn.geom_2154)
+                  AND rdn.classefiab = ANY(:remontee_nappes_classefiab)
+            )
+            """
+        )
+        n_rdn = maybe_count(where_clauses)
+        log(f"9) Remontée de nappes (classefiab sélectionnés)            → {n_rdn} parcelles")
+    else:
+        n_rdn = maybe_count(where_clauses)
+        if not options.remontee_nappes_classefiab:
+            log(f"11) Remontée de nappes (aucune classe → neutre)         → {n_rdn} parcelles")
+        else:
+            log(f"9) Remontée de nappes (table absente → neutre)        → {n_rdn} parcelles")
+    if funnel_mode and options.remontee_nappes_classefiab and has("ecocompensation_results.remontee_de_nappes"):
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre remontée de nappes", "count": n_rdn})
+
+    # --- 12) Espaces boisés classés (EBC)
+    if options.ebc_mode == "intersect" and has("ecocompensation_results.ebc"):
+        where_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.ebc e
+                WHERE e.project_id = CAST(:project_id AS uuid)
+                  AND e.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && e.geom_2154
+                  AND ST_Intersects(p.geom_2154, e.geom_2154)
+            )
+            """
+        )
+        n_ebc = maybe_count(where_clauses)
+        log(f"10) EBC — doit intersecter                                  → {n_ebc} parcelles")
+    elif options.ebc_mode == "exclude" and has("ecocompensation_results.ebc"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.ebc e
+                WHERE e.project_id = CAST(:project_id AS uuid)
+                  AND e.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && e.geom_2154
+                  AND ST_Intersects(p.geom_2154, e.geom_2154)
+            )
+            """
+        )
+        n_ebc = maybe_count(where_clauses)
+        log(f"10) EBC — ne doit pas intersecter                           → {n_ebc} parcelles")
+    else:
+        n_ebc = maybe_count(where_clauses)
+        if options.ebc_mode == "ignore":
+            log(f"12) EBC (ignoré)                                         → {n_ebc} parcelles")
+        else:
+            log(f"10) EBC (table absente → neutre)                         → {n_ebc} parcelles")
+    ebc_applied = options.ebc_mode in ("intersect", "exclude") and has("ecocompensation_results.ebc")
+    if funnel_mode and ebc_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre espaces boisés classés (EBC)", "count": n_ebc})
+
+    # --- 13) Réserves naturelles
+    if options.reserves_naturelles_mode == "intersect" and has("ecocompensation_results.reserves_naturelles"):
+        where_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.reserves_naturelles r
+                WHERE r.project_id = CAST(:project_id AS uuid)
+                  AND r.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && r.geom_2154
+                  AND ST_Intersects(p.geom_2154, r.geom_2154)
+            )
+            """
+        )
+        n_rn = maybe_count(where_clauses)
+        log(f"11) Réserves naturelles — doit intersecter                  → {n_rn} parcelles")
+    elif options.reserves_naturelles_mode == "exclude" and has("ecocompensation_results.reserves_naturelles"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.reserves_naturelles r
+                WHERE r.project_id = CAST(:project_id AS uuid)
+                  AND r.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && r.geom_2154
+                  AND ST_Intersects(p.geom_2154, r.geom_2154)
+            )
+            """
+        )
+        n_rn = maybe_count(where_clauses)
+        log(f"11) Réserves naturelles — ne doit pas intersecter           → {n_rn} parcelles")
+    else:
+        n_rn = maybe_count(where_clauses)
+        if options.reserves_naturelles_mode == "ignore":
+            log(f"13) Réserves naturelles (ignoré)                          → {n_rn} parcelles")
+        else:
+            log(f"11) Réserves naturelles (table absente → neutre)         → {n_rn} parcelles")
+    rn_applied = options.reserves_naturelles_mode in ("intersect", "exclude") and has("ecocompensation_results.reserves_naturelles")
+    if funnel_mode and rn_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre réserves naturelles", "count": n_rn})
+
+    # --- 14) ZNIEFF (types 1 / 2 — toute la couche)
+    if options.znieff_mode == "intersect" and has("ecocompensation_results.znieff"):
+        where_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.znieff z
+                WHERE z.project_id = CAST(:project_id AS uuid)
+                  AND z.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && z.geom_2154
+                  AND ST_Intersects(p.geom_2154, z.geom_2154)
+            )
+            """
+        )
+        n_znieff = maybe_count(where_clauses)
+        log(f"12) ZNIEFF — doit intersecter                                  → {n_znieff} parcelles")
+    elif options.znieff_mode == "exclude" and has("ecocompensation_results.znieff"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.znieff z
+                WHERE z.project_id = CAST(:project_id AS uuid)
+                  AND z.geom_2154 IS NOT NULL
+                  AND p.geom_2154 && z.geom_2154
+                  AND ST_Intersects(p.geom_2154, z.geom_2154)
+            )
+            """
+        )
+        n_znieff = maybe_count(where_clauses)
+        log(f"12) ZNIEFF — ne doit pas intersecter                           → {n_znieff} parcelles")
+    else:
+        n_znieff = maybe_count(where_clauses)
+        if options.znieff_mode == "ignore":
+            log(f"14) ZNIEFF (ignoré)                                         → {n_znieff} parcelles")
+        else:
+            log(f"12) ZNIEFF (table absente → neutre)                         → {n_znieff} parcelles")
+    znieff_applied = options.znieff_mode in ("intersect", "exclude") and has("ecocompensation_results.znieff")
+    if funnel_mode and znieff_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre ZNIEFF", "count": n_znieff})
+
+    # --- 15) Tronçons hydro : intersect ou within_radius
     if options.troncon_hydro_mode != "none" and has("ecocompensation_results.troncons_hydro"):
         if options.troncon_hydro_mode == "intersect":
             where_clauses.append(
@@ -293,19 +717,22 @@ def run(
                 )
                 """
             )
-        n_troncon = count_with_clauses(where_clauses + numeric_clauses)
+        n_troncon = maybe_count(where_clauses)
         label = (
-            "6) Tronçon hydro intersecte la parcelle"
+            "13) Tronçon hydro intersecte la parcelle"
             if options.troncon_hydro_mode == "intersect"
-            else f"6) Tronçon hydro à ≤ {options.troncon_hydro_radius_m:.0f} m"
+            else f"13) Tronçon hydro à ≤ {options.troncon_hydro_radius_m:.0f} m"
         )
         log(f"{label:<60} → {n_troncon} parcelles")
     else:
-        n_troncon = count_with_clauses(where_clauses + numeric_clauses)
-        log(f"6) Tronçon hydro (ignoré ou table absente)                → {n_troncon} parcelles")
-    funnel.append({"step": 6, "label": "Après filtre tronçon hydro", "count": n_troncon})
+        n_troncon = maybe_count(where_clauses)
+        log(f"13) Tronçon hydro (ignoré ou table absente)                → {n_troncon} parcelles")
+    troncon_applied = options.troncon_hydro_mode != "none" and has("ecocompensation_results.troncons_hydro")
+    if funnel_mode and troncon_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre tronçon hydro", "count": n_troncon})
 
-    # --- 7) Surfaces hydro : intersect ou within_radius
+    # --- 16) Surfaces hydro : intersect ou within_radius
     if options.surface_hydro_mode != "none" and has("ecocompensation_results.surfaces_hydro"):
         if options.surface_hydro_mode == "intersect":
             where_clauses.append(
@@ -327,27 +754,98 @@ def run(
                 )
                 """
             )
-        n_surface_hydro = count_with_clauses(where_clauses + numeric_clauses)
+        n_surface_hydro = maybe_count(where_clauses)
         label = (
-            "7) Surface hydro intersecte la parcelle"
+            "14) Surface hydro intersecte la parcelle"
             if options.surface_hydro_mode == "intersect"
-            else f"7) Surface hydro à ≤ {options.surface_hydro_radius_m:.0f} m"
+            else f"14) Surface hydro à ≤ {options.surface_hydro_radius_m:.0f} m"
         )
         log(f"{label:<60} → {n_surface_hydro} parcelles")
     else:
-        n_surface_hydro = count_with_clauses(where_clauses + numeric_clauses)
-        log(f"7) Surface hydro (ignorée ou table absente)                → {n_surface_hydro} parcelles")
-    funnel.append({"step": 7, "label": "Après filtre surface hydro", "count": n_surface_hydro})
+        n_surface_hydro = maybe_count(where_clauses)
+        log(f"14) Surface hydro (ignorée ou table absente)                → {n_surface_hydro} parcelles")
+    surface_applied = options.surface_hydro_mode != "none" and has("ecocompensation_results.surfaces_hydro")
+    if funnel_mode and surface_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre surface hydro", "count": n_surface_hydro})
 
-    # --- 8) Candidats finaux (dans l'AOI)
+    # --- 17) Faune (par espèce) : intersect ou within_radius
+    fauna_table_ok = has("ecocompensation_results.fauna")
+    if options.faune_criteria and fauna_table_ok:
+        for i, crit in enumerate(options.faune_criteria):
+            tax = str(crit.get("tax_nom_val", "")).strip()
+            mode = str(crit.get("mode", "intersect")).strip()
+            radius = float(crit.get("radius_m", 500.0) or 0.0)
+            selected_sources = crit.get("sources", ["pct", "lin", "surf"])
+            selected_sources = [s for s in selected_sources if s in ("pct", "lin", "surf")]
+            if not selected_sources:
+                selected_sources = ["pct", "lin", "surf"]
+            if not tax or mode not in ("intersect", "within_radius"):
+                continue
+
+            params[f"faune_tax_{i}"] = tax
+            params[f"faune_radius_{i}"] = radius
+
+            # Mapping "sources" -> type de géométrie (approx. via geom_type).
+            src_clauses: list[str] = []
+            if "pct" in selected_sources:
+                src_clauses.append("(f.geom_type ILIKE '%POINT%' OR ST_GeometryType(f.geom_2154) ILIKE '%POINT%')")
+            if "lin" in selected_sources:
+                src_clauses.append("(f.geom_type ILIKE '%LINE%' OR ST_GeometryType(f.geom_2154) ILIKE '%LINE%')")
+            if "surf" in selected_sources:
+                src_clauses.append("(f.geom_type ILIKE '%POLYGON%' OR ST_GeometryType(f.geom_2154) ILIKE '%POLYGON%')")
+            geom_sources_sql = f"({' OR '.join(src_clauses)})" if src_clauses else "TRUE"
+
+            if mode == "intersect":
+                where_clauses.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1
+                        FROM ecocompensation_results.fauna f
+                        WHERE f.project_id = :project_id
+                          AND lower(btrim(f.nom_vernaculaire::text)) = lower(btrim(CAST(:faune_tax_{i} AS text)))
+                          AND {geom_sources_sql}
+                          AND ST_Intersects(p.geom_2154, f.geom_2154)
+                    )
+                    """
+                )
+            else:
+                where_clauses.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1
+                        FROM ecocompensation_results.fauna f
+                        WHERE f.project_id = :project_id
+                          AND lower(btrim(f.nom_vernaculaire::text)) = lower(btrim(CAST(:faune_tax_{i} AS text)))
+                          AND {geom_sources_sql}
+                          AND ST_DWithin(p.geom_2154, f.geom_2154, :faune_radius_{i})
+                    )
+                    """
+                )
+
+        n_faune = maybe_count(where_clauses)
+        log(f"15) Faune (espèces sélectionnées)                        → {n_faune} parcelles")
+    else:
+        n_faune = maybe_count(where_clauses)
+        if options.faune_criteria and not fauna_table_ok:
+            log(f"15) Faune (ignorée — table absente)                      → {n_faune} parcelles")
+        else:
+            log(f"15) Faune (ignorée)                                      → {n_faune} parcelles")
+    faune_applied = bool(options.faune_criteria) and fauna_table_ok
+    if funnel_mode and faune_applied:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après filtre faune", "count": n_faune})
+
+    # --- 18) Candidats finaux (dans l'AOI)
     # Le rayon dynamique est supprimé : l'AOI (buffer) est définie en amont via ecocompensation.aoi.
     final_radius_km = 0.0
-    final_count = n_surface_hydro
-
-    funnel.append({"step": 8, "label": "Candidats finaux (dans l'AOI)", "count": final_count})
+    final_count = count_with_clauses(where_clauses)
+    if funnel_mode:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Candidats finaux (dans l'AOI)", "count": final_count})
     log(f"\n🎯 Vrai filtre terminé : {final_count} parcelles dans l'AOI.")
 
-    final_where_sql = " AND ".join(f"({c})" for c in (where_clauses + numeric_clauses))
+    final_where_sql = " AND ".join(f"({c})" for c in where_clauses)
 
     if return_parcelles:
         # Récupérer les parcelles avec attributs pour le scoring (distance, surface, Miller, proximité hydro)
@@ -385,107 +883,6 @@ def run(
     return None
 
 
-def _score_with_weights(p: dict, opts_dto) -> tuple[int, list[dict]]:
-    """
-    Scoring avec poids et seuils configurables (passés via FiltreOptionsDTO).
-    Anciennement dans main.py — déplacé ici pour garder main.py sans logique métier.
-    """
-    dist_m = p.get("distance_centre_m") or 999999.0
-    surface_ha = float(p.get("surface_ha") or 0)
-    miller = float(p.get("miller") or 0)
-    dist_hydro_m = p.get("dist_surface_hydro_m")
-
-    thr_dist_2_m = opts_dto.score_threshold_dist_2km * 1000.0
-    thr_dist_5_m = opts_dto.score_threshold_dist_5km * 1000.0
-
-    pts = 0
-    score_details: list[dict] = []
-
-    if dist_m < thr_dist_2_m:
-        pts += opts_dto.score_dist_lt2km
-        score_details.append(
-            {
-                "critere": "Distance au centre AOI",
-                "points": opts_dto.score_dist_lt2km,
-                "raison": f"< {opts_dto.score_threshold_dist_2km} km ({dist_m/1000:.1f} km)",
-            }
-        )
-    elif dist_m < thr_dist_5_m:
-        pts += opts_dto.score_dist_lt5km
-        score_details.append(
-            {
-                "critere": "Distance au centre AOI",
-                "points": opts_dto.score_dist_lt5km,
-                "raison": f"{opts_dto.score_threshold_dist_2km}–{opts_dto.score_threshold_dist_5km} km ({dist_m/1000:.1f} km)",
-            }
-        )
-    else:
-        pts += opts_dto.score_dist_lt10km
-        score_details.append(
-            {
-                "critere": "Distance au centre AOI",
-                "points": opts_dto.score_dist_lt10km,
-                "raison": f"{opts_dto.score_threshold_dist_5km}–10 km ({dist_m/1000:.1f} km)",
-            }
-        )
-
-    if surface_ha >= opts_dto.score_threshold_surface_ha:
-        pts += opts_dto.score_surface_ge20ha
-        score_details.append(
-            {
-                "critere": "Surface",
-                "points": opts_dto.score_surface_ge20ha,
-                "raison": f"≥ {opts_dto.score_threshold_surface_ha} ha ({surface_ha:.1f} ha)",
-            }
-        )
-    else:
-        score_details.append(
-            {
-                "critere": "Surface",
-                "points": 0,
-                "raison": f"< {opts_dto.score_threshold_surface_ha} ha ({surface_ha:.1f} ha)",
-            }
-        )
-
-    if miller >= opts_dto.score_threshold_miller:
-        pts += opts_dto.score_miller_ge05
-        score_details.append(
-            {
-                "critere": "Coefficient de Miller",
-                "points": opts_dto.score_miller_ge05,
-                "raison": f"≥ {opts_dto.score_threshold_miller} ({miller:.2f})",
-            }
-        )
-    else:
-        score_details.append(
-            {
-                "critere": "Coefficient de Miller",
-                "points": 0,
-                "raison": f"< {opts_dto.score_threshold_miller} ({miller:.2f})",
-            }
-        )
-
-    if dist_hydro_m is not None and dist_hydro_m < opts_dto.score_threshold_hydro_m:
-        pts += opts_dto.score_hydro_lt100m
-        score_details.append(
-            {
-                "critere": "Proximité hydro",
-                "points": opts_dto.score_hydro_lt100m,
-                "raison": f"< {opts_dto.score_threshold_hydro_m:.0f} m ({dist_hydro_m:.0f} m)",
-            }
-        )
-    else:
-        score_details.append(
-            {
-                "critere": "Proximité hydro",
-                "points": 0,
-                "raison": f"{dist_hydro_m:.0f} m" if dist_hydro_m else "—",
-            }
-        )
-
-    return pts, score_details
-
-
 def run_filter_and_score(
     engine,
     project_id: str,
@@ -496,10 +893,10 @@ def run_filter_and_score(
     opts_dto,
 ) -> dict:
     """
-    Enchaîne run() + scoring. Retourne le dict complet attendu par la route /filter.
-    Anciennement inline dans main.py/run_filter().
+    Exécute run() puis classe les parcelles candidates.
+    Classement simplifié : distance au centre (ascendant), puis surface (descendant).
 
-    :param opts_dto: FiltreOptionsDTO (poids + seuils du scoring).
+    :param opts_dto: FiltreOptionsDTO (conserve target_count).
     :return: {total, final_radius_km, parcelles, funnel} ou vide si pas de résultat.
     """
     result = run(
@@ -510,6 +907,7 @@ def run_filter_and_score(
         cy,
         options,
         return_parcelles=True,
+        funnel_mode=getattr(opts_dto, "funnel_mode", False),
         miller_threshold=opts_dto.miller_threshold,
         min_area_ha=opts_dto.min_area_ha,
         radius_start_km=opts_dto.radius_start_km,
@@ -522,39 +920,33 @@ def run_filter_and_score(
 
     parcelles_raw, final_radius_km, funnel = result
 
-    scored = []
-    for p in parcelles_raw:
-        pts, score_details = _score_with_weights(p, opts_dto)
-        scored.append(
-            {
-                "idu": p.get("idu"),
-                "code_insee": p.get("code_insee"),
-                "section": p.get("section"),
-                "numero": p.get("numero"),
-                "surface_ha": round(float(p.get("surface_ha") or 0), 2),
-                "miller": round(float(p.get("miller") or 0), 4),
-                "distance_km": round((p.get("distance_centre_m") or 0) / 1000, 2),
-                "dist_hydro_m": p.get("dist_surface_hydro_m"),
-                "score": pts,
-                "score_details": score_details,
-            }
-        )
+    ranked = [
+        {
+            "idu": p.get("idu"),
+            "code_insee": p.get("code_insee"),
+            "section": p.get("section"),
+            "numero": p.get("numero"),
+            "surface_ha": round(float(p.get("surface_ha") or 0), 2),
+            "miller": round(float(p.get("miller") or 0), 4),
+            "distance_km": round((p.get("distance_centre_m") or 0) / 1000, 2),
+            "dist_hydro_m": p.get("dist_surface_hydro_m"),
+        }
+        for p in parcelles_raw
+    ]
+    ranked.sort(key=lambda x: (x["distance_km"], -x["surface_ha"]))
 
-    scored.sort(key=lambda x: (-x["score"], x["distance_km"]))
-
-    # Limite : les X meilleures parcelles (après scoring). target_count ≤ 0 = pas de limite.
-    # Le tri « meilleur » est calculé en Python ; on tronque la liste triée (pas de LIMIT SQL ici).
+    # Limite : les X premières parcelles classées. target_count ≤ 0 = pas de limite.
     limit = opts_dto.target_count
     if limit > 0:
-        scored = scored[:limit]
+        ranked = ranked[:limit]
 
-    for i, p in enumerate(scored, 1):
+    for i, p in enumerate(ranked, 1):
         p["rank"] = i
 
     return {
-        "total": len(scored),
+        "total": len(ranked),
         "final_radius_km": final_radius_km,
-        "parcelles": scored,
+        "parcelles": ranked,
         "funnel": funnel,
     }
 
@@ -590,7 +982,7 @@ def main():
     print(f"   AOI id        : {aoi_id}")
 
     options = FiltreOptions.defaut()
-    print(f"\n🌲 ZDV natures (défaut)     : {options.zdv_natures}")
+    print(f"\n🌿 Vegetation hybride       : {options.vegetation_hybride}")
     print(f"🫧 Tronçon hydro (défaut)   : {options.troncon_hydro_mode}")
     print(f"💧 Surface hydro (défaut)   : {options.surface_hydro_mode} (rayon {options.surface_hydro_radius_m:.0f} m)")
     print(f"⭕ Miller                   : 0.39  |  📐 Superficie min : 7 ha")

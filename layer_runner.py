@@ -34,10 +34,14 @@ from layers.aoi_to_fragmentation_polygone import run as _run_fragmentation_polyg
 from layers.aoi_to_zones_humides_probables import run as _run_zones_humides_probables
 from layers.aoi_to_surfaces_hydro         import run as _run_surfaces_hydro
 from layers.aoi_to_ebc                    import run as _run_ebc
-from layers.aoi_to_patrimoine_naturel     import run as _run_patrimoine_naturel
+from layers.aoi_to_natura_2000            import run as _run_natura2000
 from layers.aoi_to_znieff                 import run as _run_znieff
-from layers.aoi_to_frayeres               import run as _run_frayeres
+from layers.aoi_to_reserves_naturelles_et_biologiques import (
+    run as _run_reserves_naturelles,
+)
+from layers.aoi_to_sites_classes            import run as _run_sites_classes
 from layers.aoi_to_arrachage_vignes       import run as _run_arrachage_vignes
+from layers.aoi_to_fauna                  import run as _run_fauna
 
 
 # ── LayerResult ──────────────────────────────────────────────────────────────
@@ -78,8 +82,21 @@ def _wrap(key: str, table: str, fn, engine, project_id: str, aoi_id: str, cb) ->
 
 def _make(key, table, fn):
     """Fabrique une fonction (engine, project_id, aoi_id, cb) -> LayerResult."""
-    def wrapped(engine, project_id, aoi_id, cb=None):
+    def wrapped(engine, project_id, aoi_id, cb=None, *, min_area_ha: float | None = None):
         return _wrap(key, table, fn, engine, project_id, aoi_id, cb)
+    wrapped.__name__ = f"layer_{key}"
+    return wrapped
+
+
+def _make_sous_ensembles(key: str, table: str, fn):
+    """
+    Comme _make, mais transmet ``max_uf_parcelles`` à ``run`` (sous-ensembles uniquement).
+    Signature : (engine, project_id, aoi_id, cb=None, *, max_uf_parcelles=None) -> LayerResult
+    """
+    def wrapped(engine, project_id, aoi_id, cb=None, *, max_uf_parcelles: int | None = None):
+        def inner(e, p, a, c):
+            return fn(e, p, a, c, max_uf_parcelles=max_uf_parcelles)
+        return _wrap(key, table, inner, engine, project_id, aoi_id, cb)
     wrapped.__name__ = f"layer_{key}"
     return wrapped
 
@@ -90,12 +107,15 @@ def _make_ppm(key, table, fn):
     Instancie get_engine_ppm() à la volée — pas de changement sur les
     autres layers, pas d'import circulaire au module level.
     """
-    def wrapped(engine, project_id, aoi_id, cb=None):
+    def wrapped(engine, project_id, aoi_id, cb=None, *, min_area_ha: float | None = None):
         from db import get_engine_ppm
         engine_ppm = get_engine_ppm()
         t0 = time.perf_counter()
         try:
-            n = fn(engine, project_id, aoi_id, cb, engine_ppm=engine_ppm) or 0
+            kwargs = {"engine_ppm": engine_ppm}
+            if min_area_ha is not None:
+                kwargs["min_area_ha"] = min_area_ha
+            n = fn(engine, project_id, aoi_id, cb, **kwargs) or 0
             return LayerResult(
                 layer_key=key, table=table,
                 n_inserted=n, duration_s=time.perf_counter() - t0,
@@ -136,7 +156,7 @@ LAYER_REGISTRY: list[dict] = [
         "table": "ecocompensation_results.sous_ensembles",
         "fast":  False,
         # Dépend de unites_foncieres — placé juste après, vérifie lui-même la dépendance
-        "fn":    _make("sous_ensembles", "ecocompensation_results.sous_ensembles", _run_sous_ensembles),
+        "fn":    _make_sous_ensembles("sous_ensembles", "ecocompensation_results.sous_ensembles", _run_sous_ensembles),
     },
 
     # ── Couches SIG (ordre inchangé) ────────────────────────────────────
@@ -218,11 +238,11 @@ LAYER_REGISTRY: list[dict] = [
         "fn":    _make("ebc", "ecocompensation_results.ebc", _run_ebc),
     },
     {
-        "key":   "patrimoine_naturel",
-        "label": "Patrimoine naturel",
-        "table": "ecocompensation_results.patrimoine_naturel",
+        "key":   "natura2000",
+        "label": "Natura 2000 — SIC & ZPS (Patrinat)",
+        "table": "ecocompensation_results.natura2000",
         "fast":  False,
-        "fn":    _make("patrimoine_naturel", "ecocompensation_results.patrimoine_naturel", _run_patrimoine_naturel),
+        "fn":    _make("natura2000", "ecocompensation_results.natura2000", _run_natura2000),
     },
     {
         "key":   "znieff",
@@ -232,11 +252,26 @@ LAYER_REGISTRY: list[dict] = [
         "fn":    _make("znieff", "ecocompensation_results.znieff", _run_znieff),
     },
     {
-        "key":   "frayeres",
-        "label": "Frayères",
-        "table": "ecocompensation_results.frayeres",
+        "key":   "reserves_naturelles",
+        "label": "Réserves naturelles & biologiques (Patrinat)",
+        "table": "ecocompensation_results.reserves_naturelles",
         "fast":  False,
-        "fn":    _make("frayeres", "ecocompensation_results.frayeres", _run_frayeres),
+        "fn":    _make(
+            "reserves_naturelles",
+            "ecocompensation_results.reserves_naturelles",
+            _run_reserves_naturelles,
+        ),
+    },
+    {
+        "key":   "sites_classes",
+        "label": "Sites classés (Patrinat)",
+        "table": "ecocompensation_results.sites_classes",
+        "fast":  False,
+        "fn":    _make(
+            "sites_classes",
+            "ecocompensation_results.sites_classes",
+            _run_sites_classes,
+        ),
     },
     {
         "key":   "arrachage_vignes",
@@ -244,5 +279,12 @@ LAYER_REGISTRY: list[dict] = [
         "table": "ecocompensation_results.arrachage_vignes",
         "fast":  False,
         "fn":    _make("arrachage_vignes", "ecocompensation_results.arrachage_vignes", _run_arrachage_vignes),
+    },
+    {
+        "key":   "fauna",
+        "label": "Faune",
+        "table": "ecocompensation_results.fauna",
+        "fast":  True,
+        "fn":    _make("fauna", "ecocompensation_results.fauna", _run_fauna),
     },
 ]

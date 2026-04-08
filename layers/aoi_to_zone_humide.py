@@ -53,7 +53,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             text(
                 """
                 SELECT count(*)
-                FROM geo.zone_humide
+                FROM ecocompensation.zone_humide
                 WHERE ST_Intersects(
                         geom_2154,
                         ST_GeomFromText(:wkt_aoi, 2154)
@@ -121,8 +121,8 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                     z.inventaire_id,
                     z.libelle,
                     z.inv_nom,
-                    ST_SetSRID(z.geom_2154, 2154)
-                FROM geo.zone_humide z
+                    z.geom_2154
+                FROM ecocompensation.zone_humide z
                 WHERE ST_Intersects(
                     z.geom_2154,
                     ST_GeomFromText(:wkt_aoi, 2154)

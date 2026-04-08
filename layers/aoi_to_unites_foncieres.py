@@ -27,6 +27,7 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 PARCELLES_PM_TABLE = os.getenv("PARCELLES_PM_TABLE", "public.parcelles_personnes_morales")
+MIN_AREA_HA_PREFILTER = 7.0
 
 
 # ─────────────────────────────────────────────
@@ -153,6 +154,7 @@ def run(
     cb=None,
     *,
     engine_ppm=None,
+    min_area_ha=MIN_AREA_HA_PREFILTER,
 ) -> int:
     """
     Construit ecocompensation_results.unites_foncieres.
@@ -233,10 +235,13 @@ def run(
             for root, members in uf.clusters(idus).items():
                 if len(members) < 2:
                     continue
+                surface_ha_uf = round(_compute_union_surface(conn_ppm, members) / 10_000, 4)
+                if surface_ha_uf < min_area_ha:
+                    continue  # UF trop petite, aucun sous-ensemble possible
+
                 cluster_idx += 1
                 uf_id        = f"{siren}_{cluster_idx:03d}"
                 nb           = len(members)
-                surface_ha_uf = round(_compute_union_surface(conn_ppm, members) / 10_000, 4)
                 by_size[nb] += 1
 
                 for idu in members:
@@ -280,7 +285,7 @@ def run(
             inserted += len(all_rows[i:i + BATCH])
 
     log(f"   → {inserted:,} lignes insérées en {time.perf_counter() - t_ins:.1f}s")
-    log(f"✅ aoi_to_unites_foncieres terminé en {time.perf_counter() - t0:.1f}s total")
+    log(f"✅ aoi_to_unites_foncieres terminé en {time.perf_counter() - t0:.1f}s | pré-filtre surface ≥ {min_area_ha} ha appliqué")
 
     log("\n📊 Répartition UF par nb parcelles :")
     for k in sorted(by_size):
@@ -294,6 +299,7 @@ def run(
 # ─────────────────────────────────────────────
 
 def main():
+    import argparse
     BASE_DIR = Path(__file__).resolve().parent
     load_dotenv(BASE_DIR / ".env")
 
@@ -301,18 +307,60 @@ def main():
     engine_core = get_engine()
     engine_ppm  = get_engine_ppm()
 
+    parser = argparse.ArgumentParser(description="Construit les unités foncières pour une AOI.")
+    parser.add_argument("--aoi",  help="UUID de l'AOI (défaut : dernière AOI créée)")
+    parser.add_argument("--list", action="store_true", help="Lister les AOI/projets disponibles")
+    args = parser.parse_args()
+
     with engine_core.begin() as conn:
-        row = conn.execute(
-            text("SELECT id, aoi_id FROM ecocompensation.projects WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1")
-        ).mappings().one_or_none()
+        if args.list:
+            rows = conn.execute(text("""
+                SELECT p.id AS project_id, p.name, p.aoi_id, p.created_at
+                FROM ecocompensation.projects p
+                WHERE p.aoi_id IS NOT NULL
+                ORDER BY p.created_at DESC
+                LIMIT 20
+            """)).mappings().all()
+            print(f"{'Projet':<40} {'AOI id':<40} {'Nom'}")
+            print("─" * 100)
+            for r in rows:
+                print(f"{str(r['project_id']):<40} {str(r['aoi_id']):<40} {r['name']}")
+            return
 
-    if not row:
-        print("Aucun projet avec AOI trouvé.")
-        return
+        if args.aoi:
+            row = conn.execute(text("""
+                SELECT p.id AS project_id, p.aoi_id
+                FROM ecocompensation.projects p
+                WHERE p.aoi_id = :aid AND p.aoi_id IS NOT NULL
+                LIMIT 1
+            """), {"aid": args.aoi}).mappings().one_or_none()
+            if not row:
+                # aoi_id fourni mais pas de projet associé → chercher par project_id
+                row = conn.execute(text("""
+                    SELECT p.id AS project_id, p.aoi_id
+                    FROM ecocompensation.projects p
+                    WHERE p.id = :pid AND p.aoi_id IS NOT NULL
+                    LIMIT 1
+                """), {"pid": args.aoi}).mappings().one_or_none()
+            if not row:
+                print(f"❌ Aucun projet trouvé pour aoi_id ou project_id = {args.aoi}")
+                return
+        else:
+            row = conn.execute(text("""
+                SELECT p.id AS project_id, p.aoi_id
+                FROM ecocompensation.projects p
+                WHERE p.aoi_id IS NOT NULL
+                ORDER BY p.created_at DESC
+                LIMIT 1
+            """)).mappings().one_or_none()
+            if not row:
+                print("Aucun projet avec AOI trouvé.")
+                return
 
-    project_id = str(row["id"])
+    project_id = str(row["project_id"])
     aoi_id     = str(row["aoi_id"])
-    print(f"🔗 Projet : {project_id} | AOI : {aoi_id}")
+    print(f"🔗 Projet : {project_id}")
+    print(f"   AOI    : {aoi_id}")
 
     n = run(engine_core, project_id, aoi_id, cb=print, engine_ppm=engine_ppm)
     print(f"\nTotal lignes insérées : {n}")

@@ -105,7 +105,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             {"pid": project_id},
         )
 
-    # 3) Comptage des tuiles raster intersectantes
+    # 3) Comptage + liste des tuiles raster intersectantes
     with engine.begin() as conn:
         count_tiles = conn.execute(
             text(
@@ -122,6 +122,23 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             ),
             {"aid": aoi_id},
         ).scalar_one()
+        tile_rows = conn.execute(
+            text(
+                """
+                SELECT r.rid
+                FROM geo.zones_humides_probables r
+                JOIN ecocompensation.aoi a
+                  ON a.id = :aid
+                WHERE ST_Intersects(
+                    r.rast,
+                    a.geom_2154
+                )
+                ORDER BY r.rid;
+                """
+            ),
+            {"aid": aoi_id},
+        ).mappings().all()
+        tile_rids = [int(r["rid"]) for r in tile_rows]
 
     log(
         f"[ZH_PROBA] {count_tiles} tuiles raster intersectent l'AOI (avant vectorisation)."
@@ -131,45 +148,66 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         log("[ZH_PROBA] Rien à vectoriser.")
         return 0
 
-    # 4) Vectorisation : ST_Clip + ST_DumpAsPolygons
+    # 4) Vectorisation par tuile : ST_Clip + ST_DumpAsPolygons
     t0 = time.perf_counter()
-    with engine.begin() as conn:
-        res = conn.execute(
-            text(
-                """
-                INSERT INTO ecocompensation_results.zones_humides_probables (project_id, rid, value, geom)
-                SELECT
-                    :project_id AS project_id,
-                    r.rid,
-                    (p).val::integer AS value,
-                    (p).geom::geometry(Polygon, 2154) AS geom
-                FROM geo.zones_humides_probables r
-                JOIN ecocompensation.aoi a
-                  ON a.id = :aoi_id
-                CROSS JOIN LATERAL ST_DumpAsPolygons(
-                    ST_Clip(
-                        r.rast,
-                        1,
-                        a.geom_2154,
-                        true
-                    )
-                ) AS p
-                WHERE ST_Intersects(
-                    r.rast,
-                    a.geom_2154
-                )
-                  AND (p).val IS NOT NULL
-                  AND (p).val <> ST_BandNoDataValue(r.rast, 1);
-                """
-            ),
-            {"project_id": project_id, "aoi_id": aoi_id},
-        )
+    rows = 0
+    n_empty_tiles = 0
+    n_non_empty_tiles = 0
+    total_tiles = len(tile_rids)
+    for i, rid in enumerate(tile_rids, 1):
+        tile_t0 = time.perf_counter()
+        with engine.begin() as conn:
+            # La vectorisation raster peut être longue sur de grandes AOI :
+            # on relève le timeout local à la transaction.
+            conn.execute(text("SET LOCAL statement_timeout = '15min';"))
+            res = conn.execute(
+                text(
+                    """
+                    INSERT INTO ecocompensation_results.zones_humides_probables (project_id, rid, value, geom)
+                    SELECT
+                        :project_id AS project_id,
+                        r.rid,
+                        (p).val::integer AS value,
+                        (p).geom::geometry(Polygon, 2154) AS geom
+                    FROM geo.zones_humides_probables r
+                    JOIN ecocompensation.aoi a
+                      ON a.id = :aoi_id
+                    CROSS JOIN LATERAL ST_DumpAsPolygons(
+                        ST_Clip(
+                            r.rast,
+                            1,
+                            a.geom_2154,
+                            true
+                        )
+                    ) AS p
+                    WHERE r.rid = :rid
+                      AND (p).val IS NOT NULL
+                      AND (p).val <> ST_BandNoDataValue(r.rast, 1);
+                    """
+                ),
+                {"project_id": project_id, "aoi_id": aoi_id, "rid": rid},
+            )
+        n_tile = res.rowcount or 0
+        rows += n_tile
+        if n_tile == 0:
+            n_empty_tiles += 1
+            log(
+                f"[ZH_PROBA] Tuile {i}/{total_tiles} (rid={rid}) : vide après clip "
+                f"(0 polygone) en {time.perf_counter() - tile_t0:.2f} s "
+                f"(tuiles avec données={n_non_empty_tiles}, vides={n_empty_tiles}, cumul={rows})."
+            )
+        else:
+            n_non_empty_tiles += 1
+            log(
+                f"[ZH_PROBA] Tuile {i}/{total_tiles} (rid={rid}) vectorisée : "
+                f"{n_tile} polygones en {time.perf_counter() - tile_t0:.2f} s "
+                f"(tuiles avec données={n_non_empty_tiles}, vides={n_empty_tiles}, cumul={rows})."
+            )
     t1 = time.perf_counter()
 
-    rows = res.rowcount or 0
     log(
         f"[RESULTS ZH_PROBA] {rows} polygones insérés dans ecocompensation_results.zones_humides_probables "
-        f"(en {t1 - t0:.2f} s)."
+        f"(en {t1 - t0:.2f} s) | tuiles avec données={n_non_empty_tiles}, tuiles vides={n_empty_tiles}."
     )
     return rows
 

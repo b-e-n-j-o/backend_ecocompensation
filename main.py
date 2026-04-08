@@ -12,6 +12,7 @@ Toute la logique métier vit dans :
   - layers/layer_runner.py  → registre des couches
 
 Endpoints :
+    POST   /api/parcels/preanalyze           pré-analyse parcelle × couches (sans projet)
     POST   /api/projects                      créer un projet
     GET    /api/projects                      lister les projets
     GET    /api/projects/{id}                 détail d'un projet
@@ -26,6 +27,7 @@ Endpoints :
     GET    /api/memory                        RAM du processus backend
     GET    /api/layers                        liste des couches
     WS     /ws/projects/{id}/fetch-progress   suivi temps réel des fetches
+    WS     /ws/parcels/preanalyze              pré-analyse parcelle (ligne à ligne)
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import uuid
+from dataclasses import asdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -55,6 +59,7 @@ from orchestrator import run_orchestration
 from layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
 from routers.foncier_router import router as foncier_router
+from routers.results_geojson_router import router as results_geojson_router
 
 from vrai_filtre import (
     FiltreOptions,
@@ -95,6 +100,16 @@ def _parse_cors_origins() -> list[str]:
     merged = [o.rstrip("/") for o in default_origins] + extra
     # Déduplication en conservant l'ordre
     return list(dict.fromkeys(merged))
+
+
+def _cors_origin_regex() -> str:
+    """
+    Autorise toutes les origines Vercel du frontend ecocompensation.
+    Exemples acceptés :
+      - https://ecocompensation-frontend.vercel.app
+      - https://ecocompensation-frontend-xxx.vercel.app
+    """
+    return r"^https://ecocompensation-frontend(?:[-a-zA-Z0-9.]*)?\.vercel\.app$"
 
 
 # ─────────────────────────────────────────────
@@ -146,16 +161,14 @@ app = FastAPI(title="KERELIA Ecocompensation API", version="1.0.0", lifespan=lif
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_parse_cors_origins(),
+    allow_origin_regex=_cors_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(foncier_router, prefix="/api/foncier")
-
-_dist = Path(__file__).parent.parent / "frontend" / "dist"
-if _dist.exists():
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="static")
+app.include_router(results_geojson_router)
 
 
 # ─────────────────────────────────────────────
@@ -163,34 +176,75 @@ if _dist.exists():
 # ─────────────────────────────────────────────
 
 class FiltreOptionsDTO(BaseModel):
-    zdv_natures:              list[str] = Field(default_factory=list)
+    class VegetationHybrideDTO(BaseModel):
+        zdv_natures: list[str] = Field(default_factory=list)
+        cesbio_libelles: list[str] = Field(default_factory=list)
+        mode: str = Field(default="OR", pattern="^(OR|AND)$")
+
+    class FauneCriterionDTO(BaseModel):
+        tax_nom_val: str = Field(..., min_length=1)
+        mode: str = Field(default="intersect", pattern="^(intersect|within_radius)$")
+        radius_m: float = Field(default=500.0, ge=0.0, le=2000.0)
+        sources: list[str] = Field(default_factory=lambda: ["pct", "lin", "surf"])
+
+    vegetation_hybride: VegetationHybrideDTO = Field(default_factory=VegetationHybrideDTO)
+    funnel_mode: bool = Field(
+        default=False,
+        description="Active le calcul détaillé de l'entonnoir (plus lent).",
+    )
+    carhab_nom_eunis:         list[str] = Field(
+        default_factory=list,
+        description="Habitats Carhab : libellés EUNIS (nom_eunis) ; intersection avec au moins un polygone.",
+    )
+    arrachage_vignes_mode:    str   = Field(
+        default="ignore",
+        pattern="^(ignore|intersect|exclude)$",
+        description="Arrachage de vignes : ignorer, intersecter la couche, ou exclure les parcelles qui intersectent.",
+    )
+    zone_humide_mode:         str   = Field(
+        default="ignore",
+        pattern="^(ignore|intersect|exclude)$",
+        description="Zones humides : ignorer, intersecter la couche, ou exclure les parcelles qui intersectent.",
+    )
+    ebc_mode: str = Field(
+        default="ignore",
+        pattern="^(ignore|intersect|exclude)$",
+        description="Espaces boisés classés (EBC) : ignorer, intersecter, ou exclure.",
+    )
+    natura2000_mode: str = Field(
+        default="exclude",
+        pattern="^(ignore|intersect|exclude)$",
+        description="Natura 2000 : ignorer, intersecter, ou exclure (défaut = exclure, comportement historique).",
+    )
+    reserves_naturelles_mode: str = Field(
+        default="ignore",
+        pattern="^(ignore|intersect|exclude)$",
+        description="Réserves naturelles : ignorer, intersecter, ou exclure.",
+    )
+    znieff_mode: str = Field(
+        default="ignore",
+        pattern="^(ignore|intersect|exclude)$",
+        description="ZNIEFF (types I et II) : ignorer, intersecter, ou exclure.",
+    )
+    remontee_nappes_classefiab: list[str] = Field(
+        default_factory=list,
+        description="Remontées de nappes : valeurs classefiab à intersecter (liste vide = critère neutre).",
+    )
     troncon_hydro_mode:       str   = "intersect"
     troncon_hydro_radius_m:   float = 500.0
     surface_hydro_mode:       str   = "within_radius"
     surface_hydro_radius_m:   float = 500.0
+    faune_criteria:           list[FauneCriterionDTO] = Field(default_factory=list)
     miller_threshold:         float = 0.39
     min_area_ha:              float = 7.0
     target_count:             int   = Field(
         default=50,
         ge=0,
         le=20_000,
-        description="Nombre max de parcelles (resp. UF) retournées après scoring ; 0 = illimité.",
+        description="Nombre max de parcelles (resp. UF) retournées après classement ; 0 = illimité.",
     )
     radius_start_km:          float = 10.0
     radius_min_km:            float = 1.0
-    # Poids du scoring
-    score_dist_lt2km:         int   = 3
-    score_dist_lt5km:         int   = 2
-    score_dist_lt10km:        int   = 1
-    score_surface_ge20ha:     int   = 1
-    score_miller_ge05:        int   = 1
-    score_hydro_lt100m:       int   = 1
-    # Seuils du scoring
-    score_threshold_miller:   float = 0.5
-    score_threshold_surface_ha: float = 20.0
-    score_threshold_hydro_m:  float = 100.0
-    score_threshold_dist_2km: float = 2.0
-    score_threshold_dist_5km: float = 5.0
 
 
 class FilterRequest(BaseModel):
@@ -203,6 +257,46 @@ class FromParcelleRequest(BaseModel):
     numero:     str   = Field(..., min_length=1, max_length=10)
     name:       str   = Field(..., min_length=1)
     buffer_km:  float = Field(default=5.0, ge=0.0, le=10.0)
+
+
+class PreanalyzeParcelleRequest(BaseModel):
+    """Pré-analyse écologique sans création de projet (intersections parcelle × couches)."""
+    code_insee: str = Field(..., min_length=4, max_length=5)
+    section: str = Field(..., min_length=1, max_length=4)
+    numero: str = Field(..., min_length=1, max_length=10)
+    buffer_m: float = Field(
+        default=50.0,
+        ge=10.0,
+        le=5000.0,
+        description="Buffer autour de la parcelle pour la BBOX WFS (m, EPSG:2154).",
+    )
+
+
+class FetchRequest(BaseModel):
+    """POST /api/projects/{id}/fetch — corps optionnel."""
+    layers: list[str] | None = Field(
+        default=None,
+        description="Clés de couches à lancer (ordre = registre). None = toutes.",
+    )
+    fauna_species: list[str] | None = Field(
+        default=None,
+        description="Liste optionnelle de taxons à appliquer au fetch des couches faune.",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Si True, suppression des lignes insérées après chaque couche (test).",
+    )
+    uf_max_parcelles: int = Field(
+        default=5,
+        ge=5,
+        le=10,
+        description="Nombre max de parcelles par unité foncière pour le calcul des sous-ensembles (5–10).",
+    )
+    uf_min_area_ha: float = Field(
+        default=7.0,
+        ge=1.0,
+        description="Surface minimale (ha) d'une unité foncière conservée au pré-filtre.",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -244,11 +338,41 @@ def _get_aoi_centre(aoi_id: str) -> tuple[float, float]:
 
 def _dto_to_filtre_options(dto: FiltreOptionsDTO) -> FiltreOptions:
     return FiltreOptions(
-        zdv_natures=dto.zdv_natures,
+        vegetation_hybride={
+            "zdv_natures": [
+                x.strip() for x in dto.vegetation_hybride.zdv_natures if x and str(x).strip()
+            ],
+            "cesbio_libelles": [
+                x.strip()
+                for x in dto.vegetation_hybride.cesbio_libelles
+                if x and str(x).strip()
+            ],
+            "mode": dto.vegetation_hybride.mode,
+        },
+        carhab_nom_eunis=[x.strip() for x in dto.carhab_nom_eunis if x and str(x).strip()],
+        ebc_mode=dto.ebc_mode,
+        natura2000_mode=dto.natura2000_mode,
+        reserves_naturelles_mode=dto.reserves_naturelles_mode,
+        znieff_mode=dto.znieff_mode,
+        remontee_nappes_classefiab=[
+            x.strip() for x in dto.remontee_nappes_classefiab if x and str(x).strip()
+        ],
+        arrachage_vignes_mode=dto.arrachage_vignes_mode,
+        zone_humide_mode=dto.zone_humide_mode,
         troncon_hydro_mode=dto.troncon_hydro_mode,
         troncon_hydro_radius_m=dto.troncon_hydro_radius_m,
         surface_hydro_mode=dto.surface_hydro_mode,
         surface_hydro_radius_m=dto.surface_hydro_radius_m,
+        faune_criteria=[
+            {
+                "tax_nom_val": c.tax_nom_val.strip(),
+                "mode": c.mode,
+                "radius_m": float(c.radius_m),
+                "sources": [s for s in c.sources if s in ("pct", "lin", "surf")] or ["pct", "lin", "surf"],
+            }
+            for c in dto.faune_criteria
+            if c.tax_nom_val.strip()
+        ],
     )
 
 
@@ -348,6 +472,23 @@ def _load_parcelle_wfs(code_insee: str, section: str, numero: str) -> gpd.GeoDat
     if gdf.crs is None or gdf.crs.to_string() != "EPSG:2154":
         gdf = gdf.to_crs("EPSG:2154")
     return gdf
+
+
+@app.post("/api/parcels/preanalyze")
+def preanalyze_parcelle_route(body: PreanalyzeParcelleRequest):
+    """
+    Rapport d'intersection parcelle cible × couches SIG (sans projet, sans écriture résultats).
+    Fenêtre WFS : BBOX du buffer (m) autour de la parcelle ; test d'intersection : parcelle stricte.
+    """
+    from preanalyze_parcelle import run_preanalyze_parcelle
+
+    return run_preanalyze_parcelle(
+        engine,
+        code_insee=body.code_insee.strip(),
+        section=body.section.strip(),
+        numero=body.numero.strip(),
+        buffer_m=float(body.buffer_m),
+    )
 
 
 @app.post("/api/projects/from-parcelle", status_code=201)
@@ -510,13 +651,24 @@ def delete_project(project_id: str):
         "ecocompensation_results.parcelles", "ecocompensation_results.ebc",
         "ecocompensation_results.mesures_compensatoire_surf", "ecocompensation_results.mesures_compensatoire_lin",
         "ecocompensation_results.mesures_compensatoire_pct", "ecocompensation_results.mesures_compensatoire_commune",
-        "ecocompensation_results.patrimoine_naturel", "ecocompensation_results.zone_de_vegetation",
-        "ecocompensation_results.zone_humide", "ecocompensation_results.troncons_hydro",
+        "ecocompensation_results.zone_de_vegetation",
+        "ecocompensation_results.zone_humide",
+        "ecocompensation_results.remontee_de_nappes",
+        "ecocompensation_results.troncons_hydro",
         "ecocompensation_results.surfaces_hydro", "ecocompensation_results.surfaces_elementaires",
         "ecocompensation_results.routes", "ecocompensation_results.voies_ferrees",
         "ecocompensation_results.fragmentation_polygons", "ecocompensation_results.zones_humides_probables",
-        "ecocompensation_results.znieff", "ecocompensation_results.frayeres",
+        "ecocompensation_results.znieff",
+        "ecocompensation_results.reserves_naturelles",
+        "ecocompensation_results.sites_classes",
+        "ecocompensation_results.natura2000",
+        "ecocompensation_results.prairies_sensibles",
         "ecocompensation_results.arrachage_vignes",
+        "ecocompensation_results.fauna",
+        # Compat anciens schémas (si déjà calculés)
+        "ecocompensation_results.faune_pct",
+        "ecocompensation_results.faune_lin",
+        "ecocompensation_results.faune_surf",
         "ecocompensation_results.unites_foncieres",   # ← nouveau
         "ecocompensation_results.sous_ensembles",     # ← nouveau
     ]
@@ -548,22 +700,43 @@ _running_fetches: set[str] = set()
 
 
 @app.post("/api/projects/{project_id}/fetch")
-async def start_fetch(project_id: str, background_tasks: BackgroundTasks):
+async def start_fetch(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    body: FetchRequest | None = None,
+):
     proj = _get_project(project_id)
     if proj["status"] == "fetching" or project_id in _running_fetches:
         raise HTTPException(409, "Fetch déjà en cours")
     aoi_id = str(proj["aoi_id"])
+    req = body or FetchRequest()
+    if req.layers is not None and len(req.layers) == 0:
+        raise HTTPException(400, "La liste « layers » ne peut pas être vide")
     _running_fetches.add(project_id)
 
     async def _run():
         try:
-            await run_orchestration(engine, project_id, aoi_id,
-                                    lambda d: ws_manager.broadcast(project_id, d))
+            await run_orchestration(
+                engine,
+                project_id,
+                aoi_id,
+                lambda d: ws_manager.broadcast(project_id, d),
+                layer_keys=req.layers,
+                dry_run=req.dry_run,
+                uf_max_parcelles=req.uf_max_parcelles,
+                uf_min_area_ha=req.uf_min_area_ha,
+                fauna_species=req.fauna_species,
+            )
         finally:
             _running_fetches.discard(project_id)
 
     background_tasks.add_task(_run)
-    return {"status": "started", "project_id": project_id}
+    return {
+        "status": "started",
+        "project_id": project_id,
+        "layers": req.layers,
+        "dry_run": req.dry_run,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -704,10 +877,11 @@ def get_parcelles_geojson(project_id: str):
         raise HTTPException(400, "Aucune parcelle dans les résultats")
 
     idus       = [p["idu"] for p in parcelles_data if p.get("idu")]
-    scores     = [int(p.get("score", 0)) for p in parcelles_data if p.get("idu")]
-    min_s, max_s = min(scores, default=0), max(scores, default=0)
-    rng        = max_s - min_s or 1
-    idu_to_score = {p["idu"]: int(p.get("score", 0)) for p in parcelles_data if p.get("idu")}
+    idu_to_rank = {p["idu"]: int(p.get("rank", 0)) for p in parcelles_data if p.get("idu")}
+    ranks = [r for r in idu_to_rank.values() if r > 0]
+    min_r = min(ranks, default=1)
+    max_r = max(ranks, default=1)
+    rng = max_r - min_r or 1
     aoi_id_str = str(proj.get("aoi_id") or "")
 
     with engine.begin() as conn:
@@ -725,8 +899,15 @@ def get_parcelles_geojson(project_id: str):
 
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature", "geometry": dict(r["geometry"]),
-         "properties": {"idu": r["idu"], "score": idu_to_score.get(r["idu"], 0),
-                        "score_norm": round((idu_to_score.get(r["idu"], 0) - min_s) / rng, 4)}}
+         "properties": {
+             "idu": r["idu"],
+             "rank": idu_to_rank.get(r["idu"], 0),
+             # 1 = meilleur rang, 0 = plus faible (pour palette existante)
+             "score_norm": round(
+                 1.0 - ((idu_to_rank.get(r["idu"], max_r) - min_r) / rng),
+                 4,
+             ),
+         }}
         for r in rows
     ]}
 
@@ -956,6 +1137,96 @@ async def fetch_progress_ws(project_id: str, websocket: WebSocket):
         ws_manager.disconnect(project_id, websocket)
 
 
+@app.websocket("/ws/parcels/preanalyze")
+async def preanalyze_parcelle_ws(websocket: WebSocket):
+    """
+    Flux temps réel : start → running (par clé) → layer (résultat) → complete.
+    Le client envoie un JSON : { code_insee, section, numero, buffer_m? }.
+    """
+    await websocket.accept()
+    try:
+        raw = await websocket.receive_json()
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        await websocket.send_json({"event": "error", "message": "Corps JSON invalide."})
+        await websocket.close()
+        return
+
+    try:
+        body = PreanalyzeParcelleRequest(**raw)
+    except Exception as e:
+        await websocket.send_json({"event": "error", "message": f"Paramètres invalides: {e}"})
+        await websocket.close()
+        return
+
+    code_insee = body.code_insee.strip()
+    section = body.section.strip()
+    numero = body.numero.strip()
+    buffer_m = float(body.buffer_m)
+
+    q: queue.Queue = queue.Queue()
+
+    def worker() -> None:
+        try:
+            from preanalyze_parcelle import run_preanalyze_parcelle
+
+            def on_start(payload: dict) -> None:
+                q.put(("start", payload))
+
+            def on_running(layer_key: str) -> None:
+                q.put(("running", layer_key))
+
+            def on_layer(row: LayerPreanalyzeRow) -> None:
+                q.put(("layer", asdict(row)))
+
+            result = run_preanalyze_parcelle(
+                engine,
+                code_insee=code_insee,
+                section=section,
+                numero=numero,
+                buffer_m=buffer_m,
+                on_start=on_start,
+                on_running=on_running,
+                on_layer=on_layer,
+            )
+            q.put(("end", result))
+        except Exception as e:
+            logger.exception("Pré-analyse WebSocket")
+            q.put(("fatal", str(e)))
+
+    async def pump() -> None:
+        while True:
+            kind, payload = await asyncio.to_thread(q.get)
+            if kind == "start":
+                pl = payload if isinstance(payload, dict) else {}
+                await websocket.send_json({"event": "start", **pl})
+            elif kind == "running":
+                await websocket.send_json({"event": "running", "layer_key": payload})
+            elif kind == "layer":
+                await websocket.send_json({"event": "layer", "layer": payload})
+            elif kind == "end":
+                res = payload if isinstance(payload, dict) else {}
+                await websocket.send_json({"event": "complete", **res})
+                return
+            elif kind == "fatal":
+                await websocket.send_json({"event": "error", "message": str(payload)})
+                return
+
+    pump_task = asyncio.create_task(pump())
+    try:
+        await asyncio.to_thread(worker)
+        await pump_task
+    except WebSocketDisconnect:
+        pump_task.cancel()
+    except Exception as e:
+        logger.exception("preanalyze_ws")
+        try:
+            await websocket.send_json({"event": "error", "message": str(e)})
+        except Exception:
+            pass
+
+
 # ─────────────────────────────────────────────
 # Utilitaires
 # ─────────────────────────────────────────────
@@ -973,6 +1244,119 @@ def get_memory():
 @app.get("/api/layers")
 def list_layers():
     return [{"key": l["key"], "label": l["label"], "fast": l["fast"]} for l in LAYER_REGISTRY]
+
+
+@app.get("/api/reference/remontee-nappes-classefiab")
+def list_remontee_nappes_classefiab():
+    """Valeurs distinctes de `classefiab` dans la couche nationale (menu filtre)."""
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT to_regclass(:r) IS NOT NULL").execution_options(no_prepare=True),
+            {"r": "ecocompensation.remontee_de_nappes"},
+        ).scalar_one()
+        if not exists:
+            return {"values": []}
+        rows = conn.execute(
+            text(
+                """
+                SELECT DISTINCT btrim(classefiab::text) AS v
+                FROM ecocompensation.remontee_de_nappes
+                WHERE classefiab IS NOT NULL
+                  AND btrim(classefiab::text) <> ''
+                ORDER BY 1
+                """
+            )
+        ).all()
+    return {"values": [str(v) for (v,) in rows if v]}
+
+
+def _resolve_taxnomval_column(conn, full_table: str) -> str | None:
+    if "." not in full_table:
+        return None
+    schema, table = full_table.split(".", 1)
+    # Priorité : ancienne convention taxnomval, puis colonnes présentes
+    # dans `ecocompensation.fauna` (ex: nom_vernaculaire).
+    candidates = ["taxnomval", "nom_vernaculaire", "nom_taxref", "tax_nom_val", "nom_vern"]
+    for cand in candidates:
+        row = conn.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = :schema
+                  AND table_name = :table
+                  AND lower(column_name) = :col
+                LIMIT 1
+                """
+            ),
+            {"schema": schema, "table": table, "col": cand},
+        ).mappings().one_or_none()
+        if row and row.get("column_name"):
+            col = str(row["column_name"])
+            return f'"{col}"' if col != col.lower() else col
+    return None
+
+
+@app.get("/api/fauna/taxa")
+def list_fauna_taxa():
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT to_regclass(:r) IS NOT NULL").execution_options(no_prepare=True),
+            {"r": "ecocompensation.fauna_taxa_ref"},
+        ).scalar_one()
+        if not exists:
+            logger.warning("Table de référence absente: ecocompensation.fauna_taxa_ref")
+            return {"taxa": []}
+
+        rows = conn.execute(
+            text(
+                """
+                SELECT btrim(tax::text) AS tax
+                FROM ecocompensation.fauna_taxa_ref
+                WHERE tax IS NOT NULL
+                  AND btrim(tax::text) <> ''
+                ORDER BY tax
+                """
+            )
+        ).all()
+    return {"taxa": [str(v) for (v,) in rows if v]}
+
+
+@app.get("/api/projects/{project_id}/fauna/taxa")
+def list_project_fauna_taxa(project_id: str):
+    _get_project(project_id)
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT to_regclass(:r) IS NOT NULL").execution_options(no_prepare=True),
+            {"r": "ecocompensation_results.fauna"},
+        ).scalar_one()
+        if not exists:
+            return {"taxa": []}
+
+        tax_col = _resolve_taxnomval_column(conn, "ecocompensation_results.fauna")
+        if not tax_col:
+            return {"taxa": []}
+
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT DISTINCT btrim({tax_col}::text) AS tax
+                FROM ecocompensation_results.fauna
+                WHERE project_id = :pid
+                  AND {tax_col} IS NOT NULL
+                  AND btrim({tax_col}::text) <> ''
+                ORDER BY tax
+                """
+            ),
+            {"pid": project_id},
+        ).all()
+    return {"taxa": [str(v) for (v,) in rows if v]}
+
+
+# Monter le frontend statique en dernier pour ne pas intercepter /api/*
+_dist = Path(__file__).parent.parent / "frontend" / "dist"
+if _dist.exists():
+    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="static")
 
 
 if __name__ == "__main__":

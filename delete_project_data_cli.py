@@ -11,7 +11,11 @@ Supprime proprement toutes les géométries / données associées à un projet :
   - l'entrée projet dans ecocompensation.projects.
 
 Usage :
-    python delete_project_data_cli.py
+    # Nettoyage d'un seul projet
+    python delete_project_data_cli.py --project-id <uuid>
+
+    # Purge globale (tous les projets + AOI + foncier + résultats)
+    python delete_project_data_cli.py --all
 """
 
 from __future__ import annotations
@@ -36,9 +40,9 @@ RESULT_TABLES: list[str] = [
     "ecocompensation_results.mesures_compensatoire_surf",
     "ecocompensation_results.mesures_compensatoire_lin",
     "ecocompensation_results.mesures_compensatoire_pct",
-    "ecocompensation_results.mesures_compensatoire_commune",
-    "ecocompensation_results.patrimoine_naturel",
     "ecocompensation_results.zone_de_vegetation",
+    "ecocompensation_results.cesbio",
+    "ecocompensation_results.carhab",
     "ecocompensation_results.zone_humide",
     "ecocompensation_results.troncons_hydro",
     "ecocompensation_results.surfaces_hydro",
@@ -48,8 +52,19 @@ RESULT_TABLES: list[str] = [
     "ecocompensation_results.fragmentation_polygons",
     "ecocompensation_results.zones_humides_probables",
     "ecocompensation_results.znieff",
-    "ecocompensation_results.frayeres",
     "ecocompensation_results.arrachage_vignes",
+    "ecocompensation_results.fauna",
+    "ecocompensation_results.natura2000",
+    "ecocompensation_results.patrimoine_naturel",
+    "ecocompensation_results.reserves_naturelles",
+    "ecocompensation_results.sites_classes",
+    "ecocompensation_results.prairies_sensibles",
+    "ecocompensation_results.bd_topo_et_cesbio",
+    "ecocompensation_results.remontee_de_nappes",
+    "ecocompensation_results.sous_ensembles",
+    "ecocompensation_results.unites_foncieres",
+    "ecocompensation_results.cosia",
+
 ]
 
 
@@ -181,9 +196,67 @@ def delete_project_data(project_id: str) -> None:
         logger.warning("Vérification : au moins une entrée existe encore.")
 
 
+def _delete_all_rows(engine, table: str) -> None:
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(f"DELETE FROM {table}"))
+        deleted = res.rowcount or 0
+        logger.info("Purge %s -> %d ligne(s) supprimée(s)", table, deleted)
+    except Exception as e:
+        logger.warning("Impossible de purger %s : %s", table, e)
+
+
+def delete_all_projects_data() -> None:
+    """
+    Purge globale :
+      1) tables de résultats ecocompensation_results.*
+      2) tables coeur liées aux projets (projects, aoi, foncier)
+    Les tables sont conservées (aucun DROP TABLE).
+    """
+    engine = get_engine()
+
+    logger.warning("⚠️ MODE PURGE GLOBALE activé : suppression de tous les projets et résultats.")
+
+    # 1) Résultats thématiques (toutes lignes)
+    for table in RESULT_TABLES:
+        _delete_all_rows(engine, table)
+
+    # 2) Tables coeur (ordre sûr vis-à-vis des dépendances)
+    core_tables = [
+        "ecocompensation.project_parcelles",
+        "ecocompensation.projects",
+        "ecocompensation.aoi",
+        "ecocompensation.foncier",
+    ]
+    for table in core_tables:
+        _delete_all_rows(engine, table)
+
+    logger.info("Purge globale terminée. Toutes les tables sont conservées, mais vidées.")
+
+
 def main() -> None:
-    # Project id fixé en dur pour usage local
-    delete_project_data(PROJECT_ID)
+    parser = argparse.ArgumentParser(
+        description="Supprime les données d'un projet ou purge l'ensemble des projets."
+    )
+    parser.add_argument(
+        "--project-id",
+        default=PROJECT_ID,
+        help=f"UUID du projet à supprimer (défaut: {PROJECT_ID})",
+    )
+    parser.add_argument(
+        "--all",
+        "--all-projects",
+        dest="all_projects",
+        action="store_true",
+        help="Purge globale : vide toutes les tables de résultats + projects/aoi/foncier (sans supprimer les tables).",
+    )
+    args = parser.parse_args()
+
+    if args.all_projects:
+        delete_all_projects_data()
+        return
+
+    delete_project_data(args.project_id)
 
 
 if __name__ == "__main__":

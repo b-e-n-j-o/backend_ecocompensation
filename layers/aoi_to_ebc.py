@@ -20,8 +20,13 @@ import geopandas as gpd
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
-# Import des utils carroyage du projet WFS_TO_SUPA (même logique que AOC)
-from carroyage_utils import harvest_adaptive  # on peut se passer du dedup ici
+# Import utils carroyage : priorité à la version du package `layers`
+# (celle qui gère retries/backoff + subdivision de secours).
+try:
+    from .carroyage_utils import harvest_adaptive  # import package
+except Exception:
+    # Fallback pour l'exécution directe du script (python aoi_to_ebc.py)
+    from carroyage_utils import harvest_adaptive
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 

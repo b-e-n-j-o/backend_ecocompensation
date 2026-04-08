@@ -75,6 +75,7 @@ def ensure_results_table(conn, dst_table: str):
             CREATE TABLE IF NOT EXISTS {dst_table} (
                 id uuid NOT NULL DEFAULT gen_random_uuid(),
                 project_id uuid NULL,
+                aoi_id uuid NULL,
                 categorie text NULL,
                 classe text NULL,
                 type text NULL,
@@ -206,6 +207,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                     f"""
                     INSERT INTO {dst} (
                         project_id,
+                        aoi_id,
                         categorie,
                         classe,
                         type,
@@ -225,6 +227,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                     )
                     SELECT
                         :pid AS project_id,
+                        :aid AS aoi_id,
                         s.categorie,
                         s.classe,
                         s.type,
@@ -248,7 +251,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                     );
                     """
                 ),
-                {"project_id": project_id, "wkt_aoi": aoi_wkt},
+                {"pid": project_id, "aid": aoi_id, "wkt_aoi": aoi_wkt},
             )
         t3 = time.perf_counter()
 

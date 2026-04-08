@@ -23,21 +23,41 @@ def subdivide_bbox(b):
 # -----------------------------
 # Fetch simple via OWSLib
 # -----------------------------
-def fetch_wfs_bbox(wfs_url, layer, bbox, srs="EPSG:4326"):
-    """Récupère une tuile WFS (bbox)"""
+def fetch_wfs_bbox(wfs_url, layer, bbox, srs="EPSG:4326", max_retries=4, retry_base_s=1.0):
+    """Récupère une tuile WFS (bbox) avec retries/backoff."""
     minx, miny, maxx, maxy = bbox
-    try:
-        wfs = WebFeatureService(wfs_url, version="2.0.0")
-        resp = wfs.getfeature(
-            typename=layer,
-            bbox=(minx, miny, maxx, maxy, srs),
-            outputFormat="application/json",
-        )
-        gdf = gpd.read_file(resp)
-        return gdf, "json"
-    except Exception as e:
-        logging.error(f"❌ fetch_wfs_bbox({layer}, {bbox}) → {e}")
-        return gpd.GeoDataFrame(), None
+    for attempt in range(1, max_retries + 1):
+        try:
+            wfs = WebFeatureService(wfs_url, version="2.0.0")
+            resp = wfs.getfeature(
+                typename=layer,
+                bbox=(minx, miny, maxx, maxy, srs),
+                outputFormat="application/json",
+            )
+            gdf = gpd.read_file(resp)
+            if attempt > 1:
+                logging.info(
+                    "    ✅ Tuile récupérée après retry %d/%d",
+                    attempt,
+                    max_retries,
+                )
+            return gdf, "json"
+        except Exception as e:
+            wait_s = retry_base_s * (2 ** (attempt - 1))
+            logging.error(
+                "❌ fetch_wfs_bbox(%s, %s) tentative %d/%d → %s",
+                layer,
+                bbox,
+                attempt,
+                max_retries,
+                e,
+            )
+            if attempt < max_retries:
+                logging.info("    ↻ Retry dans %.1fs ...", wait_s)
+                time.sleep(wait_s)
+
+    # Échec final : fmt=None pour signaler explicitement l'erreur à l'appelant
+    return gpd.GeoDataFrame(), None
 
 
 # -----------------------------
@@ -59,6 +79,23 @@ def harvest_adaptive(wfs_url, layer, bbox, srs="EPSG:4326", cap=5000, max_level=
         gdf_tile, fmt_used = fetch_wfs_bbox(wfs_url, layer, b, srs=srs)
         if isinstance(gdf_tile, tuple):
             gdf_tile = gdf_tile[0]
+
+        # En cas d'échec réseau/WFS après retries, on subdivise plutôt que perdre la zone.
+        if fmt_used is None:
+            if level < max_level:
+                logging.warning(
+                    "    ⚠️ Échec persistant sur la tuile -> subdivision de secours niveau %d",
+                    level + 1,
+                )
+                for child in subdivide_bbox(b):
+                    stack.append((child, level + 1))
+            else:
+                logging.error(
+                    "    ❌ Tuile perdue après retries (niveau max atteint): %s",
+                    b,
+                )
+            time.sleep(sleep_s)
+            continue
 
         if not gdf_tile.empty:
             # 🔧 Uniformiser CRS de la tuile

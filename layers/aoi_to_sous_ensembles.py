@@ -165,18 +165,27 @@ def compute_union_metrics_batch(
 # run()
 # ─────────────────────────────────────────────
 
-def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
+def run(
+    engine,
+    project_id: str,
+    aoi_id: str,
+    cb=None,
+    *,
+    max_uf_parcelles: int | None = None,
+) -> int:
     """
     Calcule et stocke les sous-ensembles contigus pour le projet.
 
-    :param engine:      Engine base principale (core) — seule base nécessaire.
-    :param project_id:  UUID du projet.
-    :param aoi_id:      UUID de l'AOI (utilisé pour récupérer le centre).
-    :param cb:          Callback log optionnel.
-    :return:            Nombre de sous-ensembles insérés.
+    :param engine:             Engine base principale (core) — seule base nécessaire.
+    :param project_id:         UUID du projet.
+    :param aoi_id:             UUID de l'AOI (utilisé pour récupérer le centre).
+    :param cb:                 Callback log optionnel.
+    :param max_uf_parcelles:   Cap de parcelles par UF (défaut : MAX_UF_PARCELLES).
+    :return:                   Nombre de sous-ensembles insérés.
     """
     log = cb or print
     t0  = time.perf_counter()
+    cap = max_uf_parcelles if max_uf_parcelles is not None else MAX_UF_PARCELLES
 
     # ── Vérification dépendance ──────────────────────────────────────────
     with engine.begin() as conn:
@@ -242,10 +251,10 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
 
     uf_qualifiees = {
         uf_id: members for uf_id, members in by_uf.items()
-        if 2 <= len(members) <= MAX_UF_PARCELLES
+        if 2 <= len(members) <= cap
     }
-    n_cap = sum(1 for m in by_uf.values() if len(m) > MAX_UF_PARCELLES)
-    log(f"📦 {len(by_uf)} UF → {len(uf_qualifiees)} retenues (cap ≤ {MAX_UF_PARCELLES}p) | {n_cap} ignorées")
+    n_cap = sum(1 for m in by_uf.values() if len(m) > cap)
+    log(f"📦 {len(by_uf)} UF → {len(uf_qualifiees)} retenues (cap ≤ {cap}p) | {n_cap} ignorées")
 
     # ── Boucle principale ────────────────────────────────────────────────
     total_inserted   = 0
@@ -349,26 +358,69 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
 # ─────────────────────────────────────────────
 
 def main():
+    import argparse
     load_dotenv(Path(__file__).parent / ".env")
 
     from db import get_engine
     engine = get_engine()
 
+    parser = argparse.ArgumentParser(description="Calcule les sous-ensembles UF pour une AOI.")
+    parser.add_argument("--aoi",  help="UUID de l'AOI ou du projet (défaut : dernier projet)")
+    parser.add_argument("--list", action="store_true", help="Lister les AOI/projets disponibles")
+    parser.add_argument("--cap",  type=int, default=5,
+                        help=f"Cap parcelles par UF (défaut : {MAX_UF_PARCELLES})")
+    args = parser.parse_args()
+
     with engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT id, aoi_id FROM ecocompensation.projects WHERE aoi_id IS NOT NULL ORDER BY created_at DESC LIMIT 1")
-        ).mappings().one_or_none()
+        if args.list:
+            rows = conn.execute(text("""
+                SELECT p.id AS project_id, p.name, p.aoi_id,
+                       (SELECT COUNT(*) FROM ecocompensation_results.unites_foncieres u
+                        WHERE u.project_id = p.id) AS n_uf,
+                       p.created_at
+                FROM ecocompensation.projects p
+                WHERE p.aoi_id IS NOT NULL
+                ORDER BY p.created_at DESC
+                LIMIT 20
+            """)).mappings().all()
+            print(f"{'Projet':<40} {'AOI id':<40} {'UF en base':<12} Nom")
+            print("─" * 110)
+            for r in rows:
+                print(f"{str(r['project_id']):<40} {str(r['aoi_id']):<40} {r['n_uf']:<12} {r['name']}")
+            return
 
-    if not row:
-        print("Aucun projet avec AOI trouvé.")
-        return
+        if args.aoi:
+            row = conn.execute(text("""
+                SELECT p.id AS project_id, p.aoi_id
+                FROM ecocompensation.projects p
+                WHERE (p.aoi_id = :aid OR p.id = :aid)
+                  AND p.aoi_id IS NOT NULL
+                LIMIT 1
+            """), {"aid": args.aoi}).mappings().one_or_none()
+            if not row:
+                print(f"❌ Aucun projet trouvé pour aoi_id ou project_id = {args.aoi}")
+                return
+        else:
+            row = conn.execute(text("""
+                SELECT p.id AS project_id, p.aoi_id
+                FROM ecocompensation.projects p
+                WHERE p.aoi_id IS NOT NULL
+                ORDER BY p.created_at DESC
+                LIMIT 1
+            """)).mappings().one_or_none()
+            if not row:
+                print("Aucun projet avec AOI trouvé.")
+                return
 
-    project_id = str(row["id"])
+    project_id = str(row["project_id"])
     aoi_id     = str(row["aoi_id"])
-    print(f"🔗 Projet : {project_id} | AOI : {aoi_id}")
-    print(f"   MAX_K={MAX_K}  |  cap≤{MAX_UF_PARCELLES}p  |  pré-filtre≥{MIN_AREA_HA_PREFILTER}ha\n")
+    cap        = args.cap
 
-    n = run(engine, project_id, aoi_id, cb=print)
+    print(f"🔗 Projet : {project_id}")
+    print(f"   AOI    : {aoi_id}")
+    print(f"   MAX_K={MAX_K}  |  cap≤{cap or MAX_UF_PARCELLES}p  |  pré-filtre≥{MIN_AREA_HA_PREFILTER}ha\n")
+
+    n = run(engine, project_id, aoi_id, cb=print, max_uf_parcelles=cap)
     print(f"Total insérés : {n:,}")
 
 

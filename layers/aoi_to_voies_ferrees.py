@@ -135,11 +135,12 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
             continue
 
         gdf_2154["project_id"] = project_id
+        gdf_2154["aoi_id"] = aoi_id
 
         for col in VOIES_FERREES_COLUMNS:
             if col not in gdf_2154.columns:
                 gdf_2154[col] = None
-        cols_final = ["project_id"] + VOIES_FERREES_COLUMNS + ["geom_2154"]
+        cols_final = ["project_id", "aoi_id"] + VOIES_FERREES_COLUMNS + ["geom_2154"]
         gdf_2154 = gdf_2154[[c for c in cols_final if c in gdf_2154.columns]]
 
         log("🏗️ Insertion dans ecocompensation_results.voies_ferrees ...")

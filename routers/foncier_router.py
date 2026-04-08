@@ -8,7 +8,7 @@ import geopandas as gpd
 from sqlalchemy import text
 from db import get_engine
 
-router = APIRouter(prefix="/api/foncier", tags=["foncier"])
+router = APIRouter(tags=["foncier"])
 
 engine = get_engine()
 
@@ -71,6 +71,26 @@ def _load_geodataframe_from_upload(file: UploadFile) -> gpd.GeoDataFrame:
 # Endpoint principal
 # -------------------------------------------------------
 
+@router.post("/preview")
+async def preview_foncier(file: UploadFile = File(...)):
+    """
+    Calcule l'emprise totale (union) d'un upload (ZIP SHP/GPKG)
+    et retourne la géométrie en GeoJSON (EPSG:4326) pour prévisualisation.
+    """
+    gdf = _load_geodataframe_from_upload(file)
+    base_geom = gdf.union_all()
+    area_ha = float(base_geom.area / 10000.0)
+    base_geom_4326 = gpd.GeoSeries([base_geom], crs="EPSG:2154").to_crs("EPSG:4326").iloc[0]
+
+    return {
+        "area_ha": round(area_ha, 4),
+        "feature": {
+            "type": "Feature",
+            "geometry": base_geom_4326.__geo_interface__,
+            "properties": {},
+        },
+    }
+
 @router.post("/import", status_code=201)
 async def import_foncier(
     name: str = Form(...),
@@ -101,7 +121,7 @@ async def import_foncier(
             INSERT INTO ecocompensation.foncier (name, geom_2154, area_ha)
             VALUES (
                 :name,
-                ST_GeomFromText(:geom, 2154),
+                ST_Multi(ST_GeomFromText(:geom, 2154)),
                 :area
             )
             RETURNING id
