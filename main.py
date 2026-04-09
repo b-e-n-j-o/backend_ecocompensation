@@ -44,6 +44,7 @@ from pathlib import Path
 
 import psutil
 import geopandas as gpd
+import pandas as pd
 from dotenv import load_dotenv
 from fastapi import (
     FastAPI, HTTPException, UploadFile, File, Form, Query,
@@ -59,7 +60,9 @@ from orchestrator import run_orchestration
 from layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
 from routers.foncier_router import router as foncier_router
+from routers.pool_router import router as pool_router
 from routers.results_geojson_router import router as results_geojson_router
+from pool.pool_service import persist_parcelles_pool_run
 
 from vrai_filtre import (
     FiltreOptions,
@@ -168,6 +171,7 @@ app.add_middleware(
 )
 
 app.include_router(foncier_router, prefix="/api/foncier")
+app.include_router(pool_router)
 app.include_router(results_geojson_router)
 
 
@@ -257,6 +261,18 @@ class FromParcelleRequest(BaseModel):
     numero:     str   = Field(..., min_length=1, max_length=10)
     name:       str   = Field(..., min_length=1)
     buffer_km:  float = Field(default=5.0, ge=0.0, le=10.0)
+
+
+class ParcelleRefDTO(BaseModel):
+    code_insee: str = Field(..., min_length=4, max_length=5)
+    section: str = Field(..., min_length=1, max_length=4)
+    numero: str = Field(..., min_length=1, max_length=10)
+
+
+class FromParcellesRequest(BaseModel):
+    parcelles: list[ParcelleRefDTO] = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    buffer_km: float = Field(default=5.0, ge=0.0, le=10.0)
 
 
 class PreanalyzeParcelleRequest(BaseModel):
@@ -474,30 +490,15 @@ def _load_parcelle_wfs(code_insee: str, section: str, numero: str) -> gpd.GeoDat
     return gdf
 
 
-@app.post("/api/parcels/preanalyze")
-def preanalyze_parcelle_route(body: PreanalyzeParcelleRequest):
-    """
-    Rapport d'intersection parcelle cible × couches SIG (sans projet, sans écriture résultats).
-    Fenêtre WFS : BBOX du buffer (m) autour de la parcelle ; test d'intersection : parcelle stricte.
-    """
-    from preanalyze_parcelle import run_preanalyze_parcelle
-
-    return run_preanalyze_parcelle(
-        engine,
-        code_insee=body.code_insee.strip(),
-        section=body.section.strip(),
-        numero=body.numero.strip(),
-        buffer_m=float(body.buffer_m),
-    )
-
-
-@app.post("/api/projects/from-parcelle", status_code=201)
-def create_project_from_parcelle(body: FromParcelleRequest):
-    gdf       = _load_parcelle_wfs(body.code_insee, body.section, body.numero)
-    union_geom = gdf.union_all()
-    buffer_m  = int(body.buffer_km * 1000)
-    area_ha   = float(union_geom.area / 10_000.0)
-
+def _create_project_from_union_geometry(
+    *,
+    project_name: str,
+    buffer_km: float,
+    parcelles_refs: list[dict[str, str]],
+    union_geom,
+):
+    buffer_m = int(buffer_km * 1000)
+    area_ha = float(union_geom.area / 10_000.0)
     with engine.begin() as conn:
         project_id = str(uuid.uuid4())
         conn.execute(text("""
@@ -509,7 +510,7 @@ def create_project_from_parcelle(body: FromParcelleRequest):
         """))
         foncier_id = str(conn.execute(
             text("INSERT INTO ecocompensation.foncier (name, geom_2154, area_ha) VALUES (:name, ST_Multi(ST_GeomFromText(:wkt, 2154)), :area_ha) RETURNING id"),
-            {"name": body.name, "wkt": union_geom.wkt, "area_ha": area_ha},
+            {"name": project_name, "wkt": union_geom.wkt, "area_ha": area_ha},
         ).scalar_one())
         aoi_id = str(conn.execute(
             text(
@@ -519,7 +520,12 @@ def create_project_from_parcelle(body: FromParcelleRequest):
                 RETURNING id
                 """
             ),
-            {"project_id": project_id, "code": body.code_insee, "buf": buffer_m, "wkt": union_geom.buffer(buffer_m, resolution=32).wkt},
+            {
+                "project_id": project_id,
+                "code": parcelles_refs[0]["code_insee"],
+                "buf": buffer_m,
+                "wkt": union_geom.buffer(buffer_m, resolution=32).wkt,
+            },
         ).scalar_one())
         conn.execute(
             text(
@@ -544,23 +550,26 @@ def create_project_from_parcelle(body: FromParcelleRequest):
                 """
             )
         )
-        conn.execute(
-            text(
-                """
-                INSERT INTO ecocompensation.project_parcelles
-                    (project_id, code_insee, section, numero, geom_2154)
-                VALUES
-                    (:project_id, :code_insee, :section, :numero, ST_Multi(ST_GeomFromText(:wkt, 2154)))
-                """
-            ),
-            {
-                "project_id": project_id,
-                "code_insee": body.code_insee,
-                "section": body.section,
-                "numero": body.numero,
-                "wkt": union_geom.wkt,
-            },
-        )
+        for ref in parcelles_refs:
+            gdf_one = _load_parcelle_wfs(ref["code_insee"], ref["section"], ref["numero"])
+            geom_one = gdf_one.union_all()
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO ecocompensation.project_parcelles
+                        (project_id, code_insee, section, numero, geom_2154)
+                    VALUES
+                        (:project_id, :code_insee, :section, :numero, ST_Multi(ST_GeomFromText(:wkt, 2154)))
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "code_insee": ref["code_insee"],
+                    "section": ref["section"],
+                    "numero": ref["numero"],
+                    "wkt": geom_one.wkt,
+                },
+            )
         proj = conn.execute(
             text(
                 """
@@ -569,12 +578,81 @@ def create_project_from_parcelle(body: FromParcelleRequest):
                 RETURNING id, name, status, created_at
                 """
             ),
-            {"project_id": project_id, "name": body.name, "aoi_id": aoi_id, "foncier_id": foncier_id},
+            {"project_id": project_id, "name": project_name, "aoi_id": aoi_id, "foncier_id": foncier_id},
         ).mappings().one()
+    return {
+        "id": str(proj["id"]),
+        "name": proj["name"],
+        "status": proj["status"],
+        "project_id": str(proj["id"]),
+        "aoi_id": aoi_id,
+        "foncier_id": foncier_id,
+        "created_at": proj["created_at"].isoformat(),
+    }
 
-    return {"id": str(proj["id"]), "name": proj["name"], "status": proj["status"],
-            "project_id": str(proj["id"]), "aoi_id": aoi_id, "foncier_id": foncier_id,
-            "created_at": proj["created_at"].isoformat()}
+
+@app.post("/api/parcels/preanalyze")
+def preanalyze_parcelle_route(body: PreanalyzeParcelleRequest):
+    """
+    Rapport d'intersection parcelle cible × couches SIG (sans projet, sans écriture résultats).
+    Fenêtre WFS : BBOX du buffer (m) autour de la parcelle ; test d'intersection : parcelle stricte.
+    """
+    from preanalyze_parcelle import run_preanalyze_parcelle
+
+    return run_preanalyze_parcelle(
+        engine,
+        code_insee=body.code_insee.strip(),
+        section=body.section.strip(),
+        numero=body.numero.strip(),
+        buffer_m=float(body.buffer_m),
+    )
+
+
+@app.post("/api/projects/from-parcelle", status_code=201)
+def create_project_from_parcelle(body: FromParcelleRequest):
+    gdf = _load_parcelle_wfs(body.code_insee, body.section, body.numero)
+    union_geom = gdf.union_all()
+    return _create_project_from_union_geometry(
+        project_name=body.name,
+        buffer_km=body.buffer_km,
+        parcelles_refs=[{
+            "code_insee": body.code_insee.strip(),
+            "section": body.section.strip().upper(),
+            "numero": body.numero.strip(),
+        }],
+        union_geom=union_geom,
+    )
+
+
+@app.post("/api/projects/from-parcelles", status_code=201)
+def create_project_from_parcelles(body: FromParcellesRequest):
+    refs = [
+        {
+            "code_insee": p.code_insee.strip(),
+            "section": p.section.strip().upper(),
+            "numero": p.numero.strip(),
+        }
+        for p in body.parcelles
+    ]
+    uniq_refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for ref in refs:
+        key = (ref["code_insee"], ref["section"], ref["numero"])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq_refs.append(ref)
+    if not uniq_refs:
+        raise HTTPException(400, "Aucune parcelle valide fournie.")
+    frames = [_load_parcelle_wfs(r["code_insee"], r["section"], r["numero"]) for r in uniq_refs]
+    gdf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=frames[0].crs)
+    union_geom = gdf.union_all()
+    return _create_project_from_union_geometry(
+        project_name=body.name,
+        buffer_km=body.buffer_km,
+        parcelles_refs=uniq_refs,
+        union_geom=union_geom,
+    )
 
 
 @app.get("/api/projects/{project_id}/context-geometry")
@@ -786,6 +864,18 @@ def run_filter(project_id: str, body: FilterRequest):
 
     # ── Toute la logique métier dans vrai_filtre.py ──
     result = run_filter_and_score(engine, project_id, aoi_id, cx, cy, options, opts_dto)
+    try:
+        run_id = persist_parcelles_pool_run(
+            engine,
+            project_id=project_id,
+            options_json=opts_dto.model_dump(),
+            parcelles=result.get("parcelles", []),
+            scope="parcelles",
+            keep_last=5,
+        )
+        result["pool_run_id"] = run_id
+    except Exception:
+        logger.exception("Persistance pool parcelles échouée")
 
     ram_after = _get_process_memory_mb()
     memory_info = {"ram_mb_before": ram_before, "ram_mb_after": ram_after,

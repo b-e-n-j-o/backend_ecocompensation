@@ -64,6 +64,9 @@ RESULT_TABLES: list[str] = [
     "ecocompensation_results.sous_ensembles",
     "ecocompensation_results.unites_foncieres",
     "ecocompensation_results.cosia",
+    "ecocompensation_results.parcelles_pool_runs",
+    "ecocompensation_results.parcelles_pool",
+    "ecocompensation_results.parcelles_pool_metrics",
 
 ]
 

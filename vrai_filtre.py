@@ -154,6 +154,7 @@ def run(
         "ecocompensation_results.ebc",
         "ecocompensation_results.reserves_naturelles",
         "ecocompensation_results.znieff",
+        "ecocompensation_results.bd_topo_et_cesbio",
         "ecocompensation_results.zone_de_vegetation",
         "ecocompensation_results.cesbio",
         "ecocompensation_results.carhab",
@@ -264,6 +265,29 @@ def run(
 
     if n0 == 0:
         log("⚠️ Aucune parcelle pour cette AOI, arrêt.")
+        return None if not return_parcelles else ([], 0.0, funnel)
+
+    # --- 0b) Exclusion foncier du projet (si présent)
+    where_clauses.append(
+        """
+        NOT EXISTS (
+            SELECT 1
+            FROM ecocompensation.projects pr
+            JOIN ecocompensation.foncier f ON f.id = pr.foncier_id
+            WHERE pr.id = CAST(:project_id AS uuid)
+              AND p.geom_2154 && f.geom_2154
+              AND ST_Intersects(p.geom_2154, f.geom_2154)
+        )
+        """
+    )
+    n0b = maybe_count(where_clauses)
+    log(f"0b) Exclusion parcelles du foncier projet            → {n0b} parcelles")
+    if funnel_mode:
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après exclusion foncier projet", "count": n0b})
+
+    if funnel_mode and n0b == 0:
+        log("⚠️ Aucune parcelle après exclusion du foncier projet, arrêt.")
         return None if not return_parcelles else ([], 0.0, funnel)
 
     # --- 1) Superficie ≥ min_area_ha (numérique)
