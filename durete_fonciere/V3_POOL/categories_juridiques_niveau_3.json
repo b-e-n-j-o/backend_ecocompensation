@@ -1,0 +1,1042 @@
+[
+    {
+      "code_juridique": "0000",
+      "categorie_juridique": "Organisme de placement collectif en valeurs mobilières sans personnalité morale"
+    },
+    {
+      "code_juridique": "1000",
+      "categorie_juridique": "Entrepreneur individuel"
+    },
+    {
+      "code_juridique": "2110",
+      "categorie_juridique": "Indivision entre personnes physiques"
+    },
+    {
+      "code_juridique": "2120",
+      "categorie_juridique": "Indivision avec personne morale"
+    },
+    {
+      "code_juridique": "2210",
+      "categorie_juridique": "Société créée de fait entre personnes physiques"
+    },
+    {
+      "code_juridique": "2220",
+      "categorie_juridique": "Société créée de fait avec personne morale"
+    },
+    {
+      "code_juridique": "2310",
+      "categorie_juridique": "Société en participation entre personnes physiques"
+    },
+    {
+      "code_juridique": "2320",
+      "categorie_juridique": "Société en participation avec personne morale"
+    },
+    {
+      "code_juridique": "2385",
+      "categorie_juridique": "Société en participation de professions libérales"
+    },
+    {
+      "code_juridique": "2400",
+      "categorie_juridique": "Fiducie"
+    },
+    {
+      "code_juridique": "2700",
+      "categorie_juridique": "Paroisse hors zone concordataire"
+    },
+    {
+      "code_juridique": "2800",
+      "categorie_juridique": "Assujetti unique à la TVA"
+    },
+    {
+      "code_juridique": "2900",
+      "categorie_juridique": "Autre groupement de droit privé non doté de la personnalité morale"
+    },
+    {
+      "code_juridique": "3110",
+      "categorie_juridique": "Représentation ou agence commerciale d'état ou organisme public étranger immatriculé au RCS"
+    },
+    {
+      "code_juridique": "3120",
+      "categorie_juridique": "Société commerciale étrangère immatriculée au RCS"
+    },
+    {
+      "code_juridique": "3205",
+      "categorie_juridique": "Organisation internationale"
+    },
+    {
+      "code_juridique": "3210",
+      "categorie_juridique": "État, collectivité ou établissement public étranger"
+    },
+    {
+      "code_juridique": "3220",
+      "categorie_juridique": "Société étrangère non immatriculée au RCS"
+    },
+    {
+      "code_juridique": "3290",
+      "categorie_juridique": "Autre personne morale de droit étranger"
+    },
+    {
+      "code_juridique": "4110",
+      "categorie_juridique": "Établissement public national à caractère industriel ou commercial doté d'un comptable public"
+    },
+    {
+      "code_juridique": "4120",
+      "categorie_juridique": "Établissement public national à caractère industriel ou commercial non doté d'un comptable public"
+    },
+    {
+      "code_juridique": "4130",
+      "categorie_juridique": "Exploitant public"
+    },
+    {
+      "code_juridique": "4140",
+      "categorie_juridique": "Établissement public local à caractère industriel ou commercial"
+    },
+    {
+      "code_juridique": "4150",
+      "categorie_juridique": "Régie d'une collectivité locale à caractère industriel ou commercial"
+    },
+    {
+      "code_juridique": "4160",
+      "categorie_juridique": "Institution Banque de France"
+    },
+    {
+      "code_juridique": "5191",
+      "categorie_juridique": "Société de caution mutuelle"
+    },
+    {
+      "code_juridique": "5192",
+      "categorie_juridique": "Société coopérative de banque populaire"
+    },
+    {
+      "code_juridique": "5193",
+      "categorie_juridique": "Caisse de crédit maritime mutuel"
+    },
+    {
+      "code_juridique": "5194",
+      "categorie_juridique": "Caisse (fédérale) de crédit mutuel"
+    },
+    {
+      "code_juridique": "5195",
+      "categorie_juridique": "Association coopérative inscrite (droit local Alsace Moselle)"
+    },
+    {
+      "code_juridique": "5196",
+      "categorie_juridique": "Caisse d'épargne et de prévoyance à forme coopérative"
+    },
+    {
+      "code_juridique": "5202",
+      "categorie_juridique": "Société en nom collectif"
+    },
+    {
+      "code_juridique": "5203",
+      "categorie_juridique": "Société en nom collectif coopérative"
+    },
+    {
+      "code_juridique": "5306",
+      "categorie_juridique": "Société en commandite simple"
+    },
+    {
+      "code_juridique": "5307",
+      "categorie_juridique": "Société en commandite simple coopérative"
+    },
+    {
+      "code_juridique": "5308",
+      "categorie_juridique": "Société en commandite par actions"
+    },
+    {
+      "code_juridique": "5309",
+      "categorie_juridique": "Société en commandite par actions coopérative"
+    },
+    {
+      "code_juridique": "5310",
+      "categorie_juridique": "Société en libre partenariat (SLP)"
+    },
+    {
+      "code_juridique": "5370",
+      "categorie_juridique": "Société de Participations Financières de Profession Libérale Société en commandite par actions (SPFPL SCA)"
+    },
+    {
+      "code_juridique": "5385",
+      "categorie_juridique": "Société d'exercice libéral en commandite par actions"
+    },
+    {
+      "code_juridique": "5410",
+      "categorie_juridique": "SARL nationale"
+    },
+    {
+      "code_juridique": "5415",
+      "categorie_juridique": "SARL d'économie mixte"
+    },
+    {
+      "code_juridique": "5422",
+      "categorie_juridique": "SARL immobilière pour le commerce et l'industrie (SICOMI)"
+    },
+    {
+      "code_juridique": "5426",
+      "categorie_juridique": "SARL immobilière de gestion"
+    },
+    {
+      "code_juridique": "5430",
+      "categorie_juridique": "SARL d'aménagement foncier et d'équipement rural (SAFER)"
+    },
+    {
+      "code_juridique": "5431",
+      "categorie_juridique": "SARL mixte d'intérêt agricole (SMIA)"
+    },
+    {
+      "code_juridique": "5432",
+      "categorie_juridique": "SARL d'intérêt collectif agricole (SICA)"
+    },
+    {
+      "code_juridique": "5442",
+      "categorie_juridique": "SARL d'attribution"
+    },
+    {
+      "code_juridique": "5443",
+      "categorie_juridique": "SARL coopérative de construction"
+    },
+    {
+      "code_juridique": "5451",
+      "categorie_juridique": "SARL coopérative de consommation"
+    },
+    {
+      "code_juridique": "5453",
+      "categorie_juridique": "SARL coopérative artisanale"
+    },
+    {
+      "code_juridique": "5454",
+      "categorie_juridique": "SARL coopérative d'intérêt maritime"
+    },
+    {
+      "code_juridique": "5455",
+      "categorie_juridique": "SARL coopérative de transport"
+    },
+    {
+      "code_juridique": "5458",
+      "categorie_juridique": "SARL coopérative de production (SCOP)"
+    },
+    {
+      "code_juridique": "5459",
+      "categorie_juridique": "SARL union de sociétés coopératives"
+    },
+    {
+      "code_juridique": "5460",
+      "categorie_juridique": "Autre SARL coopérative"
+    },
+    {
+      "code_juridique": "5470",
+      "categorie_juridique": "Société de Participations Financières de Profession Libérale Société à responsabilité limitée (SPFPL SARL)"
+    },
+    {
+      "code_juridique": "5485",
+      "categorie_juridique": "Société d'exercice libéral à responsabilité limitée"
+    },
+    {
+      "code_juridique": "5499",
+      "categorie_juridique": "Société à responsabilité limitée (sans autre indication)"
+    },
+    {
+      "code_juridique": "5505",
+      "categorie_juridique": "SA à participation ouvrière à conseil d'administration"
+    },
+    {
+      "code_juridique": "5510",
+      "categorie_juridique": "SA nationale à conseil d'administration"
+    },
+    {
+      "code_juridique": "5515",
+      "categorie_juridique": "SA d'économie mixte à conseil d'administration"
+    },
+    {
+      "code_juridique": "5520",
+      "categorie_juridique": "Fonds à forme sociétale à conseil d'administration"
+    },
+    {
+      "code_juridique": "5522",
+      "categorie_juridique": "SA immobilière pour le commerce et l'industrie (SICOMI) à conseil d'administration"
+    },
+    {
+      "code_juridique": "5525",
+      "categorie_juridique": "SA immobilière d'investissement à conseil d'administration"
+    },
+    {
+      "code_juridique": "5530",
+      "categorie_juridique": "SA d'aménagement foncier et d'équipement rural (SAFER) à conseil d'administration"
+    },
+    {
+      "code_juridique": "5531",
+      "categorie_juridique": "Société anonyme mixte d'intérêt agricole (SMIA) à conseil d'administration"
+    },
+    {
+      "code_juridique": "5532",
+      "categorie_juridique": "SA d'intérêt collectif agricole (SICA) à conseil d'administration"
+    },
+    {
+      "code_juridique": "5542",
+      "categorie_juridique": "SA d'attribution à conseil d'administration"
+    },
+    {
+      "code_juridique": "5543",
+      "categorie_juridique": "SA coopérative de construction à conseil d'administration"
+    },
+    {
+      "code_juridique": "5546",
+      "categorie_juridique": "SA de HLM à conseil d'administration"
+    },
+    {
+      "code_juridique": "5547",
+      "categorie_juridique": "SA coopérative de production de HLM à conseil d'administration"
+    },
+    {
+      "code_juridique": "5548",
+      "categorie_juridique": "SA de crédit immobilier à conseil d'administration"
+    },
+    {
+      "code_juridique": "5551",
+      "categorie_juridique": "SA coopérative de consommation à conseil d'administration"
+    },
+    {
+      "code_juridique": "5552",
+      "categorie_juridique": "SA coopérative de commerçants-détaillants à conseil d'administration"
+    },
+    {
+      "code_juridique": "5553",
+      "categorie_juridique": "SA coopérative artisanale à conseil d'administration"
+    },
+    {
+      "code_juridique": "5554",
+      "categorie_juridique": "SA coopérative (d'intérêt) maritime à conseil d'administration"
+    },
+    {
+      "code_juridique": "5555",
+      "categorie_juridique": "SA coopérative de transport à conseil d'administration"
+    },
+    {
+      "code_juridique": "5558",
+      "categorie_juridique": "SA coopérative de production (SCOP) à conseil d'administration"
+    },
+    {
+      "code_juridique": "5559",
+      "categorie_juridique": "SA union de sociétés coopératives à conseil d'administration"
+    },
+    {
+      "code_juridique": "5560",
+      "categorie_juridique": "Autre SA coopérative à conseil d'administration"
+    },
+    {
+      "code_juridique": "5570",
+      "categorie_juridique": "Société de Participations Financières de Profession Libérale Société anonyme à conseil d'administration (SPFPL SA à conseil d'administration)"
+    },
+    {
+      "code_juridique": "5585",
+      "categorie_juridique": "Société d'exercice libéral à forme anonyme à conseil d'administration"
+    },
+    {
+      "code_juridique": "5599",
+      "categorie_juridique": "SA à conseil d'administration (s.a.i.)"
+    },
+    {
+      "code_juridique": "5605",
+      "categorie_juridique": "SA à participation ouvrière à directoire"
+    },
+    {
+      "code_juridique": "5610",
+      "categorie_juridique": "SA nationale à directoire"
+    },
+    {
+      "code_juridique": "5615",
+      "categorie_juridique": "SA d'économie mixte à directoire"
+    },
+    {
+      "code_juridique": "5620",
+      "categorie_juridique": "Fonds à forme sociétale à directoire"
+    },
+    {
+      "code_juridique": "5622",
+      "categorie_juridique": "SA immobilière pour le commerce et l'industrie (SICOMI) à directoire"
+    },
+    {
+      "code_juridique": "5625",
+      "categorie_juridique": "SA immobilière d'investissement à directoire"
+    },
+    {
+      "code_juridique": "5630",
+      "categorie_juridique": "Safer anonyme à directoire"
+    },
+    {
+      "code_juridique": "5631",
+      "categorie_juridique": "SA mixte d'intérêt agricole (SMIA)"
+    },
+    {
+      "code_juridique": "5632",
+      "categorie_juridique": "SA d'intérêt collectif agricole (SICA)"
+    },
+    {
+      "code_juridique": "5642",
+      "categorie_juridique": "SA d'attribution à directoire"
+    },
+    {
+      "code_juridique": "5643",
+      "categorie_juridique": "SA coopérative de construction à directoire"
+    },
+    {
+      "code_juridique": "5646",
+      "categorie_juridique": "SA de HLM à directoire"
+    },
+    {
+      "code_juridique": "5647",
+      "categorie_juridique": "Société coopérative de production de HLM anonyme à directoire"
+    },
+    {
+      "code_juridique": "5648",
+      "categorie_juridique": "SA de crédit immobilier à directoire"
+    },
+    {
+      "code_juridique": "5651",
+      "categorie_juridique": "SA coopérative de consommation à directoire"
+    },
+    {
+      "code_juridique": "5652",
+      "categorie_juridique": "SA coopérative de commerçants-détaillants à directoire"
+    },
+    {
+      "code_juridique": "5653",
+      "categorie_juridique": "SA coopérative artisanale à directoire"
+    },
+    {
+      "code_juridique": "5654",
+      "categorie_juridique": "SA coopérative d'intérêt maritime à directoire"
+    },
+    {
+      "code_juridique": "5655",
+      "categorie_juridique": "SA coopérative de transport à directoire"
+    },
+    {
+      "code_juridique": "5658",
+      "categorie_juridique": "SA coopérative de production (SCOP) à directoire"
+    },
+    {
+      "code_juridique": "5659",
+      "categorie_juridique": "SA union de sociétés coopératives à directoire"
+    },
+    {
+      "code_juridique": "5660",
+      "categorie_juridique": "Autre SA coopérative à directoire"
+    },
+    {
+      "code_juridique": "5670",
+      "categorie_juridique": "Société de Participations Financières de Profession Libérale Société anonyme à Directoire (SPFPL SA à directoire)"
+    },
+    {
+      "code_juridique": "5685",
+      "categorie_juridique": "Société d'exercice libéral à forme anonyme à directoire"
+    },
+    {
+      "code_juridique": "5699",
+      "categorie_juridique": "SA à directoire (s.a.i.)"
+    },
+    {
+      "code_juridique": "5710",
+      "categorie_juridique": "SAS, société par actions simplifiée"
+    },
+    {
+      "code_juridique": "5770",
+      "categorie_juridique": "Société de Participations Financières de Profession Libérale Société par actions simplifiée (SPFPL SAS)"
+    },
+    {
+      "code_juridique": "5785",
+      "categorie_juridique": "Société d'exercice libéral par action simplifiée"
+    },
+    {
+      "code_juridique": "5800",
+      "categorie_juridique": "Société européenne"
+    },
+    {
+      "code_juridique": "6100",
+      "categorie_juridique": "Caisse d'Épargne et de Prévoyance"
+    },
+    {
+      "code_juridique": "6210",
+      "categorie_juridique": "Groupement européen d'intérêt économique (GEIE)"
+    },
+    {
+      "code_juridique": "6220",
+      "categorie_juridique": "Groupement d'intérêt économique (GIE)"
+    },
+    {
+      "code_juridique": "6316",
+      "categorie_juridique": "Coopérative d'utilisation de matériel agricole en commun (CUMA)"
+    },
+    {
+      "code_juridique": "6317",
+      "categorie_juridique": "Société coopérative agricole"
+    },
+    {
+      "code_juridique": "6318",
+      "categorie_juridique": "Union de sociétés coopératives agricoles"
+    },
+    {
+      "code_juridique": "6411",
+      "categorie_juridique": "Société d'assurance à forme mutuelle"
+    },
+    {
+      "code_juridique": "6511",
+      "categorie_juridique": "Sociétés Interprofessionnelles de Soins Ambulatoires"
+    },
+    {
+      "code_juridique": "6521",
+      "categorie_juridique": "Société civile de placement collectif immobilier (SCPI)"
+    },
+    {
+      "code_juridique": "6532",
+      "categorie_juridique": "Société civile d'intérêt collectif agricole (SICA)"
+    },
+    {
+      "code_juridique": "6533",
+      "categorie_juridique": "Groupement agricole d'exploitation en commun (GAEC)"
+    },
+    {
+      "code_juridique": "6534",
+      "categorie_juridique": "Groupement foncier agricole"
+    },
+    {
+      "code_juridique": "6535",
+      "categorie_juridique": "Groupement agricole foncier"
+    },
+    {
+      "code_juridique": "6536",
+      "categorie_juridique": "Groupement forestier"
+    },
+    {
+      "code_juridique": "6537",
+      "categorie_juridique": "Groupement pastoral"
+    },
+    {
+      "code_juridique": "6538",
+      "categorie_juridique": "Groupement foncier et rural"
+    },
+    {
+      "code_juridique": "6539",
+      "categorie_juridique": "Société civile foncière"
+    },
+    {
+      "code_juridique": "6540",
+      "categorie_juridique": "Société civile immobilière"
+    },
+    {
+      "code_juridique": "6541",
+      "categorie_juridique": "Société civile immobilière de construction-vente"
+    },
+    {
+      "code_juridique": "6542",
+      "categorie_juridique": "Société civile d'attribution"
+    },
+    {
+      "code_juridique": "6543",
+      "categorie_juridique": "Société civile coopérative de construction"
+    },
+    {
+      "code_juridique": "6544",
+      "categorie_juridique": "Société civile immobilière d' accession progressive à la propriété"
+    },
+    {
+      "code_juridique": "6551",
+      "categorie_juridique": "Société civile coopérative de consommation"
+    },
+    {
+      "code_juridique": "6554",
+      "categorie_juridique": "Société civile coopérative d'intérêt maritime"
+    },
+    {
+      "code_juridique": "6558",
+      "categorie_juridique": "Société civile coopérative entre médecins"
+    },
+    {
+      "code_juridique": "6560",
+      "categorie_juridique": "Autre société civile coopérative"
+    },
+    {
+      "code_juridique": "6561",
+      "categorie_juridique": "SCP d'avocats"
+    },
+    {
+      "code_juridique": "6562",
+      "categorie_juridique": "SCP d'avocats aux conseils"
+    },
+    {
+      "code_juridique": "6563",
+      "categorie_juridique": "SCP d'avoués d'appel"
+    },
+    {
+      "code_juridique": "6564",
+      "categorie_juridique": "SCP d'huissiers"
+    },
+    {
+      "code_juridique": "6565",
+      "categorie_juridique": "SCP de notaires"
+    },
+    {
+      "code_juridique": "6566",
+      "categorie_juridique": "SCP de commissaires-priseurs"
+    },
+    {
+      "code_juridique": "6567",
+      "categorie_juridique": "SCP de greffiers de tribunal de commerce"
+    },
+    {
+      "code_juridique": "6568",
+      "categorie_juridique": "SCP de conseils juridiques"
+    },
+    {
+      "code_juridique": "6569",
+      "categorie_juridique": "SCP de commissaires aux comptes"
+    },
+    {
+      "code_juridique": "6571",
+      "categorie_juridique": "SCP de médecins"
+    },
+    {
+      "code_juridique": "6572",
+      "categorie_juridique": "SCP de dentistes"
+    },
+    {
+      "code_juridique": "6573",
+      "categorie_juridique": "SCP d'infirmiers"
+    },
+    {
+      "code_juridique": "6574",
+      "categorie_juridique": "SCP de masseurs-kinésithérapeutes"
+    },
+    {
+      "code_juridique": "6575",
+      "categorie_juridique": "SCP de directeurs de laboratoire d'analyse médicale"
+    },
+    {
+      "code_juridique": "6576",
+      "categorie_juridique": "SCP de vétérinaires"
+    },
+    {
+      "code_juridique": "6577",
+      "categorie_juridique": "SCP de géomètres experts"
+    },
+    {
+      "code_juridique": "6578",
+      "categorie_juridique": "SCP d'architectes"
+    },
+    {
+      "code_juridique": "6585",
+      "categorie_juridique": "Autre société civile professionnelle"
+    },
+    {
+      "code_juridique": "6589",
+      "categorie_juridique": "Société civile de moyens"
+    },
+    {
+      "code_juridique": "6595",
+      "categorie_juridique": "Caisse locale de crédit mutuel"
+    },
+    {
+      "code_juridique": "6596",
+      "categorie_juridique": "Caisse de crédit agricole mutuel"
+    },
+    {
+      "code_juridique": "6597",
+      "categorie_juridique": "Société civile d'exploitation agricole"
+    },
+    {
+      "code_juridique": "6598",
+      "categorie_juridique": "Exploitation agricole à responsabilité limitée"
+    },
+    {
+      "code_juridique": "6599",
+      "categorie_juridique": "Autre société civile"
+    },
+    {
+      "code_juridique": "6901",
+      "categorie_juridique": "Autre personne de droit privé inscrite au registre du commerce et des sociétés"
+    },
+    {
+      "code_juridique": "7111",
+      "categorie_juridique": "Autorité constitutionnelle"
+    },
+    {
+      "code_juridique": "7112",
+      "categorie_juridique": "Autorité administrative ou publique indépendante"
+    },
+    {
+      "code_juridique": "7113",
+      "categorie_juridique": "Ministère"
+    },
+    {
+      "code_juridique": "7120",
+      "categorie_juridique": "Service central d'un ministère"
+    },
+    {
+      "code_juridique": "7150",
+      "categorie_juridique": "Service du ministère de la Défense"
+    },
+    {
+      "code_juridique": "7160",
+      "categorie_juridique": "Service déconcentré à compétence nationale d'un ministère (hors Défense)"
+    },
+    {
+      "code_juridique": "7171",
+      "categorie_juridique": "Service déconcentré de l'État à compétence (inter) régionale"
+    },
+    {
+      "code_juridique": "7172",
+      "categorie_juridique": "Service déconcentré de l'État à compétence (inter) départementale"
+    },
+    {
+      "code_juridique": "7179",
+      "categorie_juridique": "(Autre) Service déconcentré de l'État à compétence territoriale"
+    },
+    {
+      "code_juridique": "7190",
+      "categorie_juridique": "Ecole nationale non dotée de la personnalité morale"
+    },
+    {
+      "code_juridique": "7210",
+      "categorie_juridique": "Commune et commune nouvelle"
+    },
+    {
+      "code_juridique": "7220",
+      "categorie_juridique": "Département"
+    },
+    {
+      "code_juridique": "7225",
+      "categorie_juridique": "Collectivité et territoire d'Outre Mer"
+    },
+    {
+      "code_juridique": "7229",
+      "categorie_juridique": "(Autre) Collectivité territoriale"
+    },
+    {
+      "code_juridique": "7230",
+      "categorie_juridique": "Région"
+    },
+    {
+      "code_juridique": "7312",
+      "categorie_juridique": "Commune associée et commune déléguée"
+    },
+    {
+      "code_juridique": "7313",
+      "categorie_juridique": "Section de commune"
+    },
+    {
+      "code_juridique": "7314",
+      "categorie_juridique": "Ensemble urbain"
+    },
+    {
+      "code_juridique": "7321",
+      "categorie_juridique": "Association syndicale autorisée"
+    },
+    {
+      "code_juridique": "7322",
+      "categorie_juridique": "Association foncière urbaine"
+    },
+    {
+      "code_juridique": "7323",
+      "categorie_juridique": "Association foncière de remembrement"
+    },
+    {
+      "code_juridique": "7331",
+      "categorie_juridique": "Établissement public local d'enseignement"
+    },
+    {
+      "code_juridique": "7340",
+      "categorie_juridique": "Pôle métropolitain"
+    },
+    {
+      "code_juridique": "7341",
+      "categorie_juridique": "Secteur de commune"
+    },
+    {
+      "code_juridique": "7342",
+      "categorie_juridique": "District urbain"
+    },
+    {
+      "code_juridique": "7343",
+      "categorie_juridique": "Communauté urbaine"
+    },
+    {
+      "code_juridique": "7344",
+      "categorie_juridique": "Métropole"
+    },
+    {
+      "code_juridique": "7345",
+      "categorie_juridique": "Syndicat intercommunal à vocation multiple (SIVOM)"
+    },
+    {
+      "code_juridique": "7346",
+      "categorie_juridique": "Communauté de communes"
+    },
+    {
+      "code_juridique": "7347",
+      "categorie_juridique": "Communauté de villes"
+    },
+    {
+      "code_juridique": "7348",
+      "categorie_juridique": "Communauté d'agglomération"
+    },
+    {
+      "code_juridique": "7349",
+      "categorie_juridique": "Autre établissement public local de coopération non spécialisé ou entente"
+    },
+    {
+      "code_juridique": "7351",
+      "categorie_juridique": "Institution interdépartementale ou entente"
+    },
+    {
+      "code_juridique": "7352",
+      "categorie_juridique": "Institution interrégionale ou entente"
+    },
+    {
+      "code_juridique": "7353",
+      "categorie_juridique": "Syndicat intercommunal à vocation unique (SIVU)"
+    },
+    {
+      "code_juridique": "7354",
+      "categorie_juridique": "Syndicat mixte fermé"
+    },
+    {
+      "code_juridique": "7355",
+      "categorie_juridique": "Syndicat mixte ouvert"
+    },
+    {
+      "code_juridique": "7356",
+      "categorie_juridique": "Commission syndicale pour la gestion des biens indivis des communes"
+    },
+    {
+      "code_juridique": "7357",
+      "categorie_juridique": "Pôle d'équilibre territorial et rural (PETR)"
+    },
+    {
+      "code_juridique": "7361",
+      "categorie_juridique": "Centre communal d'action sociale"
+    },
+    {
+      "code_juridique": "7362",
+      "categorie_juridique": "Caisse des écoles"
+    },
+    {
+      "code_juridique": "7363",
+      "categorie_juridique": "Caisse de crédit municipal"
+    },
+    {
+      "code_juridique": "7364",
+      "categorie_juridique": "Établissement d'hospitalisation"
+    },
+    {
+      "code_juridique": "7365",
+      "categorie_juridique": "Syndicat inter hospitalier"
+    },
+    {
+      "code_juridique": "7366",
+      "categorie_juridique": "Établissement public local social et médico-social"
+    },
+    {
+      "code_juridique": "7367",
+      "categorie_juridique": "Centre Intercommunal d'action sociale (CIAS)"
+    },
+    {
+      "code_juridique": "7371",
+      "categorie_juridique": "Office public d'habitation à loyer modéré (OPHLM)"
+    },
+    {
+      "code_juridique": "7372",
+      "categorie_juridique": "Service départemental d'incendie et de secours (SDIS)"
+    },
+    {
+      "code_juridique": "7373",
+      "categorie_juridique": "Établissement public local culturel"
+    },
+    {
+      "code_juridique": "7378",
+      "categorie_juridique": "Régie d'une collectivité locale à caractère administratif"
+    },
+    {
+      "code_juridique": "7379",
+      "categorie_juridique": "(Autre) Établissement public administratif local"
+    },
+    {
+      "code_juridique": "7381",
+      "categorie_juridique": "Organisme consulaire"
+    },
+    {
+      "code_juridique": "7382",
+      "categorie_juridique": "Établissement public national ayant fonction d'administration centrale"
+    },
+    {
+      "code_juridique": "7383",
+      "categorie_juridique": "Établissement public national à caractère scientifique culturel et professionnel"
+    },
+    {
+      "code_juridique": "7384",
+      "categorie_juridique": "Autre établissement public national d'enseignement"
+    },
+    {
+      "code_juridique": "7385",
+      "categorie_juridique": "Autre établissement public national administratif à compétence territoriale limitée"
+    },
+    {
+      "code_juridique": "7389",
+      "categorie_juridique": "Établissement public national à caractère administratif"
+    },
+    {
+      "code_juridique": "7410",
+      "categorie_juridique": "Groupement d'intérêt public (GIP)"
+    },
+    {
+      "code_juridique": "7430",
+      "categorie_juridique": "Établissement public des cultes d'Alsace-Lorraine"
+    },
+    {
+      "code_juridique": "7450",
+      "categorie_juridique": "Etablissement public administratif, cercle et foyer dans les armées"
+    },
+    {
+      "code_juridique": "7470",
+      "categorie_juridique": "Groupement de coopération sanitaire à gestion publique"
+    },
+    {
+      "code_juridique": "7490",
+      "categorie_juridique": "Autre personne morale de droit administratif"
+    },
+    {
+      "code_juridique": "8110",
+      "categorie_juridique": "Régime général de la Sécurité Sociale"
+    },
+    {
+      "code_juridique": "8120",
+      "categorie_juridique": "Régime spécial de Sécurité Sociale"
+    },
+    {
+      "code_juridique": "8130",
+      "categorie_juridique": "Institution de retraite complémentaire"
+    },
+    {
+      "code_juridique": "8140",
+      "categorie_juridique": "Mutualité sociale agricole"
+    },
+    {
+      "code_juridique": "8150",
+      "categorie_juridique": "Régime maladie des non-salariés non agricoles"
+    },
+    {
+      "code_juridique": "8160",
+      "categorie_juridique": "Régime vieillesse ne dépendant pas du régime général de la Sécurité Sociale"
+    },
+    {
+      "code_juridique": "8170",
+      "categorie_juridique": "Régime d'assurance chômage"
+    },
+    {
+      "code_juridique": "8190",
+      "categorie_juridique": "Autre régime de prévoyance sociale"
+    },
+    {
+      "code_juridique": "8210",
+      "categorie_juridique": "Mutuelle"
+    },
+    {
+      "code_juridique": "8250",
+      "categorie_juridique": "Assurance mutuelle agricole"
+    },
+    {
+      "code_juridique": "8290",
+      "categorie_juridique": "Autre organisme mutualiste"
+    },
+    {
+      "code_juridique": "8310",
+      "categorie_juridique": "Comité social économique d’entreprise"
+    },
+    {
+      "code_juridique": "8311",
+      "categorie_juridique": "Comité social économique d'établissement"
+    },
+    {
+      "code_juridique": "8410",
+      "categorie_juridique": "Syndicat de salariés"
+    },
+    {
+      "code_juridique": "8420",
+      "categorie_juridique": "Syndicat patronal"
+    },
+    {
+      "code_juridique": "8450",
+      "categorie_juridique": "Ordre professionnel ou assimilé"
+    },
+    {
+      "code_juridique": "8470",
+      "categorie_juridique": "Centre technique industriel ou comité professionnel du développement économique"
+    },
+    {
+      "code_juridique": "8490",
+      "categorie_juridique": "Autre organisme professionnel"
+    },
+    {
+      "code_juridique": "8510",
+      "categorie_juridique": "Institution de prévoyance"
+    },
+    {
+      "code_juridique": "8520",
+      "categorie_juridique": "Institution de retraite supplémentaire"
+    },
+    {
+      "code_juridique": "9110",
+      "categorie_juridique": "Syndicat de copropriété"
+    },
+    {
+      "code_juridique": "9150",
+      "categorie_juridique": "Association syndicale libre"
+    },
+    {
+      "code_juridique": "9210",
+      "categorie_juridique": "Association non déclarée"
+    },
+    {
+      "code_juridique": "9220",
+      "categorie_juridique": "Association déclarée"
+    },
+    {
+      "code_juridique": "9221",
+      "categorie_juridique": "Association déclarée d'insertion par l'économique"
+    },
+    {
+      "code_juridique": "9222",
+      "categorie_juridique": "Association intermédiaire"
+    },
+    {
+      "code_juridique": "9223",
+      "categorie_juridique": "Groupement d'employeurs"
+    },
+    {
+      "code_juridique": "9224",
+      "categorie_juridique": "Association d'avocats à responsabilité professionnelle individuelle"
+    },
+    {
+      "code_juridique": "9230",
+      "categorie_juridique": "Association déclarée, reconnue d'utilité publique"
+    },
+    {
+      "code_juridique": "9240",
+      "categorie_juridique": "Congrégation"
+    },
+    {
+      "code_juridique": "9260",
+      "categorie_juridique": "Association de droit local (Bas-Rhin, Haut-Rhin et Moselle)"
+    },
+    {
+      "code_juridique": "9300",
+      "categorie_juridique": "Fondation"
+    },
+    {
+      "code_juridique": "9900",
+      "categorie_juridique": "Autre personne morale de droit privé"
+    },
+    {
+      "code_juridique": "9970",
+      "categorie_juridique": "Groupement de coopération sanitaire à gestion privée"
+    }
+  ]

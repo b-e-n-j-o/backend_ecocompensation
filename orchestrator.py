@@ -15,11 +15,18 @@ Options :
 Utilisé par :
   - l'API FastAPI (POST /projects/{id}/fetch)  → WebSocket
   - la CLI ``run_orchestration_cli.py``
+
+PATTERN PROGRESS :
+  Le cb passé à chaque couche met les messages dans une queue thread-safe.
+  Un drain_task asyncio vide la queue toutes les 100ms pendant que le thread
+  SQL tourne via run_in_executor. Cela évite le deadlock où run_in_executor
+  bloque la boucle asyncio qui ne peut plus traiter run_coroutine_threadsafe.
 """
 
 from __future__ import annotations
 
 import asyncio
+import queue as queue_module
 import logging
 import time
 from datetime import datetime, timezone
@@ -112,6 +119,75 @@ def _get_aoi_buffer_km(engine, aoi_id: str) -> float:
         return 0.0
 
 
+async def _run_layer_with_progress(
+    fn,
+    engine,
+    project_id: str,
+    aoi_id: str,
+    key: str,
+    push: ProgressPush,
+    loop: asyncio.AbstractEventLoop,
+    **kwargs,
+) -> LayerResult:
+    """
+    Exécute fn dans un thread (run_in_executor) tout en drainant
+    les messages de progression via une queue thread-safe.
+
+    Le cb passé à fn met les messages dans msg_queue (non-bloquant).
+    drain_task vide la queue toutes les 100ms dans la boucle asyncio.
+    Les deux tournent en parallèle → pas de deadlock.
+    """
+    msg_queue: queue_module.Queue = queue_module.Queue()
+
+    def cb(msg: str):
+        msg_queue.put({
+            "event": "progress",
+            "layer_key": key,
+            "message": msg,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def drain_queue():
+        """Vide la queue et push chaque message vers le WS."""
+        while True:
+            # Vider tout ce qui est disponible d'un coup
+            drained = 0
+            while True:
+                try:
+                    payload = msg_queue.get_nowait()
+                    await push(payload)
+                    drained += 1
+                except queue_module.Empty:
+                    break
+            await asyncio.sleep(0.1)
+
+    # Lance le drain en parallèle du thread SQL
+    drain_task = asyncio.create_task(drain_queue())
+
+    try:
+        if kwargs:
+            def run_sync():
+                return fn(engine, project_id, aoi_id, cb, **kwargs)
+            result = await loop.run_in_executor(None, run_sync)
+        else:
+            result = await loop.run_in_executor(None, fn, engine, project_id, aoi_id, cb)
+    finally:
+        drain_task.cancel()
+        try:
+            await drain_task
+        except asyncio.CancelledError:
+            pass
+        # Vider ce qui reste dans la queue après la fin du thread
+        while True:
+            try:
+                payload = msg_queue.get_nowait()
+                await push(payload)
+            except queue_module.Empty:
+                break
+
+    return result
+
+
 async def run_orchestration(
     engine,
     project_id: str,
@@ -178,15 +254,13 @@ async def run_orchestration(
         pass
 
     mode = " (dry-run, données non conservées)" if dry_run else ""
-    await push(
-        {
-            "event": "start",
-            "total_layers": total,
-            "dry_run": dry_run,
-            "message": f"Démarrage de l'orchestration pour {total} couche(s){mode}",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    await push({
+        "event": "start",
+        "total_layers": total,
+        "dry_run": dry_run,
+        "message": f"Démarrage de l'orchestration pour {total} couche(s){mode}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
     t_global = time.perf_counter()
     loop = asyncio.get_running_loop()
@@ -196,11 +270,8 @@ async def run_orchestration(
         label = layer_cfg["label"]
         fn = layer_cfg["fn"]
 
+        # ── Couches ignorées pour buffer > 5km ───────────────────────────────
         if key in skipped_for_large_buffer:
-            reason = (
-                f"⏭ {label} : ignorée automatiquement "
-                f"(buffer AOI {buffer_km:.1f} km > 5 km, calcul trop coûteux)"
-            )
             result = LayerResult(
                 layer_key=key,
                 table=layer_cfg["table"],
@@ -210,66 +281,43 @@ async def run_orchestration(
             )
             results[key] = result
             await emit(
-                "skipped",
-                key,
-                reason,
+                "skipped", key,
+                f"⏭ {label} : ignorée automatiquement "
+                f"(buffer AOI {buffer_km:.1f} km > 5 km, calcul trop coûteux)",
                 {"duration_s": 0.0, "n_inserted": 0},
             )
             continue
 
         await emit("running", key, f"[{i}/{total}] {label} en cours…")
 
-        def make_cb(k: str):
-            def cb(msg: str):
-                loop.call_soon_threadsafe(
-                    asyncio.create_task,
-                    push(
-                        {
-                            "event": "progress",
-                            "layer_key": k,
-                            "message": msg,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    ),
-                )
-            return cb
-
-        if key == "unites_foncieres":
-            def run_unites_sync():
-                return fn(
-                    engine,
-                    project_id,
-                    aoi_id,
-                    make_cb(key),
+        # ── Exécution avec drain de progression ──────────────────────────────
+        try:
+            if key == "unites_foncieres":
+                result = await _run_layer_with_progress(
+                    fn, engine, project_id, aoi_id, key, push, loop,
                     min_area_ha=uf_min_area_ha,
                 )
-
-            result = await loop.run_in_executor(None, run_unites_sync)
-        elif key == "sous_ensembles":
-            def run_sous_ensembles_sync():
-                return fn(
-                    engine,
-                    project_id,
-                    aoi_id,
-                    make_cb(key),
+            elif key == "sous_ensembles":
+                result = await _run_layer_with_progress(
+                    fn, engine, project_id, aoi_id, key, push, loop,
                     max_uf_parcelles=uf_max_parcelles,
                 )
-
-            result = await loop.run_in_executor(None, run_sous_ensembles_sync)
-        elif key in {"fauna"}:
-            def run_fauna_sync():
-                return fn(
-                    engine,
-                    project_id,
-                    aoi_id,
-                    make_cb(key),
+            elif key == "fauna":
+                result = await _run_layer_with_progress(
+                    fn, engine, project_id, aoi_id, key, push, loop,
                     species_list=fauna_species,
                 )
-
-            result = await loop.run_in_executor(None, run_fauna_sync)
-        else:
-            result = await loop.run_in_executor(
-                None, fn, engine, project_id, aoi_id, make_cb(key)
+            else:
+                result = await _run_layer_with_progress(
+                    fn, engine, project_id, aoi_id, key, push, loop,
+                )
+        except Exception as e:
+            logger.exception("Erreur couche %s", key)
+            result = LayerResult(
+                layer_key=key,
+                table=layer_cfg["table"],
+                duration_s=0.0,
+                error=str(e),
             )
 
         if dry_run and not result.error:
@@ -288,9 +336,9 @@ async def run_orchestration(
                        {"duration_s": round(result.duration_s, 1), "n_inserted": result.n_inserted})
 
     total_s = time.perf_counter() - t_global
-    n_ok = sum(1 for r in results.values() if r.success and not r.skipped)
+    n_ok   = sum(1 for r in results.values() if r.success and not r.skipped)
     n_skip = sum(1 for r in results.values() if r.skipped)
-    n_err = sum(1 for r in results.values() if r.error)
+    n_err  = sum(1 for r in results.values() if r.error)
 
     summary = {
         "event": "complete",

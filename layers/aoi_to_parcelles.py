@@ -124,7 +124,33 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     if deleted and deleted > 0:
         log(f"🧹 {deleted:,} anciennes parcelles supprimées pour project_id={project_id}")
 
-    # 4) Intersection en SQL : parcelles en base qui intersectent l'AOI → results
+    # 4) Estimation rapide du volume (bbox indexée) pour observabilité
+    try:
+        with engine.begin() as conn:
+            n_bbox = conn.execute(
+                text(
+                    """
+                    WITH aoi AS (
+                        SELECT geom_2154
+                        FROM ecocompensation.aoi
+                        WHERE id = :aid
+                    )
+                    SELECT COUNT(*)
+                    FROM ecocompensation.parcelles p
+                    CROSS JOIN aoi
+                    WHERE p.geom_2154 && aoi.geom_2154;
+                    """
+                ),
+                {"aid": aoi_id},
+            ).scalar_one()
+        log(
+            "📈 Candidats parcelles (filtre bbox, estimation haute) : "
+            f"{n_bbox:,}"
+        )
+    except Exception as e:
+        log(f"⚠️ Impossible d'estimer le volume bbox des parcelles: {e}")
+
+    # 5) Intersection en SQL : parcelles en base qui intersectent l'AOI → results
     # Optimisations :
     # - CTE pour lire l'AOI une seule fois
     # - Filtre bbox (&&) en premier pour utiliser l'index GIST avant ST_Intersects
@@ -132,6 +158,9 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     t0 = time.perf_counter()
 
     with engine.begin() as conn:
+        # Évite les timeouts trop agressifs de la session par défaut
+        # pour les AOI volumineuses (ex. buffer 20 km).
+        conn.execute(text("SET LOCAL statement_timeout = '15min';"))
         result = conn.execute(
             text(
                 """
@@ -168,7 +197,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         f"pour project_id={project_id} (en {t1 - t0:.2f} s)."
     )
 
-    # 5) Taille de la table results (best-effort)
+    # 6) Taille de la table results (best-effort)
     try:
         with engine.begin() as conn:
             size_bytes = conn.execute(

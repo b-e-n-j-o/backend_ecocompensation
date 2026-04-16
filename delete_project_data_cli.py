@@ -58,7 +58,6 @@ RESULT_TABLES: list[str] = [
     "ecocompensation_results.patrimoine_naturel",
     "ecocompensation_results.reserves_naturelles",
     "ecocompensation_results.sites_classes",
-    "ecocompensation_results.prairies_sensibles",
     "ecocompensation_results.bd_topo_et_cesbio",
     "ecocompensation_results.remontee_de_nappes",
     "ecocompensation_results.sous_ensembles",
@@ -67,6 +66,7 @@ RESULT_TABLES: list[str] = [
     "ecocompensation_results.parcelles_pool_runs",
     "ecocompensation_results.parcelles_pool",
     "ecocompensation_results.parcelles_pool_metrics",
+    "ecocompensation_results.parcelles_pool_indesirables",
 
 ]
 

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 from layers.aoi_to_unites_foncieres       import run as _run_unites_foncieres
 from layers.aoi_to_sous_ensembles         import run as _run_sous_ensembles
-from layers.aoi_to_parcelles              import run as _run_parcelles
+from layers.aoi_to_parcelles_v2           import run as _run_parcelles
 from layers.aoi_to_geomce                 import run as _run_geomce
 from layers.aoi_to_zone_de_vegetation     import run as _run_zone_de_vegetation
 from layers.aoi_to_zone_humide            import run as _run_zone_humide

@@ -66,7 +66,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                 """
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_schema = 'geo'
+                WHERE table_schema = 'ecocompensation'
                   AND table_name = 'arrachage_vignes'
                 ORDER BY ordinal_position;
                 """

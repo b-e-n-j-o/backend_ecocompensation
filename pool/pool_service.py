@@ -4,7 +4,22 @@ import json
 import uuid
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+
+
+def _run_optional_in_savepoint(conn, savepoint_name: str, fn) -> None:
+    """
+    Exécute fn() dans un SAVEPOINT : en cas d’erreur, rollback partiel pour que la
+    transaction parente reste utilisable (évite InFailedSqlTransaction sur la suite).
+    """
+    sp = savepoint_name.replace("-", "_").replace(" ", "_")[:63]
+    conn.execute(text(f"SAVEPOINT {sp}"))
+    try:
+        fn()
+        conn.execute(text(f"RELEASE SAVEPOINT {sp}"))
+    except Exception:
+        conn.execute(text(f"ROLLBACK TO SAVEPOINT {sp}"))
+
 
 # Aligné sur backend/sql/ecocompensation_results_pool_tables.sql (CREATE IF NOT EXISTS).
 CREATE_TABLES_SQL = """
@@ -47,12 +62,56 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool_metrics (
 
 CREATE INDEX IF NOT EXISTS idx_pool_metrics_project_run_idu
 ON ecocompensation_results.parcelles_pool_metrics(project_id, run_id, idu);
+
+CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool_indesirables (
+    run_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    idu text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, idu)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pool_indesirables_project_run
+ON ecocompensation_results.parcelles_pool_indesirables(project_id, run_id);
 """
 
 
 def ensure_tables(conn) -> None:
+    # CREATE INDEX sur une table déjà volumineuse peut dépasser le statement_timeout par défaut (Supabase).
+    _run_optional_in_savepoint(
+        conn,
+        "sp_pool_stmt_timeout",
+        lambda: conn.execute(text("SET LOCAL statement_timeout = '15min'")),
+    )
     for stmt in [s.strip() for s in CREATE_TABLES_SQL.split(";") if s.strip()]:
         conn.execute(text(stmt))
+    # Colonnes ajoutées après création initiale des tables (migrations légères).
+    _run_optional_in_savepoint(
+        conn,
+        "sp_pool_result_summary_col",
+        lambda: conn.execute(
+            text(
+                """
+                ALTER TABLE ecocompensation_results.parcelles_pool_runs
+                ADD COLUMN IF NOT EXISTS result_summary jsonb NOT NULL DEFAULT '{}'::jsonb
+                """
+            )
+        ),
+    )
+
+
+def _coerce_json_mapping(val: Any) -> dict[str, Any]:
+    if val is None:
+        return {}
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            o = json.loads(val)
+            return o if isinstance(o, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 
 def create_run(conn, project_id: str, scope: str, options_json: dict[str, Any], total_count: int) -> str:
@@ -146,7 +205,8 @@ def upsert_metric(conn, project_id: str, run_id: str, idu: str, metric_key: str,
     )
 
 
-def list_runs(conn, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+def list_runs(conn, project_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    lim = max(1, min(int(limit), 200))
     rows = conn.execute(
         text(
             """
@@ -157,9 +217,172 @@ def list_runs(conn, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
             LIMIT :limit
             """
         ),
-        {"project_id": project_id, "limit": limit},
+        {"project_id": project_id, "limit": lim},
     ).mappings().all()
-    return [dict(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        if d.get("id") is not None:
+            d["id"] = str(d["id"])
+        if d.get("project_id") is not None:
+            d["project_id"] = str(d["project_id"])
+        out.append(d)
+    return out
+
+
+def _parcelles_pool_runs_has_result_summary(conn) -> bool:
+    r = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'ecocompensation_results'
+              AND table_name = 'parcelles_pool_runs'
+              AND column_name = 'result_summary'
+            LIMIT 1
+            """
+        )
+    ).first()
+    return r is not None
+
+
+def get_run_meta(conn, project_id: str, run_id: str) -> dict[str, Any] | None:
+    has_rs = _parcelles_pool_runs_has_result_summary(conn)
+    if has_rs:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    project_id,
+                    scope,
+                    options_json,
+                    total_count,
+                    created_at,
+                    COALESCE(result_summary, '{}'::jsonb) AS result_summary
+                FROM ecocompensation_results.parcelles_pool_runs
+                WHERE id = CAST(:run_id AS uuid)
+                  AND project_id = CAST(:project_id AS uuid)
+                """
+            ),
+            {"run_id": run_id, "project_id": project_id},
+        ).mappings().first()
+    else:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    project_id,
+                    scope,
+                    options_json,
+                    total_count,
+                    created_at
+                FROM ecocompensation_results.parcelles_pool_runs
+                WHERE id = CAST(:run_id AS uuid)
+                  AND project_id = CAST(:project_id AS uuid)
+                """
+            ),
+            {"run_id": run_id, "project_id": project_id},
+        ).mappings().first()
+    if not row:
+        return None
+    d = dict(row)
+    d["id"] = str(d["id"])
+    d["project_id"] = str(d["project_id"])
+    d["options_json"] = _coerce_json_mapping(d.get("options_json"))
+    d["result_summary"] = _coerce_json_mapping(d.get("result_summary")) if has_rs else {}
+    return d
+
+
+def get_parcelles_for_run_results(
+    conn, project_id: str, run_id: str, aoi_id_str: str
+) -> list[dict[str, Any]]:
+    """
+    Parcelles du pool pour un run, enrichies avec code_insee / section / numero depuis
+    ecocompensation_results.parcelles quand c’est possible. dist_hydro_m n’est pas stocké
+    sur le pool : absent ici (null).
+    """
+    aoi = str(aoi_id_str or "").strip()
+    rows = conn.execute(
+        text(
+            """
+            SELECT
+                pp.idu,
+                pp.rank,
+                pp.surface_ha,
+                pp.miller,
+                pp.distance_km,
+                p.code_insee,
+                p.section,
+                p.numero
+            FROM ecocompensation_results.parcelles_pool pp
+            LEFT JOIN LATERAL (
+                SELECT p0.code_insee, p0.section, p0.numero
+                FROM ecocompensation_results.parcelles p0
+                WHERE p0.idu = pp.idu
+                  AND (
+                    p0.project_id = CAST(:project_id AS uuid)
+                    OR (
+                        CAST(:aoi AS text) <> ''
+                        AND p0.aoi_id IS NOT NULL
+                        AND CAST(p0.aoi_id AS text) = CAST(:aoi AS text)
+                    )
+                  )
+                ORDER BY CASE WHEN p0.project_id = CAST(:project_id AS uuid) THEN 0 ELSE 1 END
+                LIMIT 1
+            ) p ON TRUE
+            WHERE pp.project_id = CAST(:project_id AS uuid)
+              AND pp.run_id = CAST(:run_id AS uuid)
+            ORDER BY pp.rank NULLS LAST, pp.idu
+            """
+        ),
+        {"project_id": project_id, "run_id": run_id, "aoi": aoi},
+    ).mappings().all()
+    parcelles: list[dict[str, Any]] = []
+    for r in rows:
+        idu = str(r["idu"] or "")
+        raw = (idu or "").strip()
+        cinsee = r.get("code_insee") or (raw[:5] if len(raw) >= 5 else "")
+        section = r.get("section") or (raw[8:10] if len(raw) >= 10 else "")
+        numero = r.get("numero") or (raw[-4:] if len(raw) >= 4 else "")
+        parcelles.append(
+            {
+                "idu": idu,
+                "rank": int(r["rank"] or 0),
+                "code_insee": str(cinsee or ""),
+                "section": str(section or ""),
+                "numero": str(numero or ""),
+                "surface_ha": round(float(r["surface_ha"] or 0), 2),
+                "miller": round(float(r["miller"] or 0), 4),
+                "distance_km": round(float(r["distance_km"] or 0), 2),
+                "dist_hydro_m": None,
+            }
+        )
+    return parcelles
+
+
+def build_filter_snapshot_from_run(
+    conn, project_id: str, run_id: str, aoi_id_str: str
+) -> dict[str, Any] | None:
+    """Payload compatible avec la réponse POST /filter (sans memory)."""
+    meta = get_run_meta(conn, project_id, run_id)
+    if not meta:
+        return None
+    if str(meta.get("scope") or "parcelles") != "parcelles":
+        return None
+    parcelles = get_parcelles_for_run_results(conn, project_id, run_id, aoi_id_str)
+    rs = meta.get("result_summary") or {}
+    total = int(rs.get("total") or len(parcelles) or meta.get("total_count") or 0)
+    return {
+        "pool_run_id": str(meta["id"]),
+        "filter_options": meta.get("options_json") or {},
+        "total": total,
+        "final_radius_km": float(rs.get("final_radius_km") or 0),
+        "funnel": rs.get("funnel") if isinstance(rs.get("funnel"), list) else [],
+        "parcelles": parcelles,
+        "run_created_at": meta.get("created_at").isoformat() if meta.get("created_at") else None,
+    }
 
 
 def get_pool(conn, project_id: str, run_id: str) -> list[dict[str, Any]]:
@@ -261,6 +484,16 @@ def purge_old_runs(conn, project_id: str, keep_last: int = 5) -> None:
     conn.execute(
         text(
             """
+            DELETE FROM ecocompensation_results.parcelles_pool_indesirables
+            WHERE project_id = CAST(:project_id AS uuid)
+              AND run_id = ANY(CAST(:run_ids AS uuid[]))
+            """
+        ),
+        {"project_id": project_id, "run_ids": old_ids},
+    )
+    conn.execute(
+        text(
+            """
             DELETE FROM ecocompensation_results.parcelles_pool_runs
             WHERE project_id = CAST(:project_id AS uuid)
               AND id = ANY(CAST(:run_ids AS uuid[]))
@@ -278,6 +511,7 @@ def persist_parcelles_pool_run(
     parcelles: list[dict[str, Any]],
     scope: str = "parcelles",
     keep_last: int = 5,
+    result_summary: dict[str, Any] | None = None,
 ) -> str:
     with engine.begin() as conn:
         ensure_tables(conn)
@@ -289,8 +523,111 @@ def persist_parcelles_pool_run(
             total_count=len(parcelles),
         )
         insert_pool_parcelles(conn, project_id=project_id, run_id=run_id, parcelles=parcelles)
+        if result_summary:
+            conn.execute(
+                text(
+                    """
+                    UPDATE ecocompensation_results.parcelles_pool_runs
+                    SET result_summary = CAST(:rs AS jsonb)
+                    WHERE id = CAST(:run_id AS uuid)
+                      AND project_id = CAST(:project_id AS uuid)
+                    """
+                ),
+                {
+                    "rs": json.dumps(result_summary),
+                    "run_id": run_id,
+                    "project_id": project_id,
+                },
+            )
         # Les profilers / métriques sont calculés dans un second temps (voir
         # POST .../pool/runs/{run_id}/recompute-metrics) pour découpler la durée du filtrage
         # de la phase souvent plus lourde.
         purge_old_runs(conn, project_id=project_id, keep_last=keep_last)
     return run_id
+
+
+def run_belongs_to_project(conn, project_id: str, run_id: str) -> bool:
+    row = conn.execute(
+        text(
+            """
+            SELECT 1
+            FROM ecocompensation_results.parcelles_pool_runs
+            WHERE id = CAST(:run_id AS uuid)
+              AND project_id = CAST(:project_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"run_id": run_id, "project_id": project_id},
+    ).first()
+    return row is not None
+
+
+def idus_in_pool(conn, project_id: str, run_id: str, idus: list[str]) -> set[str]:
+    uniq = list(dict.fromkeys(str(x).strip() for x in idus if x and str(x).strip()))
+    if not uniq:
+        return set()
+    stmt = text(
+        """
+        SELECT idu
+        FROM ecocompensation_results.parcelles_pool
+        WHERE project_id = CAST(:project_id AS uuid)
+          AND run_id = CAST(:run_id AS uuid)
+          AND idu IN :idus
+        """
+    ).bindparams(bindparam("idus", expanding=True))
+    rows = conn.execute(
+        stmt,
+        {"project_id": project_id, "run_id": run_id, "idus": uniq},
+    ).mappings().all()
+    return {str(r["idu"]) for r in rows}
+
+
+def list_indesirables(conn, project_id: str, run_id: str) -> list[str]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT idu
+            FROM ecocompensation_results.parcelles_pool_indesirables
+            WHERE project_id = CAST(:project_id AS uuid)
+              AND run_id = CAST(:run_id AS uuid)
+            ORDER BY idu
+            """
+        ),
+        {"project_id": project_id, "run_id": run_id},
+    ).mappings().all()
+    return [str(r["idu"]) for r in rows]
+
+
+def add_indesirables(conn, project_id: str, run_id: str, idus: list[str]) -> int:
+    """Marque des parcelles comme indésirables (présentes dans le pool du run). Retourne le nombre d’insertions."""
+    ok = idus_in_pool(conn, project_id, run_id, idus)
+    inserted = 0
+    for idu in ok:
+        r = conn.execute(
+            text(
+                """
+                INSERT INTO ecocompensation_results.parcelles_pool_indesirables (run_id, project_id, idu)
+                VALUES (CAST(:run_id AS uuid), CAST(:project_id AS uuid), :idu)
+                ON CONFLICT (run_id, idu) DO NOTHING
+                """
+            ),
+            {"run_id": run_id, "project_id": project_id, "idu": idu},
+        )
+        if getattr(r, "rowcount", None) == 1:
+            inserted += 1
+    return inserted
+
+
+def remove_indesirable(conn, project_id: str, run_id: str, idu: str) -> bool:
+    r = conn.execute(
+        text(
+            """
+            DELETE FROM ecocompensation_results.parcelles_pool_indesirables
+            WHERE project_id = CAST(:project_id AS uuid)
+              AND run_id = CAST(:run_id AS uuid)
+              AND idu = :idu
+            """
+        ),
+        {"project_id": project_id, "run_id": run_id, "idu": idu},
+    )
+    return (getattr(r, "rowcount", 0) or 0) > 0

@@ -62,7 +62,9 @@ from db import get_engine
 from routers.foncier_router import router as foncier_router
 from routers.pool_router import router as pool_router
 from routers.results_geojson_router import router as results_geojson_router
-from pool.pool_service import persist_parcelles_pool_run
+from routers.durete_router import router as durete_router
+from pool import pool_service
+from pool.pool_service import get_all_metrics_grouped_by_idu, persist_parcelles_pool_run
 
 from vrai_filtre import (
     FiltreOptions,
@@ -173,6 +175,7 @@ app.add_middleware(
 app.include_router(foncier_router, prefix="/api/foncier")
 app.include_router(pool_router)
 app.include_router(results_geojson_router)
+app.include_router(durete_router)
 
 
 # ─────────────────────────────────────────────
@@ -403,6 +406,104 @@ def list_projects():
             text("SELECT id, name, status, layers_status, created_at, updated_at FROM ecocompensation.projects ORDER BY created_at DESC")
         ).mappings().all()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/projects/history")
+def list_projects_history():
+    with engine.begin() as conn:
+        has_pool_runs = bool(
+            conn.execute(
+                text("SELECT to_regclass(:tbl) IS NOT NULL"),
+                {"tbl": "ecocompensation_results.parcelles_pool_runs"},
+            ).scalar()
+        )
+
+        if has_pool_runs:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        p.id,
+                        p.name,
+                        p.status,
+                        p.layers_status,
+                        p.created_at,
+                        p.updated_at,
+                        p.last_filter,
+                        a.buffer_m,
+                        f.area_ha AS foncier_area_ha,
+                        pr.total_count AS pool_total_count
+                    FROM ecocompensation.projects p
+                    LEFT JOIN ecocompensation.aoi a
+                        ON a.id = p.aoi_id
+                    LEFT JOIN ecocompensation.foncier f
+                        ON f.id = p.foncier_id
+                    LEFT JOIN LATERAL (
+                        SELECT total_count
+                        FROM ecocompensation_results.parcelles_pool_runs
+                        WHERE project_id = p.id
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) pr ON TRUE
+                    ORDER BY p.created_at DESC
+                    """
+                )
+            ).mappings().all()
+        else:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        p.id,
+                        p.name,
+                        p.status,
+                        p.layers_status,
+                        p.created_at,
+                        p.updated_at,
+                        p.last_filter,
+                        a.buffer_m,
+                        f.area_ha AS foncier_area_ha,
+                        NULL::integer AS pool_total_count
+                    FROM ecocompensation.projects p
+                    LEFT JOIN ecocompensation.aoi a
+                        ON a.id = p.aoi_id
+                    LEFT JOIN ecocompensation.foncier f
+                        ON f.id = p.foncier_id
+                    ORDER BY p.created_at DESC
+                    """
+                )
+            ).mappings().all()
+
+    out: list[dict] = []
+    for r in rows:
+        last_filter = r.get("last_filter")
+        if isinstance(last_filter, str):
+            try:
+                last_filter = json.loads(last_filter)
+            except Exception:
+                last_filter = None
+        if not isinstance(last_filter, dict):
+            last_filter = None
+
+        buffer_m = r.get("buffer_m")
+        buffer_km = (float(buffer_m) / 1000.0) if buffer_m is not None else None
+        out.append(
+            {
+                "id": str(r["id"]),
+                "name": r.get("name"),
+                "status": r.get("status"),
+                "layers_status": r.get("layers_status") or {},
+                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+                "history": {
+                    "buffer_km": buffer_km,
+                    "foncier_area_ha": float(r["foncier_area_ha"]) if r.get("foncier_area_ha") is not None else None,
+                    "pool_total_count": int(r["pool_total_count"]) if r.get("pool_total_count") is not None else None,
+                    "last_filter": last_filter,
+                },
+            }
+        )
+    return out
 
 
 @app.post("/api/projects", status_code=201)
@@ -667,14 +768,17 @@ def get_project_context_geometry(project_id: str):
                     p.id AS project_id,
                     p.name,
                     p.aoi_id,
+                    p.foncier_id,
                     pp.code_insee,
                     pp.section,
                     pp.numero,
                     ST_AsGeoJSON(ST_Transform(pp.geom_2154, 4326))::json AS parcelle_geometry,
-                    ST_AsGeoJSON(ST_Transform(a.geom_2154, 4326))::json AS aoi_geometry
+                    ST_AsGeoJSON(ST_Transform(a.geom_2154, 4326))::json AS aoi_geometry,
+                    ST_AsGeoJSON(ST_Transform(f.geom_2154, 4326))::json AS foncier_geometry
                 FROM ecocompensation.projects p
                 LEFT JOIN ecocompensation.project_parcelles pp ON pp.project_id = p.id
                 LEFT JOIN ecocompensation.aoi a ON a.id = p.aoi_id
+                LEFT JOIN ecocompensation.foncier f ON f.id = p.foncier_id
                 WHERE p.id = :pid
                 LIMIT 1
                 """
@@ -709,11 +813,23 @@ def get_project_context_geometry(project_id: str):
             },
         }
 
+    foncier_feature = None
+    if row.get("foncier_geometry"):
+        foncier_feature = {
+            "type": "Feature",
+            "geometry": dict(row["foncier_geometry"]),
+            "properties": {
+                "project_id": str(row["project_id"]),
+                "foncier_id": str(row["foncier_id"]) if row.get("foncier_id") else None,
+            },
+        }
+
     return {
         "project_id": str(row["project_id"]),
         "name": row.get("name"),
         "parcelle_source": parcelle_feature,
         "aoi": aoi_feature,
+        "foncier": foncier_feature,
     }
 
 
@@ -749,6 +865,7 @@ def delete_project(project_id: str):
         "ecocompensation_results.faune_surf",
         "ecocompensation_results.unites_foncieres",   # ← nouveau
         "ecocompensation_results.sous_ensembles",     # ← nouveau
+        "ecocompensation_results.parcelles_pool_indesirables",
     ]
     for t in RESULT_TABLES:
         try:
@@ -872,6 +989,11 @@ def run_filter(project_id: str, body: FilterRequest):
             parcelles=result.get("parcelles", []),
             scope="parcelles",
             keep_last=5,
+            result_summary={
+                "final_radius_km": float(result.get("final_radius_km") or 0),
+                "funnel": result.get("funnel") or [],
+                "total": int(result.get("total") or 0),
+            },
         )
         result["pool_run_id"] = run_id
     except Exception:
@@ -955,14 +1077,32 @@ def get_results(project_id: str):
 
 
 @app.get("/api/projects/{project_id}/geojson")
-def get_parcelles_geojson(project_id: str):
+def get_parcelles_geojson(
+    project_id: str,
+    run_id: str | None = Query(None, description="UUID run pool — sinon dernier last_results du projet"),
+):
     proj = _get_project(project_id)
-    if not proj.get("last_results"):
-        raise HTTPException(400, "Aucun résultat")
-    results = proj["last_results"]
-    if isinstance(results, str):
-        results = json.loads(results)
-    parcelles_data = results.get("parcelles", [])
+    aoi_id_str = str(proj.get("aoi_id") or "")
+
+    if run_id:
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            if not pool_service.run_belongs_to_project(conn, project_id, run_id):
+                raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+            parcelles_data = pool_service.get_parcelles_for_run_results(
+                conn, project_id, run_id, aoi_id_str
+            )
+        pool_run_id = run_id
+        results = {"parcelles": parcelles_data, "pool_run_id": pool_run_id}
+    else:
+        if not proj.get("last_results"):
+            raise HTTPException(400, "Aucun résultat")
+        results = proj["last_results"]
+        if isinstance(results, str):
+            results = json.loads(results)
+        parcelles_data = results.get("parcelles", [])
+        pool_run_id = results.get("pool_run_id")
+
     if not parcelles_data:
         raise HTTPException(400, "Aucune parcelle dans les résultats")
 
@@ -972,7 +1112,41 @@ def get_parcelles_geojson(project_id: str):
     min_r = min(ranks, default=1)
     max_r = max(ranks, default=1)
     rng = max_r - min_r or 1
-    aoi_id_str = str(proj.get("aoi_id") or "")
+
+    idu_to_parcel_score: dict[str, float] = {}
+    if pool_run_id:
+        try:
+            with engine.begin() as conn:
+                srows = conn.execute(
+                    text(
+                        """
+                        SELECT idu, (metric_value_jsonb->>'total_score')::double precision AS ts
+                        FROM ecocompensation_results.parcelles_pool_metrics
+                        WHERE project_id = CAST(:pid AS uuid)
+                          AND run_id = CAST(:rid AS uuid)
+                          AND metric_key = 'parcel_score_v1'
+                          AND idu = ANY(:idus)
+                        """
+                    ),
+                    {"pid": project_id, "rid": str(pool_run_id), "idus": idus},
+                ).mappings().all()
+            for sr in srows:
+                ts = sr.get("ts")
+                if ts is not None and sr.get("idu"):
+                    idu_to_parcel_score[str(sr["idu"])] = float(ts)
+        except Exception:
+            logger.exception(
+                "GeoJSON parcelles : lecture parcel_score_v1 ignorée (project_id=%s)",
+                project_id,
+            )
+
+    score_vals = list(idu_to_parcel_score.values())
+    if score_vals:
+        min_s = min(score_vals)
+        max_s = max(score_vals)
+        rng_s = max_s - min_s or 1.0
+    else:
+        min_s = max_s = rng_s = None
 
     with engine.begin() as conn:
         rows = conn.execute(
@@ -987,19 +1161,35 @@ def get_parcelles_geojson(project_id: str):
             {"pid": project_id, "aoi_id_str": aoi_id_str, "idus": idus},
         ).mappings().all()
 
-    return {"type": "FeatureCollection", "features": [
-        {"type": "Feature", "geometry": dict(r["geometry"]),
-         "properties": {
-             "idu": r["idu"],
-             "rank": idu_to_rank.get(r["idu"], 0),
-             # 1 = meilleur rang, 0 = plus faible (pour palette existante)
-             "score_norm": round(
-                 1.0 - ((idu_to_rank.get(r["idu"], max_r) - min_r) / rng),
-                 4,
-             ),
-         }}
-        for r in rows
-    ]}
+    features: list[dict] = []
+    for r in rows:
+        idu = r["idu"]
+        rank_norm = round(
+            1.0 - ((idu_to_rank.get(idu, max_r) - min_r) / rng),
+            4,
+        )
+        props: dict = {
+            "idu": idu,
+            "rank": idu_to_rank.get(idu, 0),
+            "score_norm": rank_norm,
+        }
+        if rng_s is not None and min_s is not None and idu in idu_to_parcel_score:
+            t = idu_to_parcel_score[idu]
+            props["total_score"] = round(t, 4)
+            props["score_norm"] = round((t - min_s) / rng_s, 4)
+            props["score_norm_source"] = "parcel_score_v1"
+        else:
+            props["score_norm_source"] = "distance_rank"
+
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": dict(r["geometry"]),
+                "properties": props,
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}
 
 
 @app.get("/api/projects/{project_id}/geojson/uf-subsets")
@@ -1063,6 +1253,7 @@ def export_csv(
     project_id: str,
     background_tasks: BackgroundTasks,
     scope: str = Query("parcelles", description="parcelles | uf"),
+    run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results du projet"),
 ):
     import tempfile
     from fastapi.responses import FileResponse
@@ -1076,17 +1267,42 @@ def export_csv(
     proj = _get_project(project_id)
 
     if s == "parcelles":
-        last_results = proj.get("last_results")
-        if not last_results:
-            raise HTTPException(400, "Aucun résultat parcelles")
-        if isinstance(last_results, str):
-            last_results = json.loads(last_results)
-        parcelles = last_results.get("parcelles", [])
+        pool_run_id: str | None = None
+        parcelles: list = []
+        if run_id:
+            aoi_id_str = str(proj.get("aoi_id") or "")
+            with engine.begin() as conn:
+                pool_service.ensure_tables(conn)
+                if not pool_service.run_belongs_to_project(conn, project_id, run_id):
+                    raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+                snap = pool_service.build_filter_snapshot_from_run(conn, project_id, run_id, aoi_id_str)
+            if not snap:
+                raise HTTPException(404, "Run introuvable ou scope non parcelles")
+            parcelles = snap.get("parcelles") or []
+            pool_run_id = str(snap.get("pool_run_id") or run_id)
+        else:
+            last_results = proj.get("last_results")
+            if not last_results:
+                raise HTTPException(400, "Aucun résultat parcelles")
+            if isinstance(last_results, str):
+                last_results = json.loads(last_results)
+            parcelles = last_results.get("parcelles", [])
+            pool_run_id = last_results.get("pool_run_id")
         if not parcelles:
             raise HTTPException(400, "Aucune parcelle")
+        metrics_by_idu = None
+        if pool_run_id:
+            try:
+                with engine.begin() as conn:
+                    metrics_by_idu = get_all_metrics_grouped_by_idu(conn, project_id, str(pool_run_id))
+            except Exception:
+                logger.exception(
+                    "Export CSV parcelles : lecture métriques pool ignorée (project_id=%s)",
+                    project_id,
+                )
         with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
             csv_path = Path(nf.name)
-            export_classement_csv(parcelles, csv_path)
+            export_classement_csv(parcelles, csv_path, metrics_by_idu=metrics_by_idu)
         background_tasks.add_task(os.remove, str(csv_path))
         return FileResponse(
             str(csv_path),
@@ -1120,6 +1336,7 @@ def export_shp(
     project_id: str,
     background_tasks: BackgroundTasks,
     scope: str = Query("parcelles", description="parcelles | uf"),
+    run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results du projet"),
 ):
     import shutil, tempfile, zipfile
     from fastapi.responses import FileResponse
@@ -1133,26 +1350,62 @@ def export_shp(
     proj = _get_project(project_id)
 
     if s == "parcelles":
-        last_results = proj.get("last_results")
-        last_filter = proj.get("last_filter")
-        if not last_results or not last_filter:
-            raise HTTPException(400, "Résultats ou filtre parcelles introuvables")
-        if isinstance(last_results, str):
-            last_results = json.loads(last_results)
-        if isinstance(last_filter, str):
-            last_filter = json.loads(last_filter)
-        parcelles = last_results.get("parcelles", [])
+        aoi_id = str(proj.get("aoi_id") or "")
+        pool_run_id: str | None = None
+        parcelles: list = []
+        last_filter_dict: dict | None = None
+        final_radius_km = 0.0
+        if run_id:
+            with engine.begin() as conn:
+                pool_service.ensure_tables(conn)
+                if not pool_service.run_belongs_to_project(conn, project_id, run_id):
+                    raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+                snap = pool_service.build_filter_snapshot_from_run(conn, project_id, run_id, aoi_id)
+            if not snap:
+                raise HTTPException(404, "Run introuvable ou scope non parcelles")
+            parcelles = snap.get("parcelles") or []
+            last_filter_dict = snap.get("filter_options") or {}
+            final_radius_km = float(snap.get("final_radius_km") or 0)
+            pool_run_id = str(snap.get("pool_run_id") or run_id)
+        else:
+            last_results = proj.get("last_results")
+            last_filter = proj.get("last_filter")
+            if not last_results or not last_filter:
+                raise HTTPException(400, "Résultats ou filtre parcelles introuvables")
+            if isinstance(last_results, str):
+                last_results = json.loads(last_results)
+            if isinstance(last_filter, str):
+                last_filter = json.loads(last_filter)
+            parcelles = last_results.get("parcelles", [])
+            last_filter_dict = last_filter if isinstance(last_filter, dict) else {}
+            final_radius_km = float(last_results.get("final_radius_km", 0) or 0)
+            pool_run_id = last_results.get("pool_run_id")
         if not parcelles:
             raise HTTPException(400, "Aucune parcelle")
-        opts_dto = FiltreOptionsDTO(**last_filter)
+        opts_dto = FiltreOptionsDTO(**last_filter_dict)
         options = _dto_to_filtre_options(opts_dto)
-        final_radius_km = last_results.get("final_radius_km", 0)
-        aoi_id = str(proj.get("aoi_id") or "")
+        metrics_by_idu = None
+        if pool_run_id:
+            try:
+                with engine.begin() as conn:
+                    metrics_by_idu = get_all_metrics_grouped_by_idu(conn, project_id, str(pool_run_id))
+            except Exception:
+                logger.exception(
+                    "Export SHP parcelles : lecture métriques pool ignorée (project_id=%s)",
+                    project_id,
+                )
         with tempfile.TemporaryDirectory() as tmpdir:
             shp_path = Path(tmpdir) / "parcelles.shp"
             try:
                 export_classement_shp(
-                    engine, project_id, parcelles, options, final_radius_km, shp_path, aoi_id=aoi_id
+                    engine,
+                    project_id,
+                    parcelles,
+                    options,
+                    final_radius_km,
+                    shp_path,
+                    aoi_id=aoi_id,
+                    metrics_by_idu=metrics_by_idu,
                 )
             except ValueError as e:
                 raise HTTPException(400, str(e)) from e

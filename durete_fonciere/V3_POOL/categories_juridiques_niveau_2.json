@@ -1,0 +1,236 @@
+[
+    {
+      "code_juridique": "00",
+      "categorie_juridique": "Organisme de placement collectif en valeurs mobilières sans personnalité morale",
+      "score_axe1": 15,
+      "note_scoring": "Sans personnalité morale — score neutre"
+    },
+    {
+      "code_juridique": "10",
+      "categorie_juridique": "Entrepreneur individuel",
+      "score_axe1": 12,
+      "note_scoring": "Décision unitaire, pas de complexité juridique"
+    },
+    {
+      "code_juridique": "21",
+      "categorie_juridique": "Indivision",
+      "score_axe1": 22,
+      "note_scoring": "Unanimité requise entre indivisaires — blocage fréquent"
+    },
+    {
+      "code_juridique": "22",
+      "categorie_juridique": "Société créée de fait",
+      "score_axe1": 18,
+      "note_scoring": "Structure informelle, décision des associés de fait"
+    },
+    {
+      "code_juridique": "23",
+      "categorie_juridique": "Société en participation",
+      "score_axe1": 18,
+      "note_scoring": "Structure informelle sans publicité"
+    },
+    {
+      "code_juridique": "24",
+      "categorie_juridique": "Fiducie",
+      "score_axe1": 20,
+      "note_scoring": "Patrimoine fiduciaire — cession soumise aux termes du contrat"
+    },
+    {
+      "code_juridique": "27",
+      "categorie_juridique": "Paroisse hors zone concordataire",
+      "score_axe1": 25,
+      "note_scoring": "Patrimoine affecté mission cultuelle"
+    },
+    {
+      "code_juridique": "28",
+      "categorie_juridique": "Assujetti unique à la TVA",
+      "score_axe1": 15,
+      "note_scoring": "Structure fiscale — score neutre"
+    },
+    {
+      "code_juridique": "29",
+      "categorie_juridique": "Autre groupement de droit privé non doté de la personnalité morale",
+      "score_axe1": 18,
+      "note_scoring": "Sans personnalité morale — score neutre"
+    },
+    {
+      "code_juridique": "31",
+      "categorie_juridique": "Personne morale de droit étranger, immatriculée au RCS (registre du commerce et des sociétés)",
+      "score_axe1": 22,
+      "note_scoring": "Droit applicable incertain, interlocuteur potentiellement distant"
+    },
+    {
+      "code_juridique": "32",
+      "categorie_juridique": "Personne morale de droit étranger, non immatriculée au RCS",
+      "score_axe1": 25,
+      "note_scoring": "Contact et droit applicables complexes, hors juridiction française"
+    },
+    {
+      "code_juridique": "41",
+      "categorie_juridique": "Etablissement public ou régie à caractère industriel ou commercial",
+      "score_axe1": 32,
+      "note_scoring": "EPIC — patrimoine affecté mission de service public, cession encadrée"
+    },
+    {
+      "code_juridique": "51",
+      "categorie_juridique": "Société coopérative commerciale particulière",
+      "score_axe1": 22,
+      "note_scoring": "Gouvernance collégiale coopérative, décision en assemblée"
+    },
+    {
+      "code_juridique": "52",
+      "categorie_juridique": "Société en nom collectif",
+      "score_axe1": 18,
+      "note_scoring": "Décision unanime des associés requise"
+    },
+    {
+      "code_juridique": "53",
+      "categorie_juridique": "Société en commandite",
+      "score_axe1": 20,
+      "note_scoring": "Dualité commandités / commanditaires — accord des deux catégories"
+    },
+    {
+      "code_juridique": "54",
+      "categorie_juridique": "Société à responsabilité limitée (SARL)",
+      "score_axe1": 18,
+      "note_scoring": "Décision majoritaire structurée — processus classique"
+    },
+    {
+      "code_juridique": "55",
+      "categorie_juridique": "Société anonyme à conseil d'administration",
+      "score_axe1": 20,
+      "note_scoring": "Processus formel lourd — CA + AG selon montant"
+    },
+    {
+      "code_juridique": "56",
+      "categorie_juridique": "Société anonyme à directoire",
+      "score_axe1": 20,
+      "note_scoring": "Double gouvernance directoire / conseil de surveillance"
+    },
+    {
+      "code_juridique": "57",
+      "categorie_juridique": "Société par actions simplifiée",
+      "score_axe1": 16,
+      "note_scoring": "Grande liberté statutaire — décision souvent rapide selon statuts"
+    },
+    {
+      "code_juridique": "58",
+      "categorie_juridique": "Société européenne",
+      "score_axe1": 20,
+      "note_scoring": "Gouvernance formelle, interlocuteurs potentiellement internationaux"
+    },
+    {
+      "code_juridique": "61",
+      "categorie_juridique": "Caisse d'épargne et de prévoyance",
+      "score_axe1": 28,
+      "note_scoring": "Patrimoine réglementé, cession soumise à autorisation"
+    },
+    {
+      "code_juridique": "62",
+      "categorie_juridique": "Groupement d'intérêt économique",
+      "score_axe1": 18,
+      "note_scoring": "Décision dans l'intérêt collectif des membres"
+    },
+    {
+      "code_juridique": "63",
+      "categorie_juridique": "Société coopérative agricole",
+      "score_axe1": 22,
+      "note_scoring": "Gouvernance collégiale agriculteurs — attachement à l'outil productif"
+    },
+    {
+      "code_juridique": "64",
+      "categorie_juridique": "Société d'assurance mutuelle",
+      "score_axe1": 28,
+      "note_scoring": "Patrimoine affecté mission mutualiste, cession encadrée"
+    },
+    {
+      "code_juridique": "65",
+      "categorie_juridique": "Société civile",
+      "score_axe1": 12,
+      "note_scoring": "Score de base famille 65 — affiné par code 4 chiffres si connu (SCI, GFA, GAEC…)"
+    },
+    {
+      "code_juridique": "69",
+      "categorie_juridique": "Autre personne morale de droit privé inscrite au registre du commerce et des sociétés",
+      "score_axe1": 18,
+      "note_scoring": "Catégorie résiduelle — score neutre"
+    },
+    {
+      "code_juridique": "71",
+      "categorie_juridique": "Administration de l'état",
+      "score_axe1": 40,
+      "note_scoring": "Inaliénabilité absolue — art. L.3111-1 CGPPP"
+    },
+    {
+      "code_juridique": "72",
+      "categorie_juridique": "Collectivité territoriale",
+      "score_axe1": 37,
+      "note_scoring": "Domaine public + procédure politique — délibération obligatoire"
+    },
+    {
+      "code_juridique": "73",
+      "categorie_juridique": "Etablissement public administratif",
+      "score_axe1": 35,
+      "note_scoring": "Patrimoine affecté mission publique — EPCI, syndicats, hôpitaux, établissements scolaires"
+    },
+    {
+      "code_juridique": "74",
+      "categorie_juridique": "Autre personne morale de droit public administratif",
+      "score_axe1": 35,
+      "note_scoring": "Régime droit public — cession soumise à déclassement"
+    },
+    {
+      "code_juridique": "81",
+      "categorie_juridique": "Organisme gérant un régime de protection sociale à adhésion obligatoire",
+      "score_axe1": 30,
+      "note_scoring": "Patrimoine réglementé — cession soumise à autorisation tutelle"
+    },
+    {
+      "code_juridique": "82",
+      "categorie_juridique": "Organisme mutualiste",
+      "score_axe1": 28,
+      "note_scoring": "Gouvernance démocratique — décision en assemblée générale"
+    },
+    {
+      "code_juridique": "83",
+      "categorie_juridique": "Comité d'entreprise",
+      "score_axe1": 20,
+      "note_scoring": "Patrimoine limité, décision du comité"
+    },
+    {
+      "code_juridique": "84",
+      "categorie_juridique": "Organisme professionnel",
+      "score_axe1": 25,
+      "note_scoring": "Décision collégiale des membres — attachement au patrimoine professionnel"
+    },
+    {
+      "code_juridique": "85",
+      "categorie_juridique": "Organisme de retraite à adhésion non obligatoire",
+      "score_axe1": 25,
+      "note_scoring": "Patrimoine affecté mission retraite"
+    },
+    {
+      "code_juridique": "91",
+      "categorie_juridique": "Syndicat de propriétaires",
+      "score_axe1": 22,
+      "note_scoring": "Décision en assemblée générale des copropriétaires"
+    },
+    {
+      "code_juridique": "92",
+      "categorie_juridique": "Association loi 1901 ou assimilé",
+      "score_axe1": 26,
+      "note_scoring": "Gouvernance associative — décision CA ou AG selon statuts"
+    },
+    {
+      "code_juridique": "93",
+      "categorie_juridique": "Fondation",
+      "score_axe1": 30,
+      "note_scoring": "Patrimoine affecté objet statutaire — cession encadrée, approbation autorité de tutelle"
+    },
+    {
+      "code_juridique": "99",
+      "categorie_juridique": "Autre personne morale de droit privé",
+      "score_axe1": 18,
+      "note_scoring": "Catégorie résiduelle — score neutre"
+    }
+  ]
