@@ -73,6 +73,27 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool_indesirables (
 
 CREATE INDEX IF NOT EXISTS idx_pool_indesirables_project_run
 ON ecocompensation_results.parcelles_pool_indesirables(project_id, run_id);
+
+CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_project_indesirables (
+    project_id uuid NOT NULL,
+    idu text NOT NULL,
+    source_run_id uuid NULL,
+    rank integer NULL,
+    code_insee text NULL,
+    section text NULL,
+    numero text NULL,
+    surface_ha double precision NULL,
+    miller double precision NULL,
+    distance_km double precision NULL,
+    dist_hydro_m double precision NULL,
+    metrics_jsonb jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, idu)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_indesirables_project_updated
+ON ecocompensation_results.parcelles_project_indesirables(project_id, updated_at DESC);
 """
 
 
@@ -629,5 +650,192 @@ def remove_indesirable(conn, project_id: str, run_id: str, idu: str) -> bool:
             """
         ),
         {"project_id": project_id, "run_id": run_id, "idu": idu},
+    )
+    return (getattr(r, "rowcount", 0) or 0) > 0
+
+
+def count_project_indesirables(conn, project_id: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                """
+                SELECT COUNT(*)::int
+                FROM ecocompensation_results.parcelles_project_indesirables
+                WHERE project_id = CAST(:project_id AS uuid)
+                """
+            ),
+            {"project_id": project_id},
+        ).scalar_one()
+    )
+
+
+def list_project_indesirable_idus(conn, project_id: str) -> list[str]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT idu
+            FROM ecocompensation_results.parcelles_project_indesirables
+            WHERE project_id = CAST(:project_id AS uuid)
+            ORDER BY updated_at DESC, idu
+            """
+        ),
+        {"project_id": project_id},
+    ).mappings().all()
+    return [str(r["idu"]) for r in rows]
+
+
+def list_project_indesirables_rows(conn, project_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT
+                idu,
+                source_run_id,
+                rank,
+                code_insee,
+                section,
+                numero,
+                surface_ha,
+                miller,
+                distance_km,
+                dist_hydro_m,
+                COALESCE(metrics_jsonb, '{}'::jsonb) AS metrics_jsonb,
+                created_at,
+                updated_at
+            FROM ecocompensation_results.parcelles_project_indesirables
+            WHERE project_id = CAST(:project_id AS uuid)
+            ORDER BY updated_at DESC, rank NULLS LAST, idu
+            """
+        ),
+        {"project_id": project_id},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_project_indesirables_payload(conn, project_id: str) -> dict[str, Any]:
+    rows = list_project_indesirables_rows(conn, project_id)
+    parcelles: list[dict[str, Any]] = []
+    by_idu: dict[str, list[dict[str, Any]]] = {}
+    idus: list[str] = []
+    for r in rows:
+        idu = str(r.get("idu") or "")
+        if not idu:
+            continue
+        idus.append(idu)
+        parcelles.append(
+            {
+                "idu": idu,
+                "rank": int(r.get("rank") or 0),
+                "code_insee": str(r.get("code_insee") or ""),
+                "section": str(r.get("section") or ""),
+                "numero": str(r.get("numero") or ""),
+                "surface_ha": round(float(r.get("surface_ha") or 0), 2),
+                "miller": round(float(r.get("miller") or 0), 4),
+                "distance_km": round(float(r.get("distance_km") or 0), 2),
+                "dist_hydro_m": float(r.get("dist_hydro_m")) if r.get("dist_hydro_m") is not None else None,
+            }
+        )
+        m = _coerce_json_mapping(r.get("metrics_jsonb"))
+        by_idu[idu] = [
+            {
+                "metric_key": str(k),
+                "metric_value_jsonb": v if isinstance(v, dict) else {},
+                "updated_at": r.get("updated_at"),
+            }
+            for k, v in m.items()
+        ]
+    return {"idus": idus, "parcelles": parcelles, "by_idu": by_idu, "total": len(parcelles)}
+
+
+def add_project_indesirables_from_run(conn, project_id: str, run_id: str, idus: list[str]) -> int:
+    valid_idus = idus_in_pool(conn, project_id, run_id, idus)
+    if not valid_idus:
+        return 0
+    aoi_row = conn.execute(
+        text("SELECT aoi_id FROM ecocompensation.projects WHERE id = CAST(:pid AS uuid) LIMIT 1"),
+        {"pid": project_id},
+    ).mappings().one_or_none()
+    aoi_id_str = str(aoi_row.get("aoi_id") or "") if aoi_row else ""
+    run_parcelles = get_parcelles_for_run_results(conn, project_id, run_id, aoi_id_str)
+    parcelles_by_idu = {str(p.get("idu")): p for p in run_parcelles if p.get("idu")}
+
+    stmt_metrics = text(
+        """
+        SELECT idu, metric_key, metric_value_jsonb
+        FROM ecocompensation_results.parcelles_pool_metrics
+        WHERE project_id = CAST(:project_id AS uuid)
+          AND run_id = CAST(:run_id AS uuid)
+          AND idu IN :idus
+        ORDER BY idu, metric_key
+        """
+    ).bindparams(bindparam("idus", expanding=True))
+    mrows = conn.execute(
+        stmt_metrics,
+        {"project_id": project_id, "run_id": run_id, "idus": list(valid_idus)},
+    ).mappings().all()
+    metrics_by_idu: dict[str, dict[str, Any]] = {}
+    for r in mrows:
+        idu = str(r["idu"])
+        metrics_by_idu.setdefault(idu, {})[str(r["metric_key"])] = (
+            r["metric_value_jsonb"] if isinstance(r["metric_value_jsonb"], dict) else {}
+        )
+
+    inserted = 0
+    for idu in valid_idus:
+        p = parcelles_by_idu.get(idu) or {}
+        r = conn.execute(
+            text(
+                """
+                INSERT INTO ecocompensation_results.parcelles_project_indesirables (
+                    project_id, idu, source_run_id, rank, code_insee, section, numero,
+                    surface_ha, miller, distance_km, dist_hydro_m, metrics_jsonb, created_at, updated_at
+                ) VALUES (
+                    CAST(:project_id AS uuid), :idu, CAST(:run_id AS uuid), :rank, :code_insee, :section, :numero,
+                    :surface_ha, :miller, :distance_km, :dist_hydro_m, CAST(:metrics_jsonb AS jsonb), now(), now()
+                )
+                ON CONFLICT (project_id, idu) DO UPDATE SET
+                    source_run_id = EXCLUDED.source_run_id,
+                    rank = EXCLUDED.rank,
+                    code_insee = EXCLUDED.code_insee,
+                    section = EXCLUDED.section,
+                    numero = EXCLUDED.numero,
+                    surface_ha = EXCLUDED.surface_ha,
+                    miller = EXCLUDED.miller,
+                    distance_km = EXCLUDED.distance_km,
+                    dist_hydro_m = EXCLUDED.dist_hydro_m,
+                    metrics_jsonb = EXCLUDED.metrics_jsonb,
+                    updated_at = now()
+                """
+            ),
+            {
+                "project_id": project_id,
+                "run_id": run_id,
+                "idu": idu,
+                "rank": p.get("rank"),
+                "code_insee": p.get("code_insee"),
+                "section": p.get("section"),
+                "numero": p.get("numero"),
+                "surface_ha": p.get("surface_ha"),
+                "miller": p.get("miller"),
+                "distance_km": p.get("distance_km"),
+                "dist_hydro_m": p.get("dist_hydro_m"),
+                "metrics_jsonb": json.dumps(metrics_by_idu.get(idu) or {}),
+            },
+        )
+        if getattr(r, "rowcount", 0):
+            inserted += 1
+    return inserted
+
+
+def remove_project_indesirable(conn, project_id: str, idu: str) -> bool:
+    r = conn.execute(
+        text(
+            """
+            DELETE FROM ecocompensation_results.parcelles_project_indesirables
+            WHERE project_id = CAST(:project_id AS uuid)
+              AND idu = :idu
+            """
+        ),
+        {"project_id": project_id, "idu": idu},
     )
     return (getattr(r, "rowcount", 0) or 0) > 0

@@ -87,28 +87,36 @@ class IndesirablesAddBody(BaseModel):
 
 
 @router.get("/{project_id}/pool/indesirables")
-def list_pool_indesirables(project_id: str, run_id: str = Query(..., description="UUID du run parcelles_pool_runs")):
-    """Parcelles marquées indésirables pour ce run (persistées pour futures exclusions de recherche)."""
+def list_pool_indesirables(project_id: str):
+    """Parcelles indésirables persistées au niveau projet (réutilisées par les futurs filtres)."""
     if not _project_exists(project_id):
         raise HTTPException(404, f"Projet {project_id} introuvable")
     with engine.begin() as conn:
         pool_service.ensure_tables(conn)
-        if not pool_service.run_belongs_to_project(conn, project_id, run_id):
-            raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
-        idus = pool_service.list_indesirables(conn, project_id=project_id, run_id=run_id)
-    return {"run_id": run_id, "idus": idus, "total": len(idus)}
+        payload = pool_service.get_project_indesirables_payload(conn, project_id=project_id)
+    return {"project_id": project_id, **payload}
+
+
+@router.get("/{project_id}/pool/indesirables-count")
+def count_pool_indesirables(project_id: str):
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Projet {project_id} introuvable")
+    with engine.begin() as conn:
+        pool_service.ensure_tables(conn)
+        total = pool_service.count_project_indesirables(conn, project_id=project_id)
+    return {"project_id": project_id, "total": total}
 
 
 @router.post("/{project_id}/pool/indesirables")
 def add_pool_indesirables(project_id: str, body: IndesirablesAddBody):
-    """Ajoute des parcelles au pool indésirable (doivent être dans le pool du run)."""
+    """Ajoute des parcelles au pool indésirable projet (source run requis pour capturer les détails)."""
     if not _project_exists(project_id):
         raise HTTPException(404, f"Projet {project_id} introuvable")
     with engine.begin() as conn:
         pool_service.ensure_tables(conn)
         if not pool_service.run_belongs_to_project(conn, project_id, body.run_id):
             raise HTTPException(404, f"Run {body.run_id} introuvable pour ce projet")
-        n = pool_service.add_indesirables(conn, project_id, body.run_id, body.idus)
+        n = pool_service.add_project_indesirables_from_run(conn, project_id, body.run_id, body.idus)
     return {"status": "ok", "project_id": project_id, "run_id": body.run_id, "inserted": n}
 
 
@@ -116,18 +124,16 @@ def add_pool_indesirables(project_id: str, body: IndesirablesAddBody):
 def remove_pool_indesirable(
     project_id: str,
     idu: str,
-    run_id: str = Query(..., description="UUID du run parcelles_pool_runs"),
+    run_id: str | None = Query(None, description="Paramètre conservé pour rétrocompatibilité"),
 ):
-    """Retire une parcelle de la liste indésirable (ex. réintégration au classement)."""
+    """Retire une parcelle de la liste indésirable projet (ex. réintégration au classement)."""
     if not _project_exists(project_id):
         raise HTTPException(404, f"Projet {project_id} introuvable")
     with engine.begin() as conn:
         pool_service.ensure_tables(conn)
-        if not pool_service.run_belongs_to_project(conn, project_id, run_id):
-            raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
-        ok = pool_service.remove_indesirable(conn, project_id, run_id, idu)
+        ok = pool_service.remove_project_indesirable(conn, project_id, idu)
     if not ok:
-        raise HTTPException(404, "Parcelle indésirable introuvable pour ce run")
+        raise HTTPException(404, "Parcelle indésirable introuvable pour ce projet")
     return {"status": "ok", "project_id": project_id, "run_id": run_id, "idu": idu}
 
 

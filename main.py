@@ -12,7 +12,6 @@ Toute la logique métier vit dans :
   - layers/layer_runner.py  → registre des couches
 
 Endpoints :
-    POST   /api/parcels/preanalyze           pré-analyse parcelle × couches (sans projet)
     POST   /api/projects                      créer un projet
     GET    /api/projects                      lister les projets
     GET    /api/projects/{id}                 détail d'un projet
@@ -27,7 +26,6 @@ Endpoints :
     GET    /api/memory                        RAM du processus backend
     GET    /api/layers                        liste des couches
     WS     /ws/projects/{id}/fetch-progress   suivi temps réel des fetches
-    WS     /ws/parcels/preanalyze              pré-analyse parcelle (ligne à ligne)
 """
 
 from __future__ import annotations
@@ -36,9 +34,7 @@ import asyncio
 import json
 import logging
 import os
-import queue
 import uuid
-from dataclasses import asdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -203,6 +199,10 @@ class FiltreOptionsDTO(BaseModel):
         default_factory=list,
         description="Habitats Carhab : libellés EUNIS (nom_eunis) ; intersection avec au moins un polygone.",
     )
+    excluded_layers:          list[str] = Field(
+        default_factory=list,
+        description="Couches exclues automatiquement (ex: geomce, project_indesirables).",
+    )
     arrachage_vignes_mode:    str   = Field(
         default="ignore",
         pattern="^(ignore|intersect|exclude)$",
@@ -276,19 +276,6 @@ class FromParcellesRequest(BaseModel):
     parcelles: list[ParcelleRefDTO] = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
     buffer_km: float = Field(default=5.0, ge=0.0, le=10.0)
-
-
-class PreanalyzeParcelleRequest(BaseModel):
-    """Pré-analyse écologique sans création de projet (intersections parcelle × couches)."""
-    code_insee: str = Field(..., min_length=4, max_length=5)
-    section: str = Field(..., min_length=1, max_length=4)
-    numero: str = Field(..., min_length=1, max_length=10)
-    buffer_m: float = Field(
-        default=50.0,
-        ge=10.0,
-        le=5000.0,
-        description="Buffer autour de la parcelle pour la BBOX WFS (m, EPSG:2154).",
-    )
 
 
 class FetchRequest(BaseModel):
@@ -369,6 +356,7 @@ def _dto_to_filtre_options(dto: FiltreOptionsDTO) -> FiltreOptions:
             "mode": dto.vegetation_hybride.mode,
         },
         carhab_nom_eunis=[x.strip() for x in dto.carhab_nom_eunis if x and str(x).strip()],
+        excluded_layers=[x.strip() for x in dto.excluded_layers if x and str(x).strip()],
         ebc_mode=dto.ebc_mode,
         natura2000_mode=dto.natura2000_mode,
         reserves_naturelles_mode=dto.reserves_naturelles_mode,
@@ -692,23 +680,6 @@ def _create_project_from_union_geometry(
     }
 
 
-@app.post("/api/parcels/preanalyze")
-def preanalyze_parcelle_route(body: PreanalyzeParcelleRequest):
-    """
-    Rapport d'intersection parcelle cible × couches SIG (sans projet, sans écriture résultats).
-    Fenêtre WFS : BBOX du buffer (m) autour de la parcelle ; test d'intersection : parcelle stricte.
-    """
-    from preanalyze_parcelle import run_preanalyze_parcelle
-
-    return run_preanalyze_parcelle(
-        engine,
-        code_insee=body.code_insee.strip(),
-        section=body.section.strip(),
-        numero=body.numero.strip(),
-        buffer_m=float(body.buffer_m),
-    )
-
-
 @app.post("/api/projects/from-parcelle", status_code=201)
 def create_project_from_parcelle(body: FromParcelleRequest):
     gdf = _load_parcelle_wfs(body.code_insee, body.section, body.numero)
@@ -866,6 +837,7 @@ def delete_project(project_id: str):
         "ecocompensation_results.unites_foncieres",   # ← nouveau
         "ecocompensation_results.sous_ensembles",     # ← nouveau
         "ecocompensation_results.parcelles_pool_indesirables",
+        "ecocompensation_results.parcelles_project_indesirables",
     ]
     for t in RESULT_TABLES:
         try:
@@ -1252,7 +1224,7 @@ def get_uf_subsets_geojson(project_id: str):
 def export_csv(
     project_id: str,
     background_tasks: BackgroundTasks,
-    scope: str = Query("parcelles", description="parcelles | uf"),
+    scope: str = Query("parcelles", description="parcelles | uf | indesirables"),
     run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results du projet"),
 ):
     import tempfile
@@ -1261,8 +1233,8 @@ def export_csv(
     from export_uf_classement_csv import export_uf_classement_csv
 
     s = scope.lower().strip()
-    if s not in ("parcelles", "uf"):
-        raise HTTPException(400, "Paramètre scope invalide (parcelles ou uf).")
+    if s not in ("parcelles", "uf", "indesirables"):
+        raise HTTPException(400, "Paramètre scope invalide (parcelles, uf ou indesirables).")
 
     proj = _get_project(project_id)
 
@@ -1310,6 +1282,24 @@ def export_csv(
             media_type="text/csv; charset=utf-8",
         )
 
+    if s == "indesirables":
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            payload = pool_service.get_project_indesirables_payload(conn, project_id=project_id)
+        parcelles = payload.get("parcelles") or []
+        if not parcelles:
+            raise HTTPException(400, "Aucune parcelle indésirable")
+        metrics_by_idu = payload.get("by_idu") if isinstance(payload.get("by_idu"), dict) else None
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
+            csv_path = Path(nf.name)
+            export_classement_csv(parcelles, csv_path, metrics_by_idu=metrics_by_idu)
+        background_tasks.add_task(os.remove, str(csv_path))
+        return FileResponse(
+            str(csv_path),
+            filename=f"indesirables_{project_id[:8]}.csv",
+            media_type="text/csv; charset=utf-8",
+        )
+
     # scope == uf
     last_results_uf = proj.get("last_results_uf")
     if not last_results_uf:
@@ -1335,7 +1325,7 @@ def export_csv(
 def export_shp(
     project_id: str,
     background_tasks: BackgroundTasks,
-    scope: str = Query("parcelles", description="parcelles | uf"),
+    scope: str = Query("parcelles", description="parcelles | uf | indesirables"),
     run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results du projet"),
 ):
     import shutil, tempfile, zipfile
@@ -1344,8 +1334,8 @@ def export_shp(
     from export_uf_classement_shp import export_uf_classement_shp
 
     s = scope.lower().strip()
-    if s not in ("parcelles", "uf"):
-        raise HTTPException(400, "Paramètre scope invalide (parcelles ou uf).")
+    if s not in ("parcelles", "uf", "indesirables"):
+        raise HTTPException(400, "Paramètre scope invalide (parcelles, uf ou indesirables).")
 
     proj = _get_project(project_id)
 
@@ -1426,6 +1416,49 @@ def export_shp(
             final_path, filename=f"parcelles_{project_id[:8]}.zip", media_type="application/zip"
         )
 
+    if s == "indesirables":
+        aoi_id = str(proj.get("aoi_id") or "")
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            payload = pool_service.get_project_indesirables_payload(conn, project_id=project_id)
+        parcelles = payload.get("parcelles") or []
+        if not parcelles:
+            raise HTTPException(400, "Aucune parcelle indésirable")
+        metrics_by_idu = payload.get("by_idu") if isinstance(payload.get("by_idu"), dict) else None
+        opts_dto = FiltreOptionsDTO()
+        options = _dto_to_filtre_options(opts_dto)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shp_path = Path(tmpdir) / "indesirables.shp"
+            try:
+                export_classement_shp(
+                    engine,
+                    project_id,
+                    parcelles,
+                    options,
+                    0.0,
+                    shp_path,
+                    aoi_id=aoi_id,
+                    metrics_by_idu=metrics_by_idu,
+                )
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            zip_path = Path(tmpdir) / "indesirables.zip"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                    f = shp_path.with_suffix(ext)
+                    if f.exists():
+                        zf.write(f, f.name)
+            with zipfile.ZipFile(zip_path, "r") as zr:
+                if not zr.namelist():
+                    raise HTTPException(500, "Export SHP indésirables : archive vide.")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as nf:
+                shutil.copy2(zip_path, nf.name)
+                final_path = nf.name
+        background_tasks.add_task(os.remove, final_path)
+        return FileResponse(
+            final_path, filename=f"indesirables_{project_id[:8]}.zip", media_type="application/zip"
+        )
+
     # scope == uf
     last_results_uf = proj.get("last_results_uf")
     last_filter_uf = proj.get("last_filter_uf")
@@ -1478,96 +1511,6 @@ async def fetch_progress_ws(project_id: str, websocket: WebSocket):
             await websocket.send_json({"event": "ping"})
     except WebSocketDisconnect:
         ws_manager.disconnect(project_id, websocket)
-
-
-@app.websocket("/ws/parcels/preanalyze")
-async def preanalyze_parcelle_ws(websocket: WebSocket):
-    """
-    Flux temps réel : start → running (par clé) → layer (résultat) → complete.
-    Le client envoie un JSON : { code_insee, section, numero, buffer_m? }.
-    """
-    await websocket.accept()
-    try:
-        raw = await websocket.receive_json()
-    except WebSocketDisconnect:
-        return
-    except Exception:
-        await websocket.send_json({"event": "error", "message": "Corps JSON invalide."})
-        await websocket.close()
-        return
-
-    try:
-        body = PreanalyzeParcelleRequest(**raw)
-    except Exception as e:
-        await websocket.send_json({"event": "error", "message": f"Paramètres invalides: {e}"})
-        await websocket.close()
-        return
-
-    code_insee = body.code_insee.strip()
-    section = body.section.strip()
-    numero = body.numero.strip()
-    buffer_m = float(body.buffer_m)
-
-    q: queue.Queue = queue.Queue()
-
-    def worker() -> None:
-        try:
-            from preanalyze_parcelle import run_preanalyze_parcelle
-
-            def on_start(payload: dict) -> None:
-                q.put(("start", payload))
-
-            def on_running(layer_key: str) -> None:
-                q.put(("running", layer_key))
-
-            def on_layer(row: LayerPreanalyzeRow) -> None:
-                q.put(("layer", asdict(row)))
-
-            result = run_preanalyze_parcelle(
-                engine,
-                code_insee=code_insee,
-                section=section,
-                numero=numero,
-                buffer_m=buffer_m,
-                on_start=on_start,
-                on_running=on_running,
-                on_layer=on_layer,
-            )
-            q.put(("end", result))
-        except Exception as e:
-            logger.exception("Pré-analyse WebSocket")
-            q.put(("fatal", str(e)))
-
-    async def pump() -> None:
-        while True:
-            kind, payload = await asyncio.to_thread(q.get)
-            if kind == "start":
-                pl = payload if isinstance(payload, dict) else {}
-                await websocket.send_json({"event": "start", **pl})
-            elif kind == "running":
-                await websocket.send_json({"event": "running", "layer_key": payload})
-            elif kind == "layer":
-                await websocket.send_json({"event": "layer", "layer": payload})
-            elif kind == "end":
-                res = payload if isinstance(payload, dict) else {}
-                await websocket.send_json({"event": "complete", **res})
-                return
-            elif kind == "fatal":
-                await websocket.send_json({"event": "error", "message": str(payload)})
-                return
-
-    pump_task = asyncio.create_task(pump())
-    try:
-        await asyncio.to_thread(worker)
-        await pump_task
-    except WebSocketDisconnect:
-        pump_task.cancel()
-    except Exception as e:
-        logger.exception("preanalyze_ws")
-        try:
-            await websocket.send_json({"event": "error", "message": str(e)})
-        except Exception:
-            pass
 
 
 # ─────────────────────────────────────────────

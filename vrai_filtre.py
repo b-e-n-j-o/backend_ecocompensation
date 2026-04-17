@@ -70,6 +70,7 @@ class FiltreOptions:
 
     vegetation_hybride: dict
     carhab_nom_eunis: list[str]
+    excluded_layers: list[str]
     ebc_mode: LayerIntersectMode
     natura2000_mode: LayerIntersectMode
     reserves_naturelles_mode: LayerIntersectMode
@@ -93,6 +94,7 @@ class FiltreOptions:
                 "mode": "OR",
             },
             carhab_nom_eunis=[],
+            excluded_layers=["geomce"],
             ebc_mode="ignore",
             natura2000_mode="exclude",
             reserves_naturelles_mode="ignore",
@@ -164,6 +166,7 @@ def run(
         "ecocompensation_results.troncons_hydro",
         "ecocompensation_results.surfaces_hydro",
         "ecocompensation_results.fauna",
+        "ecocompensation_results.parcelles_project_indesirables",
     ]
     exists: dict[str, bool] = {}
     with engine.begin() as conn:
@@ -231,6 +234,7 @@ def run(
         "troncon_hydro_radius_m": options.troncon_hydro_radius_m,
         "surface_hydro_radius_m": options.surface_hydro_radius_m,
     }
+    excluded_layers = {str(x).strip() for x in getattr(options, "excluded_layers", []) if str(x).strip()}
 
     def log(msg: str) -> None:
         if not return_parcelles:
@@ -316,8 +320,8 @@ def run(
         log("⚠️ Aucune parcelle après Miller + superficie, arrêt.")
         return None if not return_parcelles else ([], 0.0, funnel)
 
-    # --- 3) Exclusion GEOMCE
-    if has("ecocompensation_results.mesures_compensatoire_surf"):
+    # --- 3) Exclusion GEOMCE (pilotée par excluded_layers)
+    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_surf"):
         where_clauses.append(
             """
             NOT EXISTS (
@@ -326,7 +330,7 @@ def run(
             )
             """
         )
-    if has("ecocompensation_results.mesures_compensatoire_lin"):
+    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_lin"):
         where_clauses.append(
             """
             NOT EXISTS (
@@ -335,7 +339,7 @@ def run(
             )
             """
         )
-    if has("ecocompensation_results.mesures_compensatoire_pct"):
+    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_pct"):
         where_clauses.append(
             """
             NOT EXISTS (
@@ -344,7 +348,7 @@ def run(
             )
             """
         )
-    if has("ecocompensation_results.mesures_compensatoire_commune"):
+    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_commune"):
         where_clauses.append(
             """
             NOT EXISTS (
@@ -353,7 +357,7 @@ def run(
             )
             """
         )
-    geomce_applied = (
+    geomce_applied = "geomce" in excluded_layers and (
         has("ecocompensation_results.mesures_compensatoire_surf")
         or has("ecocompensation_results.mesures_compensatoire_lin")
         or has("ecocompensation_results.mesures_compensatoire_pct")
@@ -364,6 +368,24 @@ def run(
     if funnel_mode and geomce_applied:
         step_idx += 1
         funnel.append({"step": step_idx, "label": "Après exclusion GEOMCE", "count": n3})
+
+    # --- 3b) Exclusion du pool indésirable projet (pilotée par excluded_layers)
+    if "project_indesirables" in excluded_layers and has("ecocompensation_results.parcelles_project_indesirables"):
+        where_clauses.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM ecocompensation_results.parcelles_project_indesirables pi
+                WHERE pi.project_id = CAST(:project_id AS uuid)
+                  AND pi.idu = p.idu
+            )
+            """
+        )
+    n3b = maybe_count(where_clauses)
+    log(f"3b) Exclusion parcelles indésirables projet               → {n3b} parcelles")
+    if funnel_mode and "project_indesirables" in excluded_layers and has("ecocompensation_results.parcelles_project_indesirables"):
+        step_idx += 1
+        funnel.append({"step": step_idx, "label": "Après exclusion indésirables projet", "count": n3b})
 
     # --- 4) Natura 2000 (SIC / ZPS) : intersect / exclure / ignorer
     if options.natura2000_mode == "intersect" and has("ecocompensation_results.natura2000"):

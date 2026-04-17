@@ -49,3 +49,24 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool_indesirables (
 
 CREATE INDEX IF NOT EXISTS idx_pool_indesirables_project_run
 ON ecocompensation_results.parcelles_pool_indesirables(project_id, run_id);
+
+CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_project_indesirables (
+    project_id uuid NOT NULL,
+    idu text NOT NULL,
+    source_run_id uuid NULL,
+    rank integer NULL,
+    code_insee text NULL,
+    section text NULL,
+    numero text NULL,
+    surface_ha double precision NULL,
+    miller double precision NULL,
+    distance_km double precision NULL,
+    dist_hydro_m double precision NULL,
+    metrics_jsonb jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, idu)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_indesirables_project_updated
+ON ecocompensation_results.parcelles_project_indesirables(project_id, updated_at DESC);
