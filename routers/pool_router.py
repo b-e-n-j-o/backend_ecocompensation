@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -50,6 +52,10 @@ def get_pool_run_snapshot(project_id: str, run_id: str):
     """
     if not _project_exists(project_id):
         raise HTTPException(404, f"Projet {project_id} introuvable")
+    try:
+        uuid.UUID(str(run_id))
+    except ValueError:
+        raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
     aoi_id = _project_aoi_id(project_id)
     with engine.begin() as conn:
         pool_service.ensure_tables(conn)

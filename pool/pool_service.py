@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from typing import Any
 
@@ -96,29 +97,39 @@ CREATE INDEX IF NOT EXISTS idx_project_indesirables_project_updated
 ON ecocompensation_results.parcelles_project_indesirables(project_id, updated_at DESC);
 """
 
+_ensure_tables_lock = threading.Lock()
+_ensure_tables_done = False
+
 
 def ensure_tables(conn) -> None:
+    global _ensure_tables_done
+    if _ensure_tables_done:
+        return
+    with _ensure_tables_lock:
+        if _ensure_tables_done:
+            return
     # CREATE INDEX sur une table déjà volumineuse peut dépasser le statement_timeout par défaut (Supabase).
-    _run_optional_in_savepoint(
-        conn,
-        "sp_pool_stmt_timeout",
-        lambda: conn.execute(text("SET LOCAL statement_timeout = '15min'")),
-    )
-    for stmt in [s.strip() for s in CREATE_TABLES_SQL.split(";") if s.strip()]:
-        conn.execute(text(stmt))
-    # Colonnes ajoutées après création initiale des tables (migrations légères).
-    _run_optional_in_savepoint(
-        conn,
-        "sp_pool_result_summary_col",
-        lambda: conn.execute(
-            text(
-                """
-                ALTER TABLE ecocompensation_results.parcelles_pool_runs
-                ADD COLUMN IF NOT EXISTS result_summary jsonb NOT NULL DEFAULT '{}'::jsonb
-                """
-            )
-        ),
-    )
+        _run_optional_in_savepoint(
+            conn,
+            "sp_pool_stmt_timeout",
+            lambda: conn.execute(text("SET LOCAL statement_timeout = '15min'")),
+        )
+        for stmt in [s.strip() for s in CREATE_TABLES_SQL.split(";") if s.strip()]:
+            conn.execute(text(stmt))
+        # Colonnes ajoutées après création initiale des tables (migrations légères).
+        _run_optional_in_savepoint(
+            conn,
+            "sp_pool_result_summary_col",
+            lambda: conn.execute(
+                text(
+                    """
+                    ALTER TABLE ecocompensation_results.parcelles_pool_runs
+                    ADD COLUMN IF NOT EXISTS result_summary jsonb NOT NULL DEFAULT '{}'::jsonb
+                    """
+                )
+            ),
+        )
+        _ensure_tables_done = True
 
 
 def _coerce_json_mapping(val: Any) -> dict[str, Any]:
@@ -386,13 +397,14 @@ def get_parcelles_for_run_results(
 def build_filter_snapshot_from_run(
     conn, project_id: str, run_id: str, aoi_id_str: str
 ) -> dict[str, Any] | None:
-    """Payload compatible avec la réponse POST /filter (sans memory)."""
+    """Payload compatible avec la réponse POST /filter (sans memory), enrichi des métriques pool."""
     meta = get_run_meta(conn, project_id, run_id)
     if not meta:
         return None
     if str(meta.get("scope") or "parcelles") != "parcelles":
         return None
     parcelles = get_parcelles_for_run_results(conn, project_id, run_id, aoi_id_str)
+    by_idu = get_all_metrics_grouped_by_idu(conn, project_id, run_id)
     rs = meta.get("result_summary") or {}
     total = int(rs.get("total") or len(parcelles) or meta.get("total_count") or 0)
     return {
@@ -402,6 +414,8 @@ def build_filter_snapshot_from_run(
         "final_radius_km": float(rs.get("final_radius_km") or 0),
         "funnel": rs.get("funnel") if isinstance(rs.get("funnel"), list) else [],
         "parcelles": parcelles,
+        "by_idu": by_idu,
+        "total_parcelles_metrics": len(by_idu),
         "run_created_at": meta.get("created_at").isoformat() if meta.get("created_at") else None,
     }
 
