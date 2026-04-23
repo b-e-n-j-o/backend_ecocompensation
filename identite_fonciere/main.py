@@ -29,6 +29,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+MAX_EMPRISE_SIDE_M = 2000.0
 
 app = FastAPI(
     title="Identité Foncière V0",
@@ -121,6 +122,22 @@ async def generer_rapport(body: RapportRequest):
         uf_gdf = build_uf(parc_results)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Garde-fou performance : l'emprise des parcelles ne doit pas dépasser 2 km x 2 km.
+    # On mesure la bbox de l'UF en mètres (Web Mercator).
+    if len(ok) > 1:
+        minx, miny, maxx, maxy = uf_gdf.to_crs(3857).total_bounds
+        width_m = float(maxx - minx)
+        height_m = float(maxy - miny)
+        if width_m > MAX_EMPRISE_SIDE_M or height_m > MAX_EMPRISE_SIDE_M:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Les parcelles sélectionnées couvrent une emprise trop grande "
+                    f"({width_m:.0f} m x {height_m:.0f} m). "
+                    "La limite est de 2000 m x 2000 m."
+                ),
+            )
 
     surface = uf_surface_m2(uf_gdf)
     geom = uf_geojson(uf_gdf)
