@@ -1,0 +1,115 @@
+[
+  {
+    "slug": "Tonnay-Charente_AP122-AP123",
+    "commune": "Tonnay-Charente",
+    "parcelles": [
+      "AP 0122",
+      "AP 0123"
+    ],
+    "status": "error",
+    "pdf_path": null,
+    "intersections_count": 2,
+    "layers_found": [
+      "Informations surfaciques",
+      "Zonage PLU / PLUi"
+    ],
+    "warnings": [
+      "Carte DPU ignorée : [Errno 28] No space left on device",
+      "Carte subdivision ignoree : [Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpxg7epefy/subdivision_map.png'"
+    ],
+    "error": "[Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpxg7epefy/rapport_identite_fonciere_tonnay-charente_20260423_1305.pdf'",
+    "duration_s": 13.0,
+    "index": 1,
+    "folder": "01_Tonnay-Charente_AP122-AP123"
+  },
+  {
+    "slug": "Sausset-les-Pins_0B482",
+    "commune": "Sausset-les-Pins",
+    "parcelles": [
+      "0B 0482"
+    ],
+    "status": "error",
+    "pdf_path": null,
+    "intersections_count": 5,
+    "layers_found": [
+      "Informations surfaciques",
+      "Prescriptions linéaires",
+      "Prescriptions surfaciques",
+      "Servitudes d'utilité publique",
+      "Zonage PLU / PLUi"
+    ],
+    "warnings": [
+      "Carte PLU ignorée : [Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpa9kz7u29/plu_map.png'",
+      "Carte servitudes ignorée : [Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpa9kz7u29/servitudes_map.png'",
+      "Carte DPU ignorée : [Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpa9kz7u29/dpu_map.png'",
+      "Carte subdivision ignoree : [Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpa9kz7u29/subdivision_map.png'"
+    ],
+    "error": "[Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpa9kz7u29/rapport_identite_fonciere_sausset-les-pins_20260423_1306.pdf'",
+    "duration_s": 12.2,
+    "index": 5,
+    "folder": "05_Sausset-les-Pins_0B482"
+  },
+  {
+    "slug": "Saint-Estèphe_0B1479",
+    "commune": "Saint-Estèphe",
+    "parcelles": [
+      "0B 1479"
+    ],
+    "status": "error",
+    "pdf_path": null,
+    "intersections_count": 3,
+    "layers_found": [
+      "Prescriptions surfaciques",
+      "Servitudes d'utilité publique",
+      "Zonage PLU / PLUi"
+    ],
+    "warnings": [],
+    "error": "[Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpotg5f3fb'",
+    "duration_s": 1.2,
+    "index": 9,
+    "folder": "09_Saint-Estèphe_0B1479"
+  },
+  {
+    "slug": "Dijon_HW14",
+    "commune": "Dijon",
+    "parcelles": [
+      "HW 0014"
+    ],
+    "status": "error",
+    "pdf_path": null,
+    "intersections_count": 5,
+    "layers_found": [
+      "Informations surfaciques",
+      "Prescriptions linéaires",
+      "Prescriptions surfaciques",
+      "Servitudes d'utilité publique",
+      "Zonage PLU / PLUi"
+    ],
+    "warnings": [],
+    "error": "[Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmprgz78hyl'",
+    "duration_s": 1.5,
+    "index": 13,
+    "folder": "13_Dijon_HW14"
+  },
+  {
+    "slug": "Landerneau_AP47",
+    "commune": "Landerneau",
+    "parcelles": [
+      "AP 0047"
+    ],
+    "status": "error",
+    "pdf_path": null,
+    "intersections_count": 4,
+    "layers_found": [
+      "Informations surfaciques",
+      "Prescriptions surfaciques",
+      "Servitudes d'utilité publique",
+      "Zonage PLU / PLUi"
+    ],
+    "warnings": [],
+    "error": "[Errno 28] No space left on device: '/var/folders/3y/phv7f81s6mgbwvpd5scwl05m0000gn/T/tmpxifi3zhz'",
+    "duration_s": 1.8,
+    "index": 16,
+    "folder": "16_Landerneau_AP47"
+  }
+]

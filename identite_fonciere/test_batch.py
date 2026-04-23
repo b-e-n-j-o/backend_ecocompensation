@@ -31,17 +31,35 @@ DEFAULT_OUT_DIR = "BATCH_RESULTS"
 
 # ── Le script est dans v0/ — les modules core/, pdf/, etc. sont au même niveau
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-
-from core.parcelle import ParcelleRef, fetch_parcelles
-from core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
-from core.intersections import compute_intersections
-from core.gpu_wfs import GPU_LAYERS_BY_TABLE, _fetch_layer
-from utils.geo import gdf_bbox_4326, intersects_gdf
-from visuels.carte_plu import render_plu_map
-from visuels.carte_servitudes import render_servitudes_map
-from visuels.carte_dpu import compute_dpu_result, render_dpu_map
-from pdf.rapport import generate_rapport_pdf
+try:
+    # Mode package (recommandé) :
+    # python -m identite_fonciere.test_batch ...
+    from .core.parcelle import ParcelleRef, fetch_parcelles
+    from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
+    from .core.intersections import compute_intersections
+    from .core.gpu_wfs import GPU_LAYERS_BY_TABLE, _fetch_layer
+    from .utils.geo import gdf_bbox_4326, intersects_gdf
+    from .visuels.carte_plu import render_plu_map
+    from .visuels.carte_servitudes import render_servitudes_map
+    from .visuels.carte_dpu import compute_dpu_result, render_dpu_map
+    from .visuels.carte_subdivision import render_subdivision_map
+    from .core.subdivision_fiscale.subdivision import compute_subdivision_result
+    from .pdf.rapport import generate_rapport_pdf
+except ImportError:
+    # Mode script direct (fallback) :
+    # python test_batch.py ...
+    sys.path.insert(0, str(HERE))
+    from core.parcelle import ParcelleRef, fetch_parcelles
+    from core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
+    from core.intersections import compute_intersections
+    from core.gpu_wfs import GPU_LAYERS_BY_TABLE, _fetch_layer
+    from utils.geo import gdf_bbox_4326, intersects_gdf
+    from visuels.carte_plu import render_plu_map
+    from visuels.carte_servitudes import render_servitudes_map
+    from visuels.carte_dpu import compute_dpu_result, render_dpu_map
+    from visuels.carte_subdivision import render_subdivision_map
+    from core.subdivision_fiscale.subdivision import compute_subdivision_result
+    from pdf.rapport import generate_rapport_pdf
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,6 +254,29 @@ def run_one(uf_parcelles: list, out_dir: Path, dpi: int = 150) -> dict:
                 dpu_png = None
                 dpu_res = None
 
+            # Carte subdivision fiscale (toujours générée — subdivisée ou non)
+            subdiv_png = None
+            subdiv_res = None
+            try:
+                subdiv_res = compute_subdivision_result(uf_gdf, ok)
+                subdiv_png = str(tmp / "subdivision_map.png")
+                render_subdivision_map(
+                    uf_gdf=uf_gdf,
+                    subdivisions_gdf=subdiv_res["subdivisions_gdf"],
+                    out_path=subdiv_png,
+                    subdivisee=subdiv_res["subdivisee"],
+                    dpi=dpi,
+                )
+                shutil.copy2(subdiv_png, out_dir / "subdivision_map.png")
+                status_sub = "subdivisee" if subdiv_res["subdivisee"] else "non subdivisee"
+                log.info("   ✓ Carte subdivision (%s)", status_sub)
+            except Exception as e:
+                msg = f"Carte subdivision ignoree : {e}"
+                log.warning("   ⚠  %s", msg)
+                meta["warnings"].append(msg)
+                subdiv_png = None
+                subdiv_res = None
+
             # PDF
             pdf_tmp = generate_rapport_pdf(
                 result,
@@ -244,6 +285,8 @@ def run_one(uf_parcelles: list, out_dir: Path, dpi: int = 150) -> dict:
                 servitudes_map_png=sup_png,
                 dpu_map_png=dpu_png,
                 dpu_result=dpu_res,
+                subdivision_map_png=subdiv_png,
+                subdivision_result=subdiv_res,
             )
             pdf_final = out_dir / Path(pdf_tmp).name
             shutil.copy2(pdf_tmp, pdf_final)

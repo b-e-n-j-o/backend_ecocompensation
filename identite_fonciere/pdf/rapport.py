@@ -56,6 +56,7 @@ ARTICLE_LABELS = {
     "7": "Informations et Prescriptions",
     "8": "Autres",
     "9": "Droits de préemption",
+    "10": "Subdivision fiscale",
 }
 
 # Codes typeinf GPU → libellés lisibles pour les couches info_surf / info_lin / info_pct
@@ -705,6 +706,8 @@ def generate_rapport_pdf(
     servitudes_map_png: Optional[str] = None,
     dpu_map_png: Optional[str] = None,
     dpu_result: Optional[Dict[str, Any]] = None,
+    subdivision_map_png: Optional[str] = None,
+    subdivision_result: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Génère le rapport PDF V0 France entière.
@@ -719,6 +722,8 @@ def generate_rapport_pdf(
         servitudes_map_png : chemin PNG carte servitudes SUP (optionnel)
         dpu_map_png        : chemin PNG carte DPU (optionnel, toujours généré)
         dpu_result         : dict retourné par compute_dpu_result() (optionnel)
+        subdivision_map_png: chemin PNG carte subdivision fiscale (optionnel)
+        subdivision_result : dict retourné par compute_subdivision_result() (optionnel)
 
     Returns:
         Chemin absolu du PDF généré.
@@ -798,7 +803,7 @@ def generate_rapport_pdf(
 
     # Page DPU dédiée (toujours présente si dpu_map_png fourni)
     if dpu_map_png and Path(dpu_map_png).is_file() and dpu_result is not None:
-        from .section_dpu import build_dpu_page_flowables
+        from .sections.section_dpu import build_dpu_page_flowables
         story.append(PageBreak())
         story.extend(build_dpu_page_flowables(dpu_map_png, dpu_result, tw))
     else:
@@ -806,6 +811,23 @@ def generate_rapport_pdf(
         preemption = [i for i in intersections if str(i.get("article", "")).startswith("9")]
         if preemption:
             story.extend(_article_section("9", preemption, st, page_w))
+
+    # Page subdivision fiscale dédiée (après DPU)
+    if (
+        subdivision_map_png
+        and Path(subdivision_map_png).is_file()
+        and subdivision_result is not None
+    ):
+        from .sections.section_subdivision import build_subdivision_page_flowables
+
+        story.append(PageBreak())
+        story.extend(
+            build_subdivision_page_flowables(
+                subdivision_map_png,
+                subdivision_result,
+                tw,
+            )
+        )
 
     doc.build(story, onFirstPage=decorator, onLaterPages=decorator)
     logger.info("✅ Rapport PDF généré : %s", output_path)

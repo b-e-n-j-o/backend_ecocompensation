@@ -22,6 +22,9 @@ from .core.parcelle import ParcelleRef, fetch_parcelles
 from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
 from .core.intersections import compute_intersections
 from .visuels.carte_plu import render_plu_map
+from .visuels.carte_dpu import compute_dpu_result, render_dpu_map
+from .visuels.carte_subdivision import render_subdivision_map
+from .core.subdivision_fiscale.subdivision import compute_subdivision_result
 from .pdf.rapport import generate_rapport_pdf
 
 logging.basicConfig(
@@ -175,6 +178,10 @@ async def generer_rapport(body: RapportRequest):
     # 4. Carte PLU
     with tempfile.TemporaryDirectory() as tmpdir:
         plu_map_png: Optional[str] = None
+        dpu_map_png: Optional[str] = None
+        dpu_result: Optional[dict] = None
+        subdivision_map_png: Optional[str] = None
+        subdivision_result: Optional[dict] = None
 
         if opts.generer_carte_plu and plu_pct_stats:
             # Récupère le GeoDataFrame PLU depuis les intersections
@@ -202,12 +209,48 @@ async def generer_rapport(body: RapportRequest):
             except Exception as e:
                 logger.warning("⚠️  Carte PLU non générée : %s", e)
 
+        # 4bis. Carte DPU (toujours générée, soumise ou non)
+        try:
+            dpu_result = compute_dpu_result(uf_gdf, buffer_m=300.0, intersections=intersections)
+            dpu_map_png = str(Path(tmpdir) / "dpu_map.png")
+            render_dpu_map(
+                uf_gdf=uf_gdf,
+                dpu_gdf=dpu_result["dpu_gdf"],
+                out_path=dpu_map_png,
+                intersecte=dpu_result["intersecte"],
+                dpi=opts.dpi_carte,
+            )
+        except Exception as e:
+            logger.warning("⚠️  Carte DPU non générée : %s", e)
+            dpu_map_png = None
+            dpu_result = None
+
+        # 4ter. Carte subdivision fiscale (toujours générée, subdivisée ou non)
+        try:
+            subdivision_result = compute_subdivision_result(uf_gdf, ok)
+            subdivision_map_png = str(Path(tmpdir) / "subdivision_map.png")
+            render_subdivision_map(
+                uf_gdf=uf_gdf,
+                subdivisions_gdf=subdivision_result["subdivisions_gdf"],
+                out_path=subdivision_map_png,
+                subdivisee=subdivision_result["subdivisee"],
+                dpi=opts.dpi_carte,
+            )
+        except Exception as e:
+            logger.warning("⚠️  Carte subdivision non générée : %s", e)
+            subdivision_map_png = None
+            subdivision_result = None
+
         # 5. Génération PDF
         try:
             pdf_path = generate_rapport_pdf(
                 result,
                 output_dir=tmpdir,
                 plu_map_png=plu_map_png,
+                dpu_map_png=dpu_map_png,
+                dpu_result=dpu_result,
+                subdivision_map_png=subdivision_map_png,
+                subdivision_result=subdivision_result,
             )
         except Exception as e:
             logger.error("Erreur génération PDF : %s", e, exc_info=True)
