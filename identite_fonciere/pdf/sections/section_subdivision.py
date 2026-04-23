@@ -6,7 +6,7 @@ Section dediee a la subdivision fiscale de l'unite fonciere.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
@@ -108,17 +108,18 @@ def _image_size(png_path: Path, target_width: float) -> tuple:
 
 
 def build_subdivision_page_flowables(
-    subdivision_map_png: str,
+    subdivision_map_png: Optional[str],
     subdivision_result: Dict[str, Any],
     table_width: float,
 ) -> List[Any]:
-    pp = Path(subdivision_map_png)
-    if not pp.is_file():
-        return []
+    pp = Path(subdivision_map_png) if subdivision_map_png else None
 
     st = _styles()
     tw = max(float(table_width), 120.0)
-    img_w, img_h = _image_size(pp, tw * 0.98)
+    if pp and pp.is_file():
+        img_w, img_h = _image_size(pp, tw * 0.98)
+    else:
+        img_w, img_h = 0.0, 0.0
 
     subdivisee = bool(subdivision_result.get("subdivisee", False))
     nb = int(subdivision_result.get("nb_entites", 0) or 0)
@@ -164,7 +165,8 @@ def build_subdivision_page_flowables(
     flow.append(Spacer(1, 10))
     flow.append(HRFlowable(width="100%", thickness=1, color=C_LIGHT))
     flow.append(Spacer(1, 12))
-    flow.append(Image(str(pp), width=img_w, height=img_h))
+    if pp and pp.is_file():
+        flow.append(Image(str(pp), width=img_w, height=img_h))
 
     if subdivisee and rows:
         flow.append(Spacer(1, 14))

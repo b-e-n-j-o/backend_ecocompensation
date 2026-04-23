@@ -90,7 +90,7 @@ def _image_size(png_path: Path, target_width: float) -> tuple:
 
 
 def build_dpu_page_flowables(
-    dpu_map_png: str,
+    dpu_map_png: Optional[str],
     dpu_result: Dict[str, Any],
     table_width: float,
 ) -> List[Any]:
@@ -106,14 +106,15 @@ def build_dpu_page_flowables(
     Returns:
         Liste de flowables ReportLab.
     """
-    pp = Path(dpu_map_png)
-    if not pp.is_file():
-        return []
+    pp = Path(dpu_map_png) if dpu_map_png else None
 
     st         = _styles()
     tw         = max(float(table_width), 120.0)
-    img_w      = tw * 0.98
-    img_w, img_h = _image_size(pp, img_w)
+    img_w = tw * 0.98
+    if pp and pp.is_file():
+        img_w, img_h = _image_size(pp, img_w)
+    else:
+        img_h = 0.0
     intersecte = dpu_result.get("intersecte", False)
     libelles   = dpu_result.get("libelles", [])
     nb         = dpu_result.get("nb_entites", 0)
@@ -159,8 +160,9 @@ def build_dpu_page_flowables(
     flow.append(HRFlowable(width="100%", thickness=1, color=C_LIGHT))
     flow.append(Spacer(1, 12))
 
-    # ── Carte ──────────────────────────────────────────────────────────────
-    flow.append(Image(str(pp), width=img_w, height=img_h))
+    # ── Carte (optionnelle) ────────────────────────────────────────────────
+    if pp and pp.is_file():
+        flow.append(Image(str(pp), width=img_w, height=img_h))
 
     # ── Tableau récap si soumise ────────────────────────────────────────────
     if intersecte:

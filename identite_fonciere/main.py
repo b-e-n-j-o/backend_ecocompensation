@@ -23,9 +23,14 @@ from .core.parcelle import ParcelleRef, fetch_parcelles
 from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
 from .core.intersections import compute_intersections
 from .visuels.carte_plu import compute_plu_result, render_plu_map
+from .visuels.carte_servitudes import render_servitudes_map
+from .visuels.carte_prescriptions import render_prescriptions_map
 from .visuels.carte_dpu import compute_dpu_result, render_dpu_map
 from .visuels.carte_subdivision import render_subdivision_map
+from .visuels.carte_intro import render_intro_map
 from .core.subdivision_fiscale.subdivision import compute_subdivision_result
+from .pdf.sections.section_servitudes import compute_servitudes_result
+from .pdf.sections.section_prescriptions import compute_prescriptions_result
 from .pdf.rapport import generate_rapport_pdf
 
 logging.basicConfig(
@@ -252,10 +257,28 @@ async def generer_rapport(body: RapportRequest):
     with tempfile.TemporaryDirectory() as tmpdir:
         plu_map_png: Optional[str] = None
         plu_result: Optional[dict] = None
+        servitudes_map_png: Optional[str] = None
+        servitudes_result: Optional[dict] = None
+        prescriptions_map_png: Optional[str] = None
+        prescriptions_result: Optional[dict] = None
         dpu_map_png: Optional[str] = None
         dpu_result: Optional[dict] = None
         subdivision_map_png: Optional[str] = None
         subdivision_result: Optional[dict] = None
+        intro_map_png: Optional[str] = None
+
+        # 4a. Carte de garde (UF + limites/numéros de parcelles)
+        try:
+            intro_map_png = str(Path(tmpdir) / "intro_map.png")
+            render_intro_map(
+                uf_gdf=uf_gdf,
+                parcelle_results=ok,
+                out_path=intro_map_png,
+                dpi=opts.dpi_carte,
+            )
+        except Exception as e:
+            logger.warning("⚠️  Carte intro non générée : %s", e)
+            intro_map_png = None
 
         # 4. Données + carte PLU (section dédiée toujours présente)
         try:
@@ -274,7 +297,7 @@ async def generer_rapport(body: RapportRequest):
                 parcelle_results=ok,
             )
 
-            if opts.generer_carte_plu:
+            if opts.generer_carte_plu and bool(plu_result.get("intersecte", False)):
                 plu_png_path = str(Path(tmpdir) / "plu_map.png")
                 render_plu_map(
                     uf_gdf=uf_gdf,
@@ -294,33 +317,109 @@ async def generer_rapport(body: RapportRequest):
             }
             plu_map_png = None
 
-        # 4bis. Carte DPU (toujours générée, soumise ou non)
+        # 4bis. Données + carte servitudes (section dédiée toujours présente)
+        try:
+            from .core.gpu_wfs import GPU_LAYERS, _fetch_layer
+            from .utils.geo import gdf_bbox_4326
+            import geopandas as gpd
+
+            bbox_sup = gdf_bbox_4326(uf_gdf, buffer_m=opts.buffer_wfs_m)
+            sup_gdfs: dict[str, gpd.GeoDataFrame] = {}
+            for cfg in GPU_LAYERS:
+                if str(cfg.get("article", "")) != "4":
+                    continue
+                lr = _fetch_layer(cfg, bbox_sup, timeout=30)
+                sup_gdfs[cfg["table"]] = lr.gdf if lr.ok else gpd.GeoDataFrame()
+
+            servitudes_result = compute_servitudes_result(
+                uf_gdf=uf_gdf,
+                parcelle_results=ok,
+                sup_gdfs=sup_gdfs,
+                intersections=intersections,
+            )
+
+            if bool(servitudes_result.get("intersecte", False)):
+                servitudes_map_png = str(Path(tmpdir) / "servitudes_map.png")
+                render_servitudes_map(
+                    uf_gdf=uf_gdf,
+                    sup_gdfs=sup_gdfs,
+                    out_path=servitudes_map_png,
+                    buffer_m=300.0,
+                    dpi=opts.dpi_carte,
+                )
+        except Exception as e:
+            logger.warning("⚠️  Données/carte servitudes non générées : %s", e)
+            servitudes_map_png = None
+            servitudes_result = {
+                "intersecte": False,
+                "attributs": [],
+                "uf_repartition": [],
+                "parcelles_repartition": [],
+            }
+
+        # 4bis2. Prescriptions PLU (surf + lin + pct) — section dédiée + carte unique si intersection
+        try:
+            from .core.gpu_wfs import GPU_LAYERS, _fetch_layer
+            from .utils.geo import gdf_bbox_4326, intersects_gdf
+            import geopandas as gpd
+
+            bbox_psc = gdf_bbox_4326(uf_gdf, buffer_m=opts.buffer_wfs_m)
+            pres_gdfs: dict[str, gpd.GeoDataFrame] = {}
+            for cfg in GPU_LAYERS:
+                tbl = str(cfg.get("table") or "")
+                if tbl not in ("prescription_surf", "prescription_lin", "prescription_pct"):
+                    continue
+                lr = _fetch_layer(cfg, bbox_psc, timeout=30)
+                raw = lr.gdf if lr.ok else gpd.GeoDataFrame()
+                pres_gdfs[tbl] = intersects_gdf(uf_gdf, raw) if not raw.empty else gpd.GeoDataFrame()
+
+            prescriptions_result = compute_prescriptions_result(
+                intersections=intersections,
+                pres_gdfs=pres_gdfs,
+            )
+            if bool(prescriptions_result.get("intersecte", False)):
+                prescriptions_map_png = str(Path(tmpdir) / "prescriptions_map.png")
+                render_prescriptions_map(
+                    uf_gdf=uf_gdf,
+                    pres_gdfs=pres_gdfs,
+                    out_path=prescriptions_map_png,
+                    buffer_m=300.0,
+                    dpi=opts.dpi_carte,
+                )
+        except Exception as e:
+            logger.warning("⚠️  Données/carte prescriptions non générées : %s", e)
+            prescriptions_map_png = None
+            prescriptions_result = {"intersecte": False, "attributs": []}
+
+        # 4ter. Carte DPU (générée seulement si soumise)
         try:
             dpu_result = compute_dpu_result(uf_gdf, buffer_m=300.0, intersections=intersections)
-            dpu_map_png = str(Path(tmpdir) / "dpu_map.png")
-            render_dpu_map(
-                uf_gdf=uf_gdf,
-                dpu_gdf=dpu_result["dpu_gdf"],
-                out_path=dpu_map_png,
-                intersecte=dpu_result["intersecte"],
-                dpi=opts.dpi_carte,
-            )
+            if bool(dpu_result.get("intersecte", False)):
+                dpu_map_png = str(Path(tmpdir) / "dpu_map.png")
+                render_dpu_map(
+                    uf_gdf=uf_gdf,
+                    dpu_gdf=dpu_result["dpu_gdf"],
+                    out_path=dpu_map_png,
+                    intersecte=dpu_result["intersecte"],
+                    dpi=opts.dpi_carte,
+                )
         except Exception as e:
             logger.warning("⚠️  Carte DPU non générée : %s", e)
             dpu_map_png = None
             dpu_result = None
 
-        # 4ter. Carte subdivision fiscale (toujours générée, subdivisée ou non)
+        # 4quater. Carte subdivision fiscale (générée seulement si subdivisée)
         try:
             subdivision_result = compute_subdivision_result(uf_gdf, ok)
-            subdivision_map_png = str(Path(tmpdir) / "subdivision_map.png")
-            render_subdivision_map(
-                uf_gdf=uf_gdf,
-                subdivisions_gdf=subdivision_result["subdivisions_gdf"],
-                out_path=subdivision_map_png,
-                subdivisee=subdivision_result["subdivisee"],
-                dpi=opts.dpi_carte,
-            )
+            if bool(subdivision_result.get("subdivisee", False)):
+                subdivision_map_png = str(Path(tmpdir) / "subdivision_map.png")
+                render_subdivision_map(
+                    uf_gdf=uf_gdf,
+                    subdivisions_gdf=subdivision_result["subdivisions_gdf"],
+                    out_path=subdivision_map_png,
+                    subdivisee=subdivision_result["subdivisee"],
+                    dpi=opts.dpi_carte,
+                )
         except Exception as e:
             logger.warning("⚠️  Carte subdivision non générée : %s", e)
             subdivision_map_png = None
@@ -333,10 +432,15 @@ async def generer_rapport(body: RapportRequest):
                 output_dir=tmpdir,
                 plu_map_png=plu_map_png,
                 plu_result=plu_result,
+                servitudes_map_png=servitudes_map_png,
+                servitudes_result=servitudes_result,
+                prescriptions_map_png=prescriptions_map_png,
+                prescriptions_result=prescriptions_result,
                 dpu_map_png=dpu_map_png,
                 dpu_result=dpu_result,
                 subdivision_map_png=subdivision_map_png,
                 subdivision_result=subdivision_result,
+                intro_map_png=intro_map_png,
             )
         except Exception as e:
             logger.error("Erreur génération PDF : %s", e, exc_info=True)

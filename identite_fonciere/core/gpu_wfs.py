@@ -99,7 +99,7 @@ GPU_LAYERS = [
         "type": "servitude",
         "geom_type": "polygon",
         # suptype = code (ex: ac1, pt2…), nomsuplitt = libellé long
-        "keep": ["suptype", "nomsuplitt", "idgen"],
+        "keep": ["suptype", "nomsuplitt", "nomass", "typeass", "idgen"],
         "group_by": "suptype",
         "attribut_discriminant": "suptype",
     },
@@ -110,7 +110,7 @@ GPU_LAYERS = [
         "article": "4",
         "type": "servitude",
         "geom_type": "lineaire",
-        "keep": ["suptype", "nomsuplitt"],
+        "keep": ["suptype", "nomsuplitt", "nomass", "typeass"],
         "group_by": "suptype",
         "attribut_discriminant": "suptype",
     },

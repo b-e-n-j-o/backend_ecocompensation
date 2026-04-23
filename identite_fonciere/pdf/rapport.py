@@ -17,14 +17,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import (
-    HRFlowable, Image, KeepTogether, PageBreak,
+    KeepTogether, PageBreak,
     Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
+
+from .sections.section_prescriptions import PRESCRIPTION_TABLE_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -201,227 +202,6 @@ class _PageDeco:
 
 
 # ---------------------------------------------------------------------------
-# Page de garde
-# ---------------------------------------------------------------------------
-
-def _cover_page(
-    result: Dict[str, Any],
-    st: Dict[str, ParagraphStyle],
-    tw: float,
-) -> List[Any]:
-    flow: List[Any] = []
-    commune = result.get("commune", "—")
-    insee = result.get("insee", "—")
-    surface_m2 = result.get("surface_uf_m2")
-    parcelles_detail = result.get("parcelles_uf_detail", [])
-
-    surface_str = "—"
-    if surface_m2:
-        try:
-            m2 = float(surface_m2)
-            ha = m2 / 10_000
-            sep = "\u202f"
-            s = f"{int(round(m2)):,}".replace(",", sep)
-            surface_str = f"{s} m² ({ha:.2f} ha)".replace(".", ",")
-        except Exception:
-            pass
-
-    # Zonage PLU (premier libellé intersecté)
-    zonage_str = "—"
-    for inter in result.get("intersections", []):
-        if inter.get("table") == "zone_urba":
-            if inter.get("_plu_all_zonages_below_min_pct"):
-                zonage_str = "Aucun zonage ≥ 1 % surface"
-                break
-            els = [e.get("libelle", "") for e in inter.get("elements", []) if e.get("libelle")]
-            if els:
-                zonage_str = ", ".join(dict.fromkeys(els))
-                if len(zonage_str) > 200:
-                    zonage_str = zonage_str[:197] + "…"
-            break
-
-    # Références cadastrales
-    refs = result.get("parcelles_cadastrales", [])
-    if refs:
-        ref_lines = [f"<b>{xml_escape(p['section'])} {xml_escape(p['numero'])}</b>"
-                     for p in refs if p.get("section")]
-        ref_html = "<br/>".join(ref_lines) or "—"
-        ref_label = "Références cadastrales" if len(refs) > 1 else "Référence cadastrale"
-    else:
-        ref_html = "<b>" + xml_escape(result.get("parcelle", "—")) + "</b>"
-        ref_label = "Référence cadastrale"
-
-    flow.append(Spacer(1, 0.6 * cm))
-    flow.append(Paragraph("IDENTITÉ FONCIÈRE", st["kicker"]))
-    flow.append(Paragraph("CARTE D'IDENTITÉ FONCIÈRE", st["title"]))
-    flow.append(Paragraph(
-        "Synthèse des intersections réglementaires et du zonage PLU.",
-        st["subtitle"],
-    ))
-    flow.append(HRFlowable(width="100%", thickness=2, color=C_LIGHT))
-    flow.append(Spacer(1, 10))
-
-    lw, vw = tw * 0.34, tw * 0.66
-    rows = [
-        (Paragraph(xml_escape("Commune"), st["cover_label"]),
-         Paragraph(xml_escape(commune), st["cover_value"])),
-        (Paragraph(xml_escape("Code INSEE"), st["cover_label"]),
-         Paragraph(xml_escape(insee), st["cover_value"])),
-        (Paragraph(xml_escape(ref_label), st["cover_label"]),
-         Paragraph(ref_html, st["cover_value"])),
-        (Paragraph(xml_escape("Zonage urbain (PLU)"), st["cover_label"]),
-         Paragraph(xml_escape(zonage_str), st["cover_zonage"])),
-        (Paragraph(xml_escape("Superficie estimée"), st["cover_label"]),
-         Paragraph(xml_escape(surface_str), st["cover_value"])),
-    ]
-    t = Table([[a, b] for a, b in rows], colWidths=[lw, vw])
-    t.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, C_BORDER),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F0F7F4")),
-        ("BACKGROUND", (0, 3), (-1, 3), colors.HexColor("#E8F5EE")),
-    ]))
-    flow.append(t)
-
-    # Détail parcelles si plusieurs
-    if parcelles_detail and len(parcelles_detail) > 1:
-        flow.append(Spacer(1, 10))
-        flow.append(Paragraph(
-            xml_escape("Détail des parcelles cadastrales"),
-            st["cover_label"],
-        ))
-        flow.append(Spacer(1, 4))
-        hdr = [
-            Paragraph(xml_escape("Référence"), st["attr_key"]),
-            Paragraph(xml_escape("Surface cadastrale"), st["attr_key"]),
-            Paragraph(xml_escape("% de l'UF"), st["attr_key"]),
-        ]
-        pr_rows: List[List] = [hdr]
-        for it in parcelles_detail:
-            m2 = it.get("contenance_m2", 0)
-            pct = it.get("pct_uf", 0)
-            try:
-                sep = "\u202f"
-                srf = f"{int(round(float(m2))):,}".replace(",", sep) + " m²"
-            except Exception:
-                srf = "—"
-            pr_rows.append([
-                Paragraph(xml_escape(it.get("ref", "—")), st["attr_val"]),
-                Paragraph(xml_escape(srf), st["attr_val"]),
-                Paragraph(xml_escape(f"{float(pct):.1f} %".replace(".", ",")), st["attr_val"]),
-            ])
-        pt = Table(pr_rows, colWidths=[tw * 0.28, tw * 0.36, tw * 0.36])
-        pt.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.5, C_BORDER),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F0F7F4")),
-        ]))
-        flow.append(pt)
-
-    flow.append(Spacer(1, 12))
-    return flow
-
-
-# ---------------------------------------------------------------------------
-# Page PLU (carte + tableau libellés)
-# ---------------------------------------------------------------------------
-
-def _plu_page(
-    plu_map_png: str,
-    intersections: List[Dict[str, Any]],
-    st: Dict[str, ParagraphStyle],
-    tw: float,
-) -> List[Any]:
-    flow: List[Any] = []
-    pp = Path(plu_map_png)
-    if not pp.is_file():
-        return flow
-
-    # Taille image (ratio fixe si PIL absent)
-    img_w = max(float(tw) * 0.98, 1.0)
-    try:
-        from PIL import Image as PILImage
-        with PILImage.open(pp) as im:
-            pw, ph = im.size
-        img_h = img_w * (ph / pw)
-    except Exception:
-        img_h = img_w / (1 + 0.34)
-
-    flow.append(Spacer(1, 0.4 * cm))
-    flow.append(Paragraph("VUE D'ENSEMBLE — ZONAGE PLU", st["plu_kicker"]))
-    flow.append(Paragraph("Zonage PLU — carte et répartition surfacique", st["plu_title"]))
-
-    band = Table(
-        [[Paragraph('<font color="white"><b>Zonage réglementaire</b></font>',
-                    ParagraphStyle("PluBand", parent=getSampleStyleSheet()["Normal"],
-                                   fontSize=10, fontName="Helvetica-Bold", leading=12))]],
-        colWidths=[tw], rowHeights=[22],
-    )
-    band.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), C_GREEN),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]))
-    flow.append(band)
-    flow.append(Spacer(1, 10))
-    flow.append(HRFlowable(width="100%", thickness=1, color=C_LIGHT))
-    flow.append(Spacer(1, 12))
-    flow.append(Image(str(pp), width=img_w, height=img_h))
-
-    # Tableau libellés PLU
-    plu_rows: List[Dict] = []
-    for inter in intersections:
-        if inter.get("table") != "zone_urba":
-            continue
-        for el in inter.get("elements", []):
-            lb = el.get("libelle", "")
-            lbe = el.get("libelong", el.get("libelle", ""))
-            dest = el.get("destdomi", "")
-            if lb:
-                plu_rows.append({"libelle": lb, "libelong": lbe, "destdomi": dest})
-
-    if plu_rows:
-        flow.append(Spacer(1, 14))
-        ph = st["plu_tbl_hdr"]
-        pc = st["plu_tbl_cell"]
-        hdr = [
-            Paragraph(xml_escape("Libellé"), ph),
-            Paragraph(xml_escape("Libellé long"), ph),
-            Paragraph(xml_escape("Destination dominante"), ph),
-        ]
-        tbl_rows = [hdr]
-        for r in plu_rows:
-            tbl_rows.append([
-                Paragraph(xml_escape(r["libelle"] or "—"), pc),
-                Paragraph(xml_escape(r["libelong"] or "—"), pc),
-                Paragraph(xml_escape(r["destdomi"] or "—"), pc),
-            ])
-        zt = Table(tbl_rows, colWidths=[tw * 0.20, tw * 0.40, tw * 0.40])
-        zt.setStyle(TableStyle([
-            ("GRID", (0, 0), (-1, -1), 0.5, C_BORDER),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8F5EE")),
-        ]))
-        flow.append(zt)
-
-    return flow
-
-
-# ---------------------------------------------------------------------------
 # Corps : couche + article
 # ---------------------------------------------------------------------------
 
@@ -578,125 +358,6 @@ def _article_section(
     return flow
 
 
-# ---------------------------------------------------------------------------
-# Fonction principale
-# ---------------------------------------------------------------------------
-
-def _servitudes_page(
-    sup_map_png: str,
-    intersections: List[Dict[str, Any]],
-    st: Dict[str, ParagraphStyle],
-    tw: float,
-) -> List[Any]:
-    """
-    Page dédiée aux servitudes d'utilité publique :
-    titre + bandeau vert + carte satellite+SUP + tableau récapitulatif.
-    """
-    from reportlab.lib.styles import getSampleStyleSheet
-    flow: List[Any] = []
-    pp = Path(sup_map_png)
-    if not pp.is_file():
-        return flow
-
-    # Taille image (ratio réel si PIL disponible)
-    img_w = max(float(tw) * 0.98, 1.0)
-    try:
-        from PIL import Image as PILImage
-        with PILImage.open(pp) as im:
-            pw, ph = im.size
-        img_h = img_w * (ph / pw)
-    except Exception:
-        img_h = img_w / (1.0 + 0.40)  # RIGHT_PANEL_RATIO de carte_servitudes
-
-    ps_kicker = ParagraphStyle(
-        "SupKicker", parent=getSampleStyleSheet()["Normal"],
-        fontSize=8, textColor=colors.HexColor("#6b7f72"),
-        fontName="Helvetica-Bold", spaceAfter=6, leading=10,
-    )
-    ps_title = ParagraphStyle(
-        "SupTitle", parent=getSampleStyleSheet()["Normal"],
-        fontSize=17, textColor=colors.HexColor("#1e4d2f"),
-        fontName="Helvetica-Bold", spaceAfter=8, leading=22,
-    )
-
-    flow.append(Spacer(1, 0.4 * cm))
-    flow.append(Paragraph("SERVITUDES D'UTILITÉ PUBLIQUE", ps_kicker))
-    flow.append(Paragraph("Servitudes intersectant la parcelle / l'unité foncière", ps_title))
-
-    band = Table(
-        [[Paragraph(
-            "<font color='white'><b>Périmètres de servitudes</b></font>",
-            ParagraphStyle("SupBand", parent=getSampleStyleSheet()["Normal"],
-                           fontSize=10, fontName="Helvetica-Bold", leading=12),
-        )]],
-        colWidths=[tw], rowHeights=[22],
-    )
-    band.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), C_GREEN),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ]))
-    flow.append(band)
-    flow.append(Spacer(1, 10))
-    flow.append(HRFlowable(width="100%", thickness=1, color=C_LIGHT))
-    flow.append(Spacer(1, 12))
-    flow.append(Image(str(pp), width=img_w, height=img_h))
-
-    # Tableau récapitulatif des SUP intersectées
-    sup_layers = [
-        i for i in intersections
-        if str(i.get("article", "")).startswith("4")
-    ]
-    if sup_layers:
-        flow.append(Spacer(1, 14))
-        flow.append(HRFlowable(width="100%", thickness=1, color=C_LIGHT))
-        flow.append(Spacer(1, 10))
-
-        ph = ParagraphStyle("SupTblHdr", parent=getSampleStyleSheet()["Normal"],
-                            fontSize=8.5, textColor=colors.HexColor("#1e4d2f"),
-                            fontName="Helvetica-Bold", leading=11)
-        pc = ParagraphStyle("SupTblCell", parent=getSampleStyleSheet()["Normal"],
-                            fontSize=8, textColor=colors.HexColor("#2d3748"),
-                            fontName="Helvetica", leading=10)
-
-        hdr = [
-            Paragraph(xml_escape("Type"), ph),
-            Paragraph(xml_escape("Code SUP"), ph),
-            Paragraph(xml_escape("Libellé / Désignation"), ph),
-        ]
-        tbl_rows: List[List[Any]] = [hdr]
-
-        for layer in sup_layers:
-            for el in layer.get("elements") or []:
-                suptype = el.get("suptype", "—")
-                nom = el.get("nomsuplitt", "") or "—"
-                display = xml_escape(layer.get("display_name", ""))
-                tbl_rows.append([
-                    Paragraph(xml_escape(display), pc),
-                    Paragraph(xml_escape(str(suptype)), pc),
-                    Paragraph(xml_escape(str(nom)), pc),
-                ])
-
-        if len(tbl_rows) > 1:
-            zt = Table(tbl_rows, colWidths=[tw * 0.32, tw * 0.16, tw * 0.52])
-            zt.setStyle(TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.5, C_BORDER),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                ("LEFTPADDING", (0, 0), (-1, -1), 7),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8F5EE")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-                 [colors.white, colors.HexColor("#F7FCF9")]),
-            ]))
-            flow.append(zt)
-
-    return flow
-
-
 def generate_rapport_pdf(
     result: Dict[str, Any],
     output_dir: str = ".",
@@ -705,10 +366,14 @@ def generate_rapport_pdf(
     plu_map_png: Optional[str] = None,
     plu_result: Optional[Dict[str, Any]] = None,
     servitudes_map_png: Optional[str] = None,
+    servitudes_result: Optional[Dict[str, Any]] = None,
+    prescriptions_map_png: Optional[str] = None,
+    prescriptions_result: Optional[Dict[str, Any]] = None,
     dpu_map_png: Optional[str] = None,
     dpu_result: Optional[Dict[str, Any]] = None,
     subdivision_map_png: Optional[str] = None,
     subdivision_result: Optional[Dict[str, Any]] = None,
+    intro_map_png: Optional[str] = None,
 ) -> str:
     """
     Génère le rapport PDF V0 France entière.
@@ -722,6 +387,9 @@ def generate_rapport_pdf(
         plu_map_png        : chemin PNG carte PLU (optionnel)
         plu_result         : dict PLU enrichi (répartition UF + parcelles)
         servitudes_map_png : chemin PNG carte servitudes SUP (optionnel)
+        servitudes_result  : dict servitudes enrichi (attributs + répartition UF + parcelles)
+        prescriptions_map_png: chemin PNG carte prescriptions (optionnel)
+        prescriptions_result : dict prescriptions (attributs surf/lin/pct)
         dpu_map_png        : chemin PNG carte DPU (optionnel, toujours généré)
         dpu_result         : dict retourné par compute_dpu_result() (optionnel)
         subdivision_map_png: chemin PNG carte subdivision fiscale (optionnel)
@@ -766,7 +434,8 @@ def generate_rapport_pdf(
     story: List = []
 
     # Page de garde
-    story.extend(_cover_page(result, st, tw))
+    from .sections.section_intro import build_intro_page_flowables
+    story.extend(build_intro_page_flowables(result=result, table_width=tw, intro_map_png=intro_map_png))
 
     # Page PLU dédiée (toujours présente)
     if plu_result is not None:
@@ -774,10 +443,22 @@ def generate_rapport_pdf(
         story.append(PageBreak())
         story.extend(build_plu_page_flowables(plu_map_png, plu_result, tw))
 
-    # Page servitudes (si carte disponible)
-    if servitudes_map_png and Path(servitudes_map_png).is_file():
+    # Page servitudes dédiée (toujours présente)
+    if servitudes_result is not None:
+        from .sections.section_servitudes import build_servitudes_page_flowables
         story.append(PageBreak())
-        story.extend(_servitudes_page(servitudes_map_png, intersections, st, tw))
+        story.extend(build_servitudes_page_flowables(servitudes_map_png, servitudes_result, tw))
+
+    if prescriptions_result is not None:
+        from .sections.section_prescriptions import build_prescriptions_page_flowables
+        story.append(PageBreak())
+        story.extend(
+            build_prescriptions_page_flowables(
+                prescriptions_map_png,
+                prescriptions_result,
+                tw,
+            )
+        )
 
     story.append(PageBreak())
 
@@ -790,9 +471,14 @@ def generate_rapport_pdf(
         # Exclure PLU du corps (il a sa page dédiée)
         if layer.get("table") == "zone_urba" and plu_result is not None:
             continue
+        # Exclure SUP du corps (section servitudes dédiée)
+        if str(layer.get("article", "")).startswith("4") and servitudes_result is not None:
+            continue
+        # Exclure prescriptions du corps (section prescriptions dédiée)
+        if layer.get("table") in PRESCRIPTION_TABLE_NAMES and prescriptions_result is not None:
+            continue
         # Exclure info_surf DPU du corps si page DPU dédiée présente
         if (layer.get("table") == "info_surf"
-                and dpu_map_png
                 and dpu_result is not None):
             continue
         articles.setdefault(art, []).append(layer)
@@ -804,8 +490,8 @@ def generate_rapport_pdf(
     # Articles hors article 9 (préemption gérée séparément via section DPU dédiée)
     # → les couches article=9 (zone_pdc etc.) restent dans le corps si pas de page DPU
 
-    # Page DPU dédiée (toujours présente si dpu_map_png fourni)
-    if dpu_map_png and Path(dpu_map_png).is_file() and dpu_result is not None:
+    # Page DPU dédiée (toujours présente si dpu_result disponible)
+    if dpu_result is not None:
         from .sections.section_dpu import build_dpu_page_flowables
         story.append(PageBreak())
         story.extend(build_dpu_page_flowables(dpu_map_png, dpu_result, tw))
@@ -816,11 +502,7 @@ def generate_rapport_pdf(
             story.extend(_article_section("9", preemption, st, page_w))
 
     # Page subdivision fiscale dédiée (après DPU)
-    if (
-        subdivision_map_png
-        and Path(subdivision_map_png).is_file()
-        and subdivision_result is not None
-    ):
+    if subdivision_result is not None:
         from .sections.section_subdivision import build_subdivision_page_flowables
 
         story.append(PageBreak())
