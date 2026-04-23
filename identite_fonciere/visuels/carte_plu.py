@@ -19,6 +19,7 @@ from matplotlib import gridspec
 from matplotlib.colors import to_rgba
 from shapely.ops import unary_union
 from .basemap_utils import add_basemap_with_retry
+from ..utils.geo import intersects_gdf
 
 matplotlib.use("Agg")
 warnings.filterwarnings("ignore")
@@ -192,3 +193,124 @@ def render_satellite_map(
     plt.close(fig)
     logger.info("✅ Carte satellite enregistrée : %s", out_path)
     return out_path
+
+
+def compute_plu_result(
+    uf_gdf: gpd.GeoDataFrame,
+    plu_gdf: gpd.GeoDataFrame,
+    parcelle_results: List[Any],
+) -> Dict[str, Any]:
+    """
+    Construit un contrat PLU enrichi pour la section PDF dédiée :
+    - répartition des zonages sur l'UF (% + ha)
+    - répartition parcelle par parcelle (% + ha)
+    - attributs de zonage (typezone, libelle, libelong)
+    """
+    empty_result: Dict[str, Any] = {
+        "intersecte": False,
+        "zonages": [],
+        "uf_repartition": [],
+        "parcelles_repartition": [],
+    }
+    if plu_gdf is None or plu_gdf.empty or "geometry" not in plu_gdf.columns:
+        return empty_result
+
+    try:
+        uf_inter = intersects_gdf(uf_gdf, plu_gdf)
+    except Exception as exc:
+        logger.warning("PLU result: échec intersection UF/PLU (%s)", exc)
+        return empty_result
+    if uf_inter.empty:
+        return empty_result
+
+    # Normalisation des attributs attendus.
+    attrs = uf_inter.copy()
+    for col in ("typezone", "libelle", "libelong"):
+        if col not in attrs.columns:
+            attrs[col] = ""
+
+    attrs_3857 = attrs.to_crs(3857)
+    uf_union = unary_union(uf_gdf.to_crs(3857).geometry)
+    uf_area_m2 = max(float(uf_union.area), 1.0)
+
+    agg_uf: Dict[tuple, float] = {}
+    for _, row in attrs_3857.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        inter = geom.intersection(uf_union)
+        area = float(inter.area) if not inter.is_empty else 0.0
+        if area <= 0.0:
+            continue
+        key = (
+            str(row.get("typezone") or "—").strip() or "—",
+            str(row.get("libelle") or "—").strip() or "—",
+            str(row.get("libelong") or "—").strip() or "—",
+        )
+        agg_uf[key] = agg_uf.get(key, 0.0) + area
+
+    if not agg_uf:
+        return empty_result
+
+    uf_repartition: List[Dict[str, Any]] = []
+    for (typezone, libelle, libelong), area in agg_uf.items():
+        uf_repartition.append(
+            {
+                "typezone": typezone,
+                "libelle": libelle,
+                "libelong": libelong,
+                "surface_ha": round(area / 10_000.0, 4),
+                "pct_uf": round((area / uf_area_m2) * 100.0, 2),
+            }
+        )
+    uf_repartition.sort(key=lambda r: (-r["pct_uf"], r["libelle"], r["typezone"]))
+
+    parcelles_repartition: List[Dict[str, Any]] = []
+    for parc in [p for p in parcelle_results if getattr(p, "ok", False) and not p.gdf.empty]:
+        parc_3857 = parc.gdf.to_crs(3857)
+        parc_union = unary_union(parc_3857.geometry)
+        parc_area_m2 = max(float(parc_union.area), 1.0)
+        agg_parc: Dict[tuple, float] = {}
+
+        for _, row in attrs_3857.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+            inter = geom.intersection(parc_union)
+            area = float(inter.area) if not inter.is_empty else 0.0
+            if area <= 0.0:
+                continue
+            key = (
+                str(row.get("typezone") or "—").strip() or "—",
+                str(row.get("libelle") or "—").strip() or "—",
+                str(row.get("libelong") or "—").strip() or "—",
+            )
+            agg_parc[key] = agg_parc.get(key, 0.0) + area
+
+        for (typezone, libelle, libelong), area in agg_parc.items():
+            parcelles_repartition.append(
+                {
+                    "parcelle_ref": parc.ref.label,
+                    "idu": parc.idu or "",
+                    "typezone": typezone,
+                    "libelle": libelle,
+                    "libelong": libelong,
+                    "surface_ha": round(area / 10_000.0, 4),
+                    "pct_parcelle": round((area / parc_area_m2) * 100.0, 2),
+                }
+            )
+
+    parcelles_repartition.sort(
+        key=lambda r: (r["parcelle_ref"], -r["pct_parcelle"], r["libelle"], r["typezone"])
+    )
+
+    zonages = [
+        {"typezone": r["typezone"], "libelle": r["libelle"], "libelong": r["libelong"]}
+        for r in uf_repartition
+    ]
+    return {
+        "intersecte": True,
+        "zonages": zonages,
+        "uf_repartition": uf_repartition,
+        "parcelles_repartition": parcelles_repartition,
+    }

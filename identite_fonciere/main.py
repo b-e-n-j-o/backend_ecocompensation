@@ -22,7 +22,7 @@ import requests
 from .core.parcelle import ParcelleRef, fetch_parcelles
 from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
 from .core.intersections import compute_intersections
-from .visuels.carte_plu import render_plu_map
+from .visuels.carte_plu import compute_plu_result, render_plu_map
 from .visuels.carte_dpu import compute_dpu_result, render_dpu_map
 from .visuels.carte_subdivision import render_subdivision_map
 from .core.subdivision_fiscale.subdivision import compute_subdivision_result
@@ -251,36 +251,48 @@ async def generer_rapport(body: RapportRequest):
     # 4. Carte PLU
     with tempfile.TemporaryDirectory() as tmpdir:
         plu_map_png: Optional[str] = None
+        plu_result: Optional[dict] = None
         dpu_map_png: Optional[str] = None
         dpu_result: Optional[dict] = None
         subdivision_map_png: Optional[str] = None
         subdivision_result: Optional[dict] = None
 
-        if opts.generer_carte_plu and plu_pct_stats:
-            # Récupère le GeoDataFrame PLU depuis les intersections
-            from .core.gpu_wfs import GPU_LAYERS_BY_TABLE
+        # 4. Données + carte PLU (section dédiée toujours présente)
+        try:
+            from .core.gpu_wfs import GPU_LAYERS_BY_TABLE, _fetch_layer
+            from .utils.geo import gdf_bbox_4326
             import geopandas as gpd
-            import io
-            import requests
 
             plu_cfg = GPU_LAYERS_BY_TABLE.get("zone_urba", {})
-            # Re-fetch PLU pour avoir la géométrie (intersections ne la stocke pas)
-            from .utils.geo import gdf_bbox_4326
-            from .core.gpu_wfs import _fetch_layer
             bbox = gdf_bbox_4326(uf_gdf, buffer_m=50.0)
             plu_lr = _fetch_layer(plu_cfg, bbox, timeout=30)
-
             plu_gdf = plu_lr.gdf if plu_lr.ok else gpd.GeoDataFrame()
 
-            try:
+            plu_result = compute_plu_result(
+                uf_gdf=uf_gdf,
+                plu_gdf=plu_gdf,
+                parcelle_results=ok,
+            )
+
+            if opts.generer_carte_plu:
                 plu_png_path = str(Path(tmpdir) / "plu_map.png")
                 render_plu_map(
-                    uf_gdf, plu_gdf, plu_pct_stats,
-                    plu_png_path, dpi=opts.dpi_carte,
+                    uf_gdf=uf_gdf,
+                    plu_gdf=plu_gdf,
+                    pct_stats=plu_pct_stats,
+                    out_path=plu_png_path,
+                    dpi=opts.dpi_carte,
                 )
                 plu_map_png = plu_png_path
-            except Exception as e:
-                logger.warning("⚠️  Carte PLU non générée : %s", e)
+        except Exception as e:
+            logger.warning("⚠️  Données/carte PLU non générées : %s", e)
+            plu_result = {
+                "intersecte": False,
+                "zonages": [],
+                "uf_repartition": [],
+                "parcelles_repartition": [],
+            }
+            plu_map_png = None
 
         # 4bis. Carte DPU (toujours générée, soumise ou non)
         try:
@@ -320,6 +332,7 @@ async def generer_rapport(body: RapportRequest):
                 result,
                 output_dir=tmpdir,
                 plu_map_png=plu_map_png,
+                plu_result=plu_result,
                 dpu_map_png=dpu_map_png,
                 dpu_result=dpu_result,
                 subdivision_map_png=subdivision_map_png,

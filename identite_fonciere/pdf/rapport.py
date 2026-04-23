@@ -703,6 +703,7 @@ def generate_rapport_pdf(
     logo_path: Optional[str] = None,
     filename: Optional[str] = None,
     plu_map_png: Optional[str] = None,
+    plu_result: Optional[Dict[str, Any]] = None,
     servitudes_map_png: Optional[str] = None,
     dpu_map_png: Optional[str] = None,
     dpu_result: Optional[Dict[str, Any]] = None,
@@ -719,6 +720,7 @@ def generate_rapport_pdf(
         logo_path          : chemin logo Kerelia (optionnel)
         filename           : nom du fichier PDF (auto si None)
         plu_map_png        : chemin PNG carte PLU (optionnel)
+        plu_result         : dict PLU enrichi (répartition UF + parcelles)
         servitudes_map_png : chemin PNG carte servitudes SUP (optionnel)
         dpu_map_png        : chemin PNG carte DPU (optionnel, toujours généré)
         dpu_result         : dict retourné par compute_dpu_result() (optionnel)
@@ -766,10 +768,11 @@ def generate_rapport_pdf(
     # Page de garde
     story.extend(_cover_page(result, st, tw))
 
-    # Page PLU (si carte disponible)
-    if plu_map_png and Path(plu_map_png).is_file():
+    # Page PLU dédiée (toujours présente)
+    if plu_result is not None:
+        from .sections.section_plu import build_plu_page_flowables
         story.append(PageBreak())
-        story.extend(_plu_page(plu_map_png, intersections, st, tw))
+        story.extend(build_plu_page_flowables(plu_map_png, plu_result, tw))
 
     # Page servitudes (si carte disponible)
     if servitudes_map_png and Path(servitudes_map_png).is_file():
@@ -785,7 +788,7 @@ def generate_rapport_pdf(
         if art not in ARTICLE_LABELS:
             art = "8"
         # Exclure PLU du corps (il a sa page dédiée)
-        if layer.get("table") == "zone_urba" and plu_map_png:
+        if layer.get("table") == "zone_urba" and plu_result is not None:
             continue
         # Exclure info_surf DPU du corps si page DPU dédiée présente
         if (layer.get("table") == "info_surf"
