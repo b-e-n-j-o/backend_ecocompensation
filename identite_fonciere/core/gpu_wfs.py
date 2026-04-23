@@ -24,6 +24,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,6 +36,40 @@ logger = logging.getLogger(__name__)
 
 # Endpoint unifié — tous les flux GPU et IGN sont maintenant sur data.geopf.fr
 GPU_WFS = "https://data.geopf.fr/wfs/ows"
+WFS_RETRY_COUNT = 2
+WFS_RETRY_BACKOFF_S = 0.35
+
+
+def _get_with_retry(
+    url: str,
+    params: Dict[str, Any],
+    timeout: int,
+    retries: int = WFS_RETRY_COUNT,
+    backoff_s: float = WFS_RETRY_BACKOFF_S,
+) -> requests.Response:
+    """
+    Requête HTTP GET avec retry silencieux (erreurs réseau/timeout/5xx).
+    """
+    last_exc: Optional[Exception] = None
+    attempts = retries + 1
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            # Retry sur indisponibilité transitoire côté serveur.
+            if resp.status_code >= 500:
+                raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            last_exc = e
+            if i < attempts - 1:
+                # Backoff léger pour laisser le WFS se stabiliser.
+                time.sleep(backoff_s * (i + 1))
+                continue
+            raise e
+    # Défensif (la boucle lève déjà à la dernière tentative).
+    assert last_exc is not None
+    raise last_exc
 
 # Catalogue des couches GPU
 # keep : attributs à extraire (dans l'ordre d'affichage souhaité)
@@ -196,8 +231,7 @@ def _hits_count(typename: str, bbox: Tuple, timeout: int = 15) -> int:
         "resultType": "hits",
     }
     try:
-        r = requests.get(GPU_WFS, params=params, timeout=timeout)
-        r.raise_for_status()
+        r = _get_with_retry(GPU_WFS, params=params, timeout=timeout)
         m = re.search(r'numberMatched="(\d+)"', r.text)
         return int(m.group(1)) if m else 0
     except Exception as e:
@@ -250,8 +284,7 @@ def _fetch_layer(
     }
 
     try:
-        r = requests.get(GPU_WFS, params=params, timeout=timeout)
-        r.raise_for_status()
+        r = _get_with_retry(GPU_WFS, params=params, timeout=timeout)
     except requests.RequestException as e:
         logger.warning("⚠️  %s — erreur réseau : %s", table, e)
         return _empty("error", str(e))

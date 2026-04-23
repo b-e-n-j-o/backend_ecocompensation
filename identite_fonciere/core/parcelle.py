@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -19,6 +20,37 @@ logger = logging.getLogger(__name__)
 
 IGN_WFS = "https://data.geopf.fr/wfs/ows"
 IGN_LAYER = "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle"
+WFS_RETRY_COUNT = 2
+WFS_RETRY_BACKOFF_S = 0.35
+
+
+def _get_with_retry(
+    url: str,
+    params: Dict[str, str],
+    timeout: int,
+    retries: int = WFS_RETRY_COUNT,
+    backoff_s: float = WFS_RETRY_BACKOFF_S,
+) -> requests.Response:
+    """
+    Requête GET avec retry silencieux pour les erreurs transitoires WFS.
+    """
+    attempts = retries + 1
+    last_exc: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            if resp.status_code >= 500:
+                raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            last_exc = e
+            if i < attempts - 1:
+                time.sleep(backoff_s * (i + 1))
+                continue
+            raise e
+    assert last_exc is not None
+    raise last_exc
 
 
 @dataclass
@@ -75,8 +107,7 @@ def fetch_parcelle(ref: ParcelleRef, timeout: int = 30) -> ParcelleResult:
     }
 
     try:
-        r = requests.get(IGN_WFS, params=params, timeout=timeout)
-        r.raise_for_status()
+        r = _get_with_retry(IGN_WFS, params=params, timeout=timeout)
     except requests.RequestException as e:
         return _error(ref, f"Erreur réseau IGN WFS : {e}")
 
