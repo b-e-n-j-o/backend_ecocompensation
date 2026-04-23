@@ -33,6 +33,7 @@ from matplotlib.colors import to_rgba
 from matplotlib.lines import Line2D
 from shapely.geometry import box
 from shapely.ops import unary_union
+from .basemap_utils import add_basemap_with_retry
 
 matplotlib.use("Agg")
 warnings.filterwarnings("ignore")
@@ -125,19 +126,9 @@ def _nomsuplitt_map(sup_gdf: gpd.GeoDataFrame) -> Dict[str, str]:
 
 def _add_basemap(ax, crs_str: str) -> None:
     """Fond satellite avec fallback OSM."""
-    try:
-        import contextily as ctx
-        ctx.add_basemap(ax, crs=crs_str, source=ctx.providers.Esri.WorldImagery,
-                        zoom="auto", attribution=False, zorder=0)
-        return
-    except Exception:
-        pass
-    try:
-        import contextily as ctx
-        ctx.add_basemap(ax, crs=crs_str, source=ctx.providers.OpenStreetMap.Mapnik,
-                        zoom="auto", attribution=False, zorder=0)
-    except Exception:
-        pass
+    ok = add_basemap_with_retry(ax=ax, crs_str=crs_str, logger=logger)
+    if not ok:
+        logger.warning("Carte générée sans fond de tuiles (servitudes).")
 
 
 def _clip_to_buffer(
