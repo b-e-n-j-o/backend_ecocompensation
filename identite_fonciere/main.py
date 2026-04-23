@@ -17,6 +17,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+import requests
 
 from .core.parcelle import ParcelleRef, fetch_parcelles
 from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
@@ -33,6 +34,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 MAX_EMPRISE_SIDE_M = 2000.0
+GPU_API = "https://www.geoportail-urbanisme.gouv.fr/api"
+WFS_BASE = "https://data.geopf.fr/wfs/ows"
+KEYWORDS_OK = ["reglement", "règlement", "regl", "regt"]
+KEYWORDS_NOK = ["graphique", "plan", "zonage", "legende", "carte"]
 
 app = FastAPI(
     title="Identité Foncière V0",
@@ -68,6 +73,74 @@ class OptionsInput(BaseModel):
 class RapportRequest(BaseModel):
     parcelles: List[ParcelleInput] = Field(..., min_length=1, max_length=50)
     options: OptionsInput = Field(default_factory=OptionsInput)
+
+
+class UrbanDocFile(BaseModel):
+    name: str
+    url: str
+    score_reglement: int
+
+
+class UrbanDocsResponse(BaseModel):
+    insee: str
+    commune: str
+    idurba: str
+    gpu_doc_id: str
+    typedoc: str
+    files: List[UrbanDocFile]
+    reglement_name: Optional[str] = None
+    reglement_url: Optional[str] = None
+
+
+def _fetch_doc_urba_com_prod(insee: str) -> Optional[dict]:
+    resp = requests.get(
+        WFS_BASE,
+        params={
+            "SERVICE": "WFS",
+            "VERSION": "2.0.0",
+            "REQUEST": "GetFeature",
+            "typeNames": "wfs_du:doc_urba_com",
+            "outputFormat": "application/json",
+            "CQL_FILTER": f"insee='{insee}'",
+            "count": "20",
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    features = resp.json().get("features", [])
+    if not features:
+        return None
+    props = [f.get("properties", {}) for f in features]
+    prod = [p for p in props if p.get("gpu_status") == "production"]
+    return prod[0] if prod else props[0]
+
+
+def _score_reglement_filename(filename: str) -> int:
+    name = filename.lower()
+    score = 0
+    for kw in KEYWORDS_OK:
+        if kw in name:
+            score += 10
+    for kw in KEYWORDS_NOK:
+        if kw in name:
+            score -= 8
+    if name.endswith(".pdf"):
+        score += 2
+    return score
+
+
+def _identify_reglement(files: dict) -> tuple[Optional[str], Optional[str], list[UrbanDocFile]]:
+    scored_files: list[UrbanDocFile] = []
+    for name, url in files.items():
+        scored_files.append(
+            UrbanDocFile(name=name, url=url, score_reglement=_score_reglement_filename(name))
+        )
+    scored_files.sort(key=lambda x: x.score_reglement, reverse=True)
+
+    if not scored_files or scored_files[0].score_reglement <= 0:
+        return None, None, scored_files
+    best = scored_files[0]
+    return best.name, best.url, scored_files
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +345,50 @@ async def generer_rapport(body: RapportRequest):
         filename=final_name,
         headers={"Content-Disposition": f'attachment; filename="{final_name}"'},
     )
+
+
+@app.get(
+    "/urban-documents/{insee}",
+    response_model=UrbanDocsResponse,
+    summary="Lister les documents d'urbanisme d'une commune et identifier le règlement",
+)
+async def get_urban_documents(insee: str):
+    try:
+        props = _fetch_doc_urba_com_prod(insee)
+        if not props:
+            raise HTTPException(status_code=404, detail=f"Aucun document GPU pour INSEE {insee}")
+
+        gpu_doc_id = str(props.get("gpu_doc_id") or "")
+        if not gpu_doc_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"gpu_doc_id absent pour INSEE {insee}",
+            )
+
+        details_resp = requests.get(f"{GPU_API}/document/{gpu_doc_id}/details", timeout=20)
+        details_resp.raise_for_status()
+        details = details_resp.json()
+        writing_materials = details.get("writingMaterials", {}) or {}
+        reglement_name, reglement_url, files = _identify_reglement(writing_materials)
+
+        return UrbanDocsResponse(
+            insee=insee,
+            commune=str(props.get("libelle") or details.get("title") or insee),
+            idurba=str(props.get("idurba") or ""),
+            gpu_doc_id=gpu_doc_id,
+            typedoc=str(details.get("type") or props.get("typedoc") or ""),
+            files=files,
+            reglement_name=reglement_name,
+            reglement_url=reglement_url,
+        )
+    except HTTPException:
+        raise
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 502
+        raise HTTPException(status_code=status, detail=f"Erreur API GPU ({status})")
+    except Exception as e:
+        logger.error("Erreur urban-documents insee=%s: %s", insee, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur urban-documents: {e}")
 
 
 # ---------------------------------------------------------------------------

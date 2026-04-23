@@ -1,0 +1,252 @@
+[
+  {
+    "commune": "Tonnay-Charente",
+    "code_insee": "17449",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Plougastel-Daoulas",
+    "code_insee": "29189",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Viterne",
+    "code_insee": "54586",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Sausset-les-Pins",
+    "code_insee": "13104",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Gières",
+    "code_insee": "38179",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Saint-Estèphe",
+    "code_insee": "33395",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Fouras",
+    "code_insee": "17168",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Latresne",
+    "code_insee": "33234",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Landerneau",
+    "code_insee": "29103",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Brignais",
+    "code_insee": "69027",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Pont-l'Abbé",
+    "code_insee": "29220",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Yvetot",
+    "code_insee": "76758",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Saint-Jean-de-Luz",
+    "code_insee": "64483",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Amboise",
+    "code_insee": "37003",
+    "regime": "Plan de Sauvegarde et de Mise en Valeur (PSMV)"
+  },
+  {
+    "commune": "Obernai",
+    "code_insee": "67348",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Fontainebleau",
+    "code_insee": "77186",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Sarlat-la-Canéda",
+    "code_insee": "24520",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Granville",
+    "code_insee": "50218",
+    "regime": ""
+  },
+  {
+    "commune": "Chamonix-Mont-Blanc",
+    "code_insee": "74056",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Corte",
+    "code_insee": "2B096",
+    "regime": ""
+  },
+  {
+    "commune": "Falaise",
+    "code_insee": "14258",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Guerande",
+    "code_insee": "44069",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Honfleur",
+    "code_insee": "14333",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Issoire",
+    "code_insee": "63178",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Jarnac",
+    "code_insee": "16167",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Lourdes",
+    "code_insee": "65286",
+    "regime": ""
+  },
+  {
+    "commune": "Millau",
+    "code_insee": "12145",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Nyons",
+    "code_insee": "26220",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Paimpol",
+    "code_insee": "22162",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Quiberon",
+    "code_insee": "56186",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Rocamadour",
+    "code_insee": "46240",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Saumur",
+    "code_insee": "49328",
+    "regime": "Plan de Sauvegarde et de Mise en Valeur (PSMV)"
+  },
+  {
+    "commune": "Thiers",
+    "code_insee": "63430",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Uzès",
+    "code_insee": "30334",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Vendôme",
+    "code_insee": "41269",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Wissembourg",
+    "code_insee": "67544",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Ancenis-Saint-Géréon",
+    "code_insee": "44003",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Bressuire",
+    "code_insee": "79049",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Chinon",
+    "code_insee": "37072",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Dinan",
+    "code_insee": "22050",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Epernay",
+    "code_insee": "51230",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Figeac",
+    "code_insee": "46102",
+    "regime": "Plan de Sauvegarde et de Mise en Valeur (PSMV)"
+  },
+  {
+    "commune": "Gien",
+    "code_insee": "45155",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Hazebrouck",
+    "code_insee": "59295",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Ivry-la-Bataille",
+    "code_insee": "27355",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Joigny",
+    "code_insee": "89206",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "L'Isle-sur-la-Sorgue",
+    "code_insee": "84054",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Mazamet",
+    "code_insee": "81163",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  },
+  {
+    "commune": "Nogent-le-Rotrou",
+    "code_insee": "28280",
+    "regime": "Plan Local d'Urbanisme intercommunal (PLUi)"
+  },
+  {
+    "commune": "Oloron-Sainte-Marie",
+    "code_insee": "64422",
+    "regime": "Plan Local d'Urbanisme (PLU)"
+  }
+]
