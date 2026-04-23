@@ -35,7 +35,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -180,19 +179,15 @@ app.include_router(durete_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
 
-# Monte le backend Identité Foncière V0 sans dupliquer de repo.
+# Monte le backend Identité Foncière depuis le package local backend/identite_fonciere.
 # Le préfixe dédié évite de surcharger ce main.py avec ses routes métiers.
 try:
-    workspace_root = Path(__file__).resolve().parents[3]
-    if str(workspace_root) not in sys.path:
-        sys.path.insert(0, str(workspace_root))
-
-    from IDENTITE_FONCIERE.v0.main import app as identite_fonciere_app
+    from identite_fonciere.main import app as identite_fonciere_app
 
     app.mount("/api/identite-fonciere", identite_fonciere_app)
-    logger.info("✅ Identité Foncière V0 montée sur /api/identite-fonciere")
+    logger.info("✅ Identité Foncière montée sur /api/identite-fonciere")
 except Exception as e:
-    logger.warning("⚠️  Impossible de monter Identité Foncière V0 : %s", e)
+    logger.warning("⚠️  Impossible de monter Identité Foncière : %s", e)
 
 
 # ─────────────────────────────────────────────

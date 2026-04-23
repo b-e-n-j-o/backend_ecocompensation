@@ -1,0 +1,136 @@
+[
+    [
+      {
+        "section": "AP",
+        "numero": "0122",
+        "code_insee": "17449",
+        "commune": "Tonnay-Charente"
+      },
+      {
+        "section": "AP",
+        "numero": "0123",
+        "code_insee": "17449",
+        "commune": "Tonnay-Charente"
+      }
+    ],
+    [
+      {
+        "section": "HK",
+        "numero": "0087",
+        "code_insee": "29189",
+        "commune": "Plougastel-Daoulas"
+      }
+    ],
+    [
+      {
+        "section": "0D",
+        "numero": "0015",
+        "code_insee": "54586",
+        "commune": "Viterne"
+      }
+    ],
+    [
+      {
+        "section": "834C",
+        "numero": "0117",
+        "code_insee": "13207",
+        "commune": "Marseille 7e Arrondissement"
+      }
+    ],
+    [
+      {
+        "section": "0B",
+        "numero": "0482",
+        "code_insee": "13104",
+        "commune": "Sausset-les-Pins"
+      }
+    ],
+    [
+      {
+        "section": "OR",
+        "numero": "0253",
+        "code_insee": "13001",
+        "commune": "Aix-en-Provence"
+      }
+    ],
+    [
+      {
+        "section": "0D",
+        "numero": "0310",
+        "code_insee": "38179",
+        "commune": "Gières"
+      }
+    ],
+    [
+      {
+        "section": "BS",
+        "numero": "0113",
+        "code_insee": "26362",
+        "commune": "Valence"
+      }
+    ],
+    [
+      {
+        "section": "0B",
+        "numero": "1479",
+        "code_insee": "33395",
+        "commune": "Saint-Estèphe"
+      }
+    ],
+    [
+      {
+        "section": "AY",
+        "numero": "0017",
+        "code_insee": "17168",
+        "commune": "Fouras"
+      }
+    ],
+    [
+      {
+        "section": "AE",
+        "numero": "2026",
+        "code_insee": "85194",
+        "commune": "Les Sables-d'Olonne"
+      }
+    ],
+    [
+      {
+        "section": "AL",
+        "numero": "0418",
+        "code_insee": "33234",
+        "commune": "Latresne"
+      }
+    ],
+    [
+      {
+        "section": "HW",
+        "numero": "0014",
+        "code_insee": "21231",
+        "commune": "Dijon"
+      }
+    ],
+    [
+      {
+        "section": "CG",
+        "numero": "0015",
+        "code_insee": "94068",
+        "commune": "Saint-Maur-des-Fossés"
+      }
+    ],
+    [
+      {
+        "section": "ZC",
+        "numero": "0050",
+        "code_insee": "76540",
+        "commune": "Rouen"
+      }
+    ],
+    [
+      {
+        "section": "AP",
+        "numero": "0047",
+        "code_insee": "29103",
+        "commune": "Landerneau"
+      }
+    ]
+  ]
