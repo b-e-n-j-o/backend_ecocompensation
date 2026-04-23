@@ -169,7 +169,7 @@ def recompute_metrics(project_id: str, run_id: str, score_only: bool = Query(Fal
                 "status": "ok",
                 "project_id": project_id,
                 "run_id": run_id,
-                "metric_key": "parcel_score_v1",
+                "metric_key": "score_eco",
                 "updated_count": updated,
                 "mode": "score_only",
             }
@@ -180,7 +180,7 @@ def recompute_metrics(project_id: str, run_id: str, score_only: bool = Query(Fal
 @router.post("/{project_id}/pool/runs/{run_id}/recompute-score")
 def recompute_score(project_id: str, run_id: str):
     """
-    Recalcule uniquement `parcel_score_v1` (sans exécuter le bulk des autres profilers).
+    Recalcule uniquement `score_eco` (sans exécuter le bulk des autres profilers).
     """
     if not _project_exists(project_id):
         raise HTTPException(404, f"Projet {project_id} introuvable")
@@ -195,6 +195,6 @@ def recompute_score(project_id: str, run_id: str):
         "status": "ok",
         "project_id": project_id,
         "run_id": run_id,
-        "metric_key": "parcel_score_v1",
+        "metric_key": "score_eco",
         "updated_count": updated,
     }

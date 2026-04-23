@@ -49,7 +49,7 @@ def _fmt_float(x: Any, nd: int = 1) -> str:
 
 
 def format_scoring_details_v1(val: dict[str, Any]) -> str:
-    """parcel_score_v1 — même logique que ScoreBlock (RankingLine)."""
+    """score_eco (0..6) — distance projet + proximité espèce (métrique especes_faune)."""
     v = _as_dict(val)
     ts = v.get("total_score")
     ms = v.get("max_score")
@@ -66,19 +66,30 @@ def format_scoring_details_v1(val: dict[str, Any]) -> str:
 
     especes = item("especes")
     dist = item("distance")
-    surf = item("surface")
-    arr = item("arrachage")
-    pm = item("personnes_morales") if "personnes_morales" in b else None
 
     def es_reason() -> str:
         r = especes.get("reason")
         if r == "intersection":
             return "Observation dans la parcelle"
-        if r == "adjacent_to_intersection":
-            return "Parcelle adjacente à une parcelle avec observation"
+        if r == "within_half_buffer":
+            nd = especes.get("nearest_observation_distance_m")
+            half = especes.get("buffer_half_m")
+            return (
+                f"Observation la plus proche ≤ demi-buffer ({_fmt_float(nd, 0)} m / demi-buffer {_fmt_float(half, 0)} m)"
+            )
         if r == "within_buffer":
-            return "Observation dans le buffer du filtre"
-        return "Hors buffer / aucune observation"
+            nd = especes.get("nearest_observation_distance_m")
+            bm = especes.get("buffer_radius_max_m")
+            return f"Observation la plus proche dans le buffer ({_fmt_float(nd, 0)} m ≤ {_fmt_float(bm, 0)} m)"
+        if r == "beyond_buffer":
+            return "Observation au-delà du buffer du filtre"
+        if r == "no_faune_criteria":
+            return "Aucune espèce ciblée dans le filtre (0 pt espèce)"
+        if r == "no_buffer_in_filter":
+            return "Buffer non défini dans le filtre (0 pt espèce hors intersection)"
+        if r == "no_observation":
+            return "Pas d'observation géolocalisée pour les espèces du filtre"
+        return "Hors critères"
 
     lines.append(
         f"Espèces faune — {es_reason()}\n+{int(especes.get('points') or 0)}"
@@ -87,28 +98,6 @@ def format_scoring_details_v1(val: dict[str, Any]) -> str:
         f"Distance au centre — {_fmt_float(dist.get('distance_km'), 1)} km "
         f"({dist.get('bucket') or 'n/a'})\n+{int(dist.get('points') or 0)}"
     )
-    lines.append(
-        f"Superficie — {_fmt_float(surf.get('surface_ha'), 2)} ha "
-        f"(cible {_fmt_float(surf.get('target_ha'), 2)} ha)\n+{int(surf.get('points') or 0)}"
-    )
-    arr_r = arr.get("reason")
-    arr_txt = (
-        "Concernée par arrachage (renaturation)"
-        if arr_r == "renaturation"
-        else "N'est pas concernée par l'arrachage de vigne"
-    )
-    lines.append(f"Arrachage vigne — {arr_txt}\n+{int(arr.get('points') or 0)}")
-
-    if isinstance(b, dict) and "personnes_morales" in b:
-        pm = item("personnes_morales")
-        pts = int(pm.get("points") or 0)
-        if pm.get("reason") == "repertoire_pm":
-            d = "Parcelle répertoriée en base personnes morales"
-        else:
-            d = "Non répertoriée en base personnes morales"
-        lines.append(f"Personnes morales (PPM) — {d}\n+{pts}")
-    else:
-        lines.append("Personnes morales (PPM) — (non inclus dans cet ancien calcul de score)\n+0")
 
     return "\n".join(lines)
 
@@ -116,13 +105,27 @@ def format_scoring_details_v1(val: dict[str, Any]) -> str:
 def format_composite_details(val: dict[str, Any]) -> str:
     v = _as_dict(val)
     sc = v.get("score_composite")
-    if not isinstance(sc, (int, float)):
-        return ""
+    status = v.get("composite_status")
+    msg = v.get("message")
+    lines: list[str] = []
+    if isinstance(sc, (int, float)):
+        lines.append(f"Score composite: {_fmt_float(sc, 1)}/100")
+    elif isinstance(msg, str) and msg.strip():
+        lines.append(msg.strip())
+    elif status == "sans_foncier":
+        lines.append(
+            "Score composite: non calculé (dureté foncière non applicable ou indisponible).",
+        )
+    elif status == "incomplet_eco":
+        lines.append("Score composite: non calculé (score écologique manquant).")
+    elif status:
+        lines.append("Score composite: non calculé.")
+    else:
+        lines.append("Score composite: non calculé.")
     redhib = v.get("foncier_redhibitoire") is True
     thr = v.get("redhibitoire_threshold")
     thr_i = int(thr) if isinstance(thr, (int, float)) else 20
-    lines = [f"Score composite: {_fmt_float(sc, 1)}/100"]
-    if redhib:
+    if isinstance(sc, (int, float)) and redhib:
         lines.append(f"Dureté rédhibitoire (attractivité foncière < {thr_i}/100)")
     eco_n = v.get("eco_score_norm")
     eco_r = v.get("eco_score_raw")
@@ -180,9 +183,9 @@ def format_especes_details(val: dict[str, Any]) -> str:
     inter = v.get("intersects_any") is True
     buf = v.get("within_buffer_any") is True
     if inter:
-        status = "Intersection directe avec les espèces ciblées (+3 score parcelle si applicable)."
+        status = "Intersection directe avec les espèces ciblées (+3 pts sur le score éco /6 si applicable)."
     elif buf:
-        status = "Pas d'intersection directe ; observation dans le buffer du filtre (+2)."
+        status = "Pas d'intersection directe ; observation dans le buffer du filtre (voir score éco /6)."
     else:
         status = "Aucune observation des espèces sélectionnées dans le périmètre attendu."
     lines = [status]
@@ -275,31 +278,33 @@ def extract_table_scalars(mmap: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "score_composite": "",
         "durete": "",
     }
-    ps = mmap.get("parcel_score_v1") or {}
+    ps = mmap.get("score_eco") or {}
     ts, mx = ps.get("total_score"), ps.get("max_score")
     if isinstance(ts, (int, float)):
         out["score_eco"] = float(ts)
     if isinstance(mx, (int, float)) and mx > 0:
         out["score_eco_max"] = int(mx)
     elif isinstance(ts, (int, float)):
-        out["score_eco_max"] = 9
+        out["score_eco_max"] = 6
 
     cs = mmap.get("composite_score_v1") or {}
     csc = cs.get("score_composite")
-    if isinstance(csc, (int, float)):
-        out["score_composite"] = round(float(csc), 4)
+    if isinstance(csc, (int, float)) and not isinstance(csc, bool):
+        fc = float(csc)
+        if fc == fc and 0.0 <= fc <= 100.0:
+            out["score_composite"] = round(fc, 4)
 
     du = mmap.get("durete_fonciere") or {}
     if du.get("eligible") is True:
         sf = du.get("score_final")
-        if isinstance(sf, (int, float)):
-            out["durete"] = int(sf)
+        if isinstance(sf, (int, float)) and not isinstance(sf, bool) and 0.0 <= float(sf) <= 100.0:
+            out["durete"] = int(round(float(sf)))
     return out
 
 
 def build_detail_columns(mmap: dict[str, dict[str, Any]]) -> dict[str, str]:
     return {
-        "scoring_details": format_scoring_details_v1(mmap.get("parcel_score_v1") or {}),
+        "scoring_details": format_scoring_details_v1(mmap.get("score_eco") or {}),
         "composite_details": format_composite_details(mmap.get("composite_score_v1") or {}),
         "durete_details": format_durete_details(mmap.get("durete_fonciere") or {}),
         "especes_details": format_especes_details(mmap.get("especes_faune") or {}),

@@ -176,7 +176,7 @@ async def run_orchestration(
     *,
     layer_keys: list[str] | None = None,
     dry_run: bool = False,
-    uf_max_parcelles: int | None = None,
+    uf_max_parcelles: int = 5,
     uf_min_area_ha: float = 7.0,
     fauna_species: list[str] | None = None,
 ) -> dict[str, LayerResult]:

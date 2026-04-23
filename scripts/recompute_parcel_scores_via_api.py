@@ -3,7 +3,7 @@
 
 """
 Script de dev pour recalculer les scores parcelle d'un run via l'API backend,
-puis afficher uniquement `parcel_score_v1` avec détail.
+puis afficher uniquement `score_eco` avec détail.
 
 Exemples:
   python recompute_parcel_scores_via_api.py \
@@ -64,7 +64,7 @@ def extract_scores(by_idu: dict[str, list[dict[str, Any]]]) -> dict[str, dict[st
     out: dict[str, dict[str, Any]] = {}
     for idu, rows in by_idu.items():
         for row in rows:
-            if row.get("metric_key") == "parcel_score_v1":
+            if row.get("metric_key") == "score_eco":
                 val = row.get("metric_value_jsonb")
                 if isinstance(val, dict):
                     out[idu] = val
@@ -77,16 +77,16 @@ def print_scores(scores: dict[str, dict[str, Any]], focus_idu: str | None) -> No
         log(f"Filtre IDU ciblé: {focus_idu}")
         score = scores.get(focus_idu)
         if score is None:
-            log("Aucun metric_key=parcel_score_v1 trouvé pour cet IDU.")
+            log("Aucun metric_key=score_eco trouvé pour cet IDU.")
             return
         print(json.dumps({focus_idu: score}, ensure_ascii=False, indent=2))
         return
 
     if not scores:
-        log("Aucun score parcel_score_v1 trouvé dans les métriques du run.")
+        log("Aucun score score_eco trouvé dans les métriques du run.")
         return
 
-    log(f"{len(scores)} parcelles avec parcel_score_v1")
+    log(f"{len(scores)} parcelles avec score_eco")
     # Aperçu top 20
     ranking = sorted(
         scores.items(),

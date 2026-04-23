@@ -109,6 +109,7 @@ async def _run(
     project_id: str,
     layer_keys: list[str] | None = None,
     dry_run: bool = False,
+    uf_max_parcelles: int | None = None,
 ) -> dict[str, LayerResult]:
     engine = get_engine()
     proj = _get_project(engine, project_id)
@@ -142,6 +143,7 @@ async def _run(
         _push_cli,
         layer_keys=layer_keys,
         dry_run=dry_run,
+        uf_max_parcelles=uf_max_parcelles,
     )
 
     logger.info("Résumé par couche :")
@@ -178,9 +180,22 @@ def main() -> None:
         action="store_true",
         help="Exécute sans conserver les données (nettoyage après chaque couche).",
     )
+    parser.add_argument(
+        "--uf-max-parcelles",
+        type=int,
+        default=None,
+        help="Cap optionnel du nombre de parcelles par UF pour les sous-ensembles (par défaut: aucun cap forcé par l'orchestrateur).",
+    )
     args = parser.parse_args()
 
-    asyncio.run(_run(args.project_id, layer_keys=_parse_layer_keys(args.layers), dry_run=args.dry_run))
+    asyncio.run(
+        _run(
+            args.project_id,
+            layer_keys=_parse_layer_keys(args.layers),
+            dry_run=args.dry_run,
+            uf_max_parcelles=args.uf_max_parcelles,
+        )
+    )
 
 
 if __name__ == "__main__":

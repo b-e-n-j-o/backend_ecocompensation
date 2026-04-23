@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 
 from sqlalchemy import text
 
 from .base import BasePoolProfiler
 
+log = logging.getLogger(__name__)
 
 class EspecesProfiler(BasePoolProfiler):
     """
@@ -117,6 +119,47 @@ class EspecesProfiler(BasePoolProfiler):
             label = str(r["species_label"])
             by_idu[idu][label] = int(r["obs_count"] or 0)
 
+        intersect_idus = {idu for idu, vals in by_idu.items() if vals}
+
+        # Adjacence: parcelles du pool au contact d'une parcelle qui intersecte une espèce.
+        adjacent_idus: set[str] = set()
+        if intersect_idus:
+            adjacent_rows = conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT p2.idu
+                    FROM ecocompensation_results.parcelles_pool pp1
+                    JOIN ecocompensation_results.parcelles p1
+                      ON p1.project_id = pp1.project_id
+                     AND p1.idu = pp1.idu
+                    JOIN ecocompensation_results.parcelles_pool pp2
+                      ON pp2.project_id = pp1.project_id
+                     AND pp2.run_id = pp1.run_id
+                    JOIN ecocompensation_results.parcelles p2
+                      ON p2.project_id = pp2.project_id
+                     AND p2.idu = pp2.idu
+                    WHERE pp1.project_id = CAST(:project_id AS uuid)
+                      AND pp1.run_id = CAST(:run_id AS uuid)
+                      AND p1.idu = ANY(CAST(:inter_ids AS text[]))
+                      AND p2.idu <> p1.idu
+                      AND ST_Touches(ST_MakeValid(p2.geom_2154), ST_MakeValid(p1.geom_2154))
+                    """
+                ),
+                {
+                    "project_id": project_id,
+                    "run_id": run_id,
+                    "inter_ids": list(intersect_idus),
+                },
+            ).mappings().all()
+            adjacent_idus = {str(r["idu"]) for r in adjacent_rows}
+            log.info(
+                "Especes profiler adjacency | project_id=%s run_id=%s inter_idus=%d adjacent_idus=%d",
+                project_id,
+                run_id,
+                len(intersect_idus),
+                len(adjacent_idus),
+            )
+
         # Distance à l'observation la plus proche (dans la liste d'espèces).
         nearest_rows = conn.execute(
             text(
@@ -162,6 +205,7 @@ class EspecesProfiler(BasePoolProfiler):
             payload[idu] = {
                 "selected_species": selected_species,
                 "intersects_any": intersects,
+                "adjacent_to_intersection": idu in adjacent_idus,
                 "intersections_by_species": inter_by_species,
                 "intersection_observation_count": total_obs,
                 "nearest_observation_distance_m": None if dist_m is None else round(float(dist_m), 2),

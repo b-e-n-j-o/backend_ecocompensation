@@ -23,6 +23,7 @@ Endpoints :
     GET    /api/projects/{id}/geojson         GeoJSON parcelles
     GET    /api/projects/{id}/export/csv      export CSV (?scope=parcelles|uf)
     GET    /api/projects/{id}/export/shp      export Shapefile (?scope=parcelles|uf)
+    GET    /api/projects/{id}/export/rapport-pdf   rapport PDF classement parcelles
     GET    /api/memory                        RAM du processus backend
     GET    /api/layers                        liste des couches
     WS     /ws/projects/{id}/fetch-progress   suivi temps réel des fetches
@@ -34,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -59,8 +61,10 @@ from routers.foncier_router import router as foncier_router
 from routers.pool_router import router as pool_router
 from routers.results_geojson_router import router as results_geojson_router
 from routers.durete_router import router as durete_router
+from exports.router_exports import router as exports_router
+from routers.rapport_router import router as rapport_router
 from pool import pool_service
-from pool.pool_service import get_all_metrics_grouped_by_idu, persist_parcelles_pool_run
+from pool.pool_service import persist_parcelles_pool_run
 
 from vrai_filtre import (
     FiltreOptions,
@@ -166,12 +170,29 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Rapport-Rss-Delta-Mb"],
 )
 
 app.include_router(foncier_router, prefix="/api/foncier")
 app.include_router(pool_router)
 app.include_router(results_geojson_router)
 app.include_router(durete_router)
+app.include_router(exports_router)
+app.include_router(rapport_router)
+
+# Monte le backend Identité Foncière V0 sans dupliquer de repo.
+# Le préfixe dédié évite de surcharger ce main.py avec ses routes métiers.
+try:
+    workspace_root = Path(__file__).resolve().parents[3]
+    if str(workspace_root) not in sys.path:
+        sys.path.insert(0, str(workspace_root))
+
+    from IDENTITE_FONCIERE.v0.main import app as identite_fonciere_app
+
+    app.mount("/api/identite-fonciere", identite_fonciere_app)
+    logger.info("✅ Identité Foncière V0 montée sur /api/identite-fonciere")
+except Exception as e:
+    logger.warning("⚠️  Impossible de monter Identité Foncière V0 : %s", e)
 
 
 # ─────────────────────────────────────────────
@@ -187,13 +208,17 @@ class FiltreOptionsDTO(BaseModel):
     class FauneCriterionDTO(BaseModel):
         tax_nom_val: str = Field(..., min_length=1)
         mode: str = Field(default="intersect", pattern="^(intersect|within_radius)$")
-        radius_m: float = Field(default=500.0, ge=0.0, le=2000.0)
+        radius_m: float = Field(default=500.0, ge=0.0, le=5000.0)
         sources: list[str] = Field(default_factory=lambda: ["pct", "lin", "surf"])
 
     vegetation_hybride: VegetationHybrideDTO = Field(default_factory=VegetationHybrideDTO)
     funnel_mode: bool = Field(
         default=False,
         description="Active le calcul détaillé de l'entonnoir (plus lent).",
+    )
+    log_progress: bool = Field(
+        default=False,
+        description="Active les logs de progression du filtrage (étapes et volumes).",
     )
     carhab_nom_eunis:         list[str] = Field(
         default_factory=list,
@@ -292,11 +317,11 @@ class FetchRequest(BaseModel):
         default=False,
         description="Si True, suppression des lignes insérées après chaque couche (test).",
     )
-    uf_max_parcelles: int = Field(
-        default=5,
-        ge=5,
+    uf_max_parcelles: int | None = Field(
+        default=None,
+        ge=2,
         le=10,
-        description="Nombre max de parcelles par unité foncière pour le calcul des sous-ensembles (5–10).",
+        description="Cap optionnel de parcelles par unité foncière pour le calcul des sous-ensembles (2–10). None = pas de cap forcé par l'orchestrateur.",
     )
     uf_min_area_ha: float = Field(
         default=7.0,
@@ -948,11 +973,30 @@ def run_filter(project_id: str, body: FilterRequest):
     opts_dto = body.options
     cx, cy  = _get_aoi_centre(aoi_id)
     options = _dto_to_filtre_options(opts_dto)
+    log_progress = bool(getattr(opts_dto, "log_progress", False))
 
     ram_before = _get_process_memory_mb()
 
+    progress_cb = None
+    if log_progress:
+        logger.info("[filter][%s] Démarrage filtrage avec logs de progression activés", project_id)
+
+        def _progress_cb(step_label: str, count: int) -> None:
+            logger.info("[filter][%s] %s -> %s parcelles", project_id, step_label, count)
+
+        progress_cb = _progress_cb
+
     # ── Toute la logique métier dans vrai_filtre.py ──
-    result = run_filter_and_score(engine, project_id, aoi_id, cx, cy, options, opts_dto)
+    result = run_filter_and_score(
+        engine,
+        project_id,
+        aoi_id,
+        cx,
+        cy,
+        options,
+        opts_dto,
+        progress_callback=progress_cb,
+    )
     try:
         run_id = persist_parcelles_pool_run(
             engine,
@@ -965,6 +1009,11 @@ def run_filter(project_id: str, body: FilterRequest):
                 "final_radius_km": float(result.get("final_radius_km") or 0),
                 "funnel": result.get("funnel") or [],
                 "total": int(result.get("total") or 0),
+                **(
+                    {"pool_build": result["pool_build"]}
+                    if isinstance(result.get("pool_build"), dict)
+                    else {}
+                ),
             },
         )
         result["pool_run_id"] = run_id
@@ -1096,7 +1145,7 @@ def get_parcelles_geojson(
                         FROM ecocompensation_results.parcelles_pool_metrics
                         WHERE project_id = CAST(:pid AS uuid)
                           AND run_id = CAST(:rid AS uuid)
-                          AND metric_key = 'parcel_score_v1'
+                          AND metric_key = 'score_eco'
                           AND idu = ANY(:idus)
                         """
                     ),
@@ -1108,7 +1157,7 @@ def get_parcelles_geojson(
                     idu_to_parcel_score[str(sr["idu"])] = float(ts)
         except Exception:
             logger.exception(
-                "GeoJSON parcelles : lecture parcel_score_v1 ignorée (project_id=%s)",
+                "GeoJSON parcelles : lecture score_eco ignorée (project_id=%s)",
                 project_id,
             )
 
@@ -1149,7 +1198,7 @@ def get_parcelles_geojson(
             t = idu_to_parcel_score[idu]
             props["total_score"] = round(t, 4)
             props["score_norm"] = round((t - min_s) / rng_s, 4)
-            props["score_norm_source"] = "parcel_score_v1"
+            props["score_norm_source"] = "score_eco"
         else:
             props["score_norm_source"] = "distance_rank"
 
@@ -1218,281 +1267,6 @@ def get_uf_subsets_geojson(project_id: str):
     ]
 
     return {"type": "FeatureCollection", "features": features}
-
-
-@app.get("/api/projects/{project_id}/export/csv")
-def export_csv(
-    project_id: str,
-    background_tasks: BackgroundTasks,
-    scope: str = Query("parcelles", description="parcelles | uf | indesirables"),
-    run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results du projet"),
-):
-    import tempfile
-    from fastapi.responses import FileResponse
-    from export_classement_csv import export_classement_csv
-    from export_uf_classement_csv import export_uf_classement_csv
-
-    s = scope.lower().strip()
-    if s not in ("parcelles", "uf", "indesirables"):
-        raise HTTPException(400, "Paramètre scope invalide (parcelles, uf ou indesirables).")
-
-    proj = _get_project(project_id)
-
-    if s == "parcelles":
-        pool_run_id: str | None = None
-        parcelles: list = []
-        if run_id:
-            aoi_id_str = str(proj.get("aoi_id") or "")
-            with engine.begin() as conn:
-                pool_service.ensure_tables(conn)
-                if not pool_service.run_belongs_to_project(conn, project_id, run_id):
-                    raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
-                snap = pool_service.build_filter_snapshot_from_run(conn, project_id, run_id, aoi_id_str)
-            if not snap:
-                raise HTTPException(404, "Run introuvable ou scope non parcelles")
-            parcelles = snap.get("parcelles") or []
-            pool_run_id = str(snap.get("pool_run_id") or run_id)
-        else:
-            last_results = proj.get("last_results")
-            if not last_results:
-                raise HTTPException(400, "Aucun résultat parcelles")
-            if isinstance(last_results, str):
-                last_results = json.loads(last_results)
-            parcelles = last_results.get("parcelles", [])
-            pool_run_id = last_results.get("pool_run_id")
-        if not parcelles:
-            raise HTTPException(400, "Aucune parcelle")
-        metrics_by_idu = None
-        if pool_run_id:
-            try:
-                with engine.begin() as conn:
-                    metrics_by_idu = get_all_metrics_grouped_by_idu(conn, project_id, str(pool_run_id))
-            except Exception:
-                logger.exception(
-                    "Export CSV parcelles : lecture métriques pool ignorée (project_id=%s)",
-                    project_id,
-                )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
-            csv_path = Path(nf.name)
-            export_classement_csv(parcelles, csv_path, metrics_by_idu=metrics_by_idu)
-        background_tasks.add_task(os.remove, str(csv_path))
-        return FileResponse(
-            str(csv_path),
-            filename=f"parcelles_{project_id[:8]}.csv",
-            media_type="text/csv; charset=utf-8",
-        )
-
-    if s == "indesirables":
-        with engine.begin() as conn:
-            pool_service.ensure_tables(conn)
-            payload = pool_service.get_project_indesirables_payload(conn, project_id=project_id)
-        parcelles = payload.get("parcelles") or []
-        if not parcelles:
-            raise HTTPException(400, "Aucune parcelle indésirable")
-        metrics_by_idu = payload.get("by_idu") if isinstance(payload.get("by_idu"), dict) else None
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
-            csv_path = Path(nf.name)
-            export_classement_csv(parcelles, csv_path, metrics_by_idu=metrics_by_idu)
-        background_tasks.add_task(os.remove, str(csv_path))
-        return FileResponse(
-            str(csv_path),
-            filename=f"indesirables_{project_id[:8]}.csv",
-            media_type="text/csv; charset=utf-8",
-        )
-
-    # scope == uf
-    last_results_uf = proj.get("last_results_uf")
-    if not last_results_uf:
-        raise HTTPException(400, "Aucun résultat unités foncières")
-    if isinstance(last_results_uf, str):
-        last_results_uf = json.loads(last_results_uf)
-    unites = last_results_uf.get("unites_foncieres") or []
-    n_ss = sum(len(uf.get("sous_ensembles") or []) for uf in unites)
-    if n_ss == 0:
-        raise HTTPException(400, "Aucun sous-ensemble UF à exporter")
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
-        csv_path = Path(nf.name)
-        export_uf_classement_csv(last_results_uf, csv_path)
-    background_tasks.add_task(os.remove, str(csv_path))
-    return FileResponse(
-        str(csv_path),
-        filename=f"uf_{project_id[:8]}.csv",
-        media_type="text/csv; charset=utf-8",
-    )
-
-
-@app.get("/api/projects/{project_id}/export/shp")
-def export_shp(
-    project_id: str,
-    background_tasks: BackgroundTasks,
-    scope: str = Query("parcelles", description="parcelles | uf | indesirables"),
-    run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results du projet"),
-):
-    import shutil, tempfile, zipfile
-    from fastapi.responses import FileResponse
-    from export_classement_shp import export_classement_shp
-    from export_uf_classement_shp import export_uf_classement_shp
-
-    s = scope.lower().strip()
-    if s not in ("parcelles", "uf", "indesirables"):
-        raise HTTPException(400, "Paramètre scope invalide (parcelles, uf ou indesirables).")
-
-    proj = _get_project(project_id)
-
-    if s == "parcelles":
-        aoi_id = str(proj.get("aoi_id") or "")
-        pool_run_id: str | None = None
-        parcelles: list = []
-        last_filter_dict: dict | None = None
-        final_radius_km = 0.0
-        if run_id:
-            with engine.begin() as conn:
-                pool_service.ensure_tables(conn)
-                if not pool_service.run_belongs_to_project(conn, project_id, run_id):
-                    raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
-                snap = pool_service.build_filter_snapshot_from_run(conn, project_id, run_id, aoi_id)
-            if not snap:
-                raise HTTPException(404, "Run introuvable ou scope non parcelles")
-            parcelles = snap.get("parcelles") or []
-            last_filter_dict = snap.get("filter_options") or {}
-            final_radius_km = float(snap.get("final_radius_km") or 0)
-            pool_run_id = str(snap.get("pool_run_id") or run_id)
-        else:
-            last_results = proj.get("last_results")
-            last_filter = proj.get("last_filter")
-            if not last_results or not last_filter:
-                raise HTTPException(400, "Résultats ou filtre parcelles introuvables")
-            if isinstance(last_results, str):
-                last_results = json.loads(last_results)
-            if isinstance(last_filter, str):
-                last_filter = json.loads(last_filter)
-            parcelles = last_results.get("parcelles", [])
-            last_filter_dict = last_filter if isinstance(last_filter, dict) else {}
-            final_radius_km = float(last_results.get("final_radius_km", 0) or 0)
-            pool_run_id = last_results.get("pool_run_id")
-        if not parcelles:
-            raise HTTPException(400, "Aucune parcelle")
-        opts_dto = FiltreOptionsDTO(**last_filter_dict)
-        options = _dto_to_filtre_options(opts_dto)
-        metrics_by_idu = None
-        if pool_run_id:
-            try:
-                with engine.begin() as conn:
-                    metrics_by_idu = get_all_metrics_grouped_by_idu(conn, project_id, str(pool_run_id))
-            except Exception:
-                logger.exception(
-                    "Export SHP parcelles : lecture métriques pool ignorée (project_id=%s)",
-                    project_id,
-                )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            shp_path = Path(tmpdir) / "parcelles.shp"
-            try:
-                export_classement_shp(
-                    engine,
-                    project_id,
-                    parcelles,
-                    options,
-                    final_radius_km,
-                    shp_path,
-                    aoi_id=aoi_id,
-                    metrics_by_idu=metrics_by_idu,
-                )
-            except ValueError as e:
-                raise HTTPException(400, str(e)) from e
-            zip_path = Path(tmpdir) / "parcelles.zip"
-            with zipfile.ZipFile(zip_path, "w") as zf:
-                for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
-                    f = shp_path.with_suffix(ext)
-                    if f.exists():
-                        zf.write(f, f.name)
-            with zipfile.ZipFile(zip_path, "r") as zr:
-                if not zr.namelist():
-                    raise HTTPException(500, "Export SHP parcelles : archive vide.")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as nf:
-                shutil.copy2(zip_path, nf.name)
-                final_path = nf.name
-        background_tasks.add_task(os.remove, final_path)
-        return FileResponse(
-            final_path, filename=f"parcelles_{project_id[:8]}.zip", media_type="application/zip"
-        )
-
-    if s == "indesirables":
-        aoi_id = str(proj.get("aoi_id") or "")
-        with engine.begin() as conn:
-            pool_service.ensure_tables(conn)
-            payload = pool_service.get_project_indesirables_payload(conn, project_id=project_id)
-        parcelles = payload.get("parcelles") or []
-        if not parcelles:
-            raise HTTPException(400, "Aucune parcelle indésirable")
-        metrics_by_idu = payload.get("by_idu") if isinstance(payload.get("by_idu"), dict) else None
-        opts_dto = FiltreOptionsDTO()
-        options = _dto_to_filtre_options(opts_dto)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            shp_path = Path(tmpdir) / "indesirables.shp"
-            try:
-                export_classement_shp(
-                    engine,
-                    project_id,
-                    parcelles,
-                    options,
-                    0.0,
-                    shp_path,
-                    aoi_id=aoi_id,
-                    metrics_by_idu=metrics_by_idu,
-                )
-            except ValueError as e:
-                raise HTTPException(400, str(e)) from e
-            zip_path = Path(tmpdir) / "indesirables.zip"
-            with zipfile.ZipFile(zip_path, "w") as zf:
-                for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
-                    f = shp_path.with_suffix(ext)
-                    if f.exists():
-                        zf.write(f, f.name)
-            with zipfile.ZipFile(zip_path, "r") as zr:
-                if not zr.namelist():
-                    raise HTTPException(500, "Export SHP indésirables : archive vide.")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as nf:
-                shutil.copy2(zip_path, nf.name)
-                final_path = nf.name
-        background_tasks.add_task(os.remove, final_path)
-        return FileResponse(
-            final_path, filename=f"indesirables_{project_id[:8]}.zip", media_type="application/zip"
-        )
-
-    # scope == uf
-    last_results_uf = proj.get("last_results_uf")
-    last_filter_uf = proj.get("last_filter_uf")
-    if not last_results_uf or not last_filter_uf:
-        raise HTTPException(400, "Résultats ou filtre UF introuvables")
-    if isinstance(last_results_uf, str):
-        last_results_uf = json.loads(last_results_uf)
-    if isinstance(last_filter_uf, str):
-        last_filter_uf = json.loads(last_filter_uf)
-    opts_dto = FiltreOptionsDTO(**last_filter_uf)
-    options = _dto_to_filtre_options(opts_dto)
-    final_radius_km = float(last_results_uf.get("final_radius_km", 0) or 0)
-    with tempfile.TemporaryDirectory() as tmpdir:
-        shp_path = Path(tmpdir) / "uf_subsets.shp"
-        try:
-            export_uf_classement_shp(
-                engine, project_id, last_results_uf, options, shp_path, final_radius_km=final_radius_km
-            )
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from e
-        zip_path = Path(tmpdir) / "uf.zip"
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
-                f = shp_path.with_suffix(ext)
-                if f.exists():
-                    zf.write(f, f.name)
-        with zipfile.ZipFile(zip_path, "r") as zr:
-            if not zr.namelist():
-                raise HTTPException(500, "Export SHP UF : archive vide.")
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as nf:
-            shutil.copy2(zip_path, nf.name)
-            final_path = nf.name
-    background_tasks.add_task(os.remove, final_path)
-    return FileResponse(final_path, filename=f"uf_{project_id[:8]}.zip", media_type="application/zip")
 
 
 # ─────────────────────────────────────────────

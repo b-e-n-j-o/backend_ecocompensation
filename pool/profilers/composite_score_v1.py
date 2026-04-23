@@ -1,14 +1,35 @@
 from __future__ import annotations
 
+import math
+
 from sqlalchemy import text
 
 from .base import BasePoolProfiler
 
 
+def _valid_eco_total(raw: object) -> bool:
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return False
+    if not math.isfinite(float(raw)):
+        return False
+    x = float(raw)
+    return 0.0 <= x <= 6.0
+
+
+def _valid_durete_for_composite(raw: object) -> bool:
+    """Dureté attendue sur 0..100 ; rejette les valeurs sentinelle / pipeline invalides."""
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return False
+    if not math.isfinite(float(raw)):
+        return False
+    x = float(raw)
+    return 0.0 <= x <= 100.0
+
+
 class CompositeScoreV1Profiler(BasePoolProfiler):
     """
     Score composite parcelle (0..100), à partir de :
-      - score écologique v1 (0..9) normalisé sur 100
+      - score écologique (0..6) normalisé sur 100
       - score foncier de dureté (0..100) transformé en attractivité (100 - dureté)
 
     Formule :
@@ -19,7 +40,7 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
     """
 
     metric_key = "composite_score_v1"
-    ECO_MAX = 9.0
+    ECO_MAX = 6.0
     W_ECO = 0.6
     W_FONCIER = 0.4
     REDHIBITOIRE_ATTRACTIVITE_THRESHOLD = 20.0
@@ -46,7 +67,7 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
                 FROM ecocompensation_results.parcelles_pool_metrics
                 WHERE project_id = CAST(:project_id AS uuid)
                   AND run_id = CAST(:run_id AS uuid)
-                  AND metric_key IN ('parcel_score_v1', 'durete_fonciere')
+                  AND metric_key IN ('score_eco', 'durete_fonciere')
                 """
             ),
             {"project_id": project_id, "run_id": run_id},
@@ -66,13 +87,13 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
             val = r.get("metric_value_jsonb")
             if not isinstance(val, dict):
                 continue
-            if key == "parcel_score_v1":
+            if key == "score_eco":
                 raw = val.get("total_score")
-                if isinstance(raw, (int, float)):
+                if _valid_eco_total(raw):
                     eco_by_idu[idu] = float(raw)
             elif key == "durete_fonciere":
                 raw = val.get("score_final")
-                if isinstance(raw, (int, float)):
+                if _valid_durete_for_composite(raw):
                     durete_by_idu[idu] = float(raw)
 
         payload: dict[str, dict] = {}
@@ -99,8 +120,32 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
                     self.W_ECO * eco_norm + self.W_FONCIER * attractivite
                 )
 
+            if eco_norm is not None and attractivite is not None:
+                composite_status = "ok"
+            elif eco_norm is None:
+                composite_status = "incomplet_eco"
+            elif attractivite is None:
+                composite_status = "sans_foncier"
+            else:
+                composite_status = "incomplet"
+
+            if composite_status == "ok":
+                message = None
+            elif composite_status == "sans_foncier":
+                message = (
+                    "Score composite non calculé : la dureté foncière ne s'applique pas "
+                    "(parcelle hors personnes morales ou score indisponible). "
+                    "Seul le score écologique (normalisé ci-dessous) est utilisable pour le classement."
+                )
+            elif composite_status == "incomplet_eco":
+                message = "Score composite non calculé : score écologique manquant ou invalide."
+            else:
+                message = "Score composite non calculé."
+
             payload[idu] = {
                 "score_composite": None if score_composite is None else round(score_composite, 2),
+                "composite_status": composite_status,
+                "message": message,
                 "eco_score_raw": None if eco_raw is None else round(eco_raw, 3),
                 "eco_score_max": self.ECO_MAX,
                 "eco_score_norm": None if eco_norm is None else round(eco_norm, 2),
