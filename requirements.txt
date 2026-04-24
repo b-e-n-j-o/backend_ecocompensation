@@ -16,3 +16,4 @@ psutil>=5.9.0
 google-generativeai
 matplotlib
 reportlab>=4.0.0
+contextily>=1.6.2
