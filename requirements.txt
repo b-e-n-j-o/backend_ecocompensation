@@ -17,4 +17,4 @@ google-generativeai
 matplotlib
 reportlab>=4.0.0
 contextily>=1.6.2
-fitz>=0.1.0
+pymupdf>=1.24.0
