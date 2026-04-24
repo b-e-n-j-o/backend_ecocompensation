@@ -173,21 +173,17 @@ def build_dpu_page_flowables(
         ph = st["tbl_hdr"]
         pc = st["tbl_cell"]
         hdr = [
-            Paragraph(xml_escape("Type"),                    ph),
-            Paragraph(xml_escape("Code"),                    ph),
-            Paragraph(xml_escape("Libellé"),                 ph),
-            Paragraph(xml_escape("Source GPU (info_surf)"),  ph),
+            Paragraph(xml_escape("Type"),     ph),
+            Paragraph(xml_escape("Libellé"),  ph),
         ]
         rows: List[List] = [hdr]
         for lb in (libelles or ["Droit de préemption urbain"]):
             rows.append([
                 Paragraph("Information réglementaire", pc),
-                Paragraph("typeinf = 04",              pc),
                 Paragraph(xml_escape(lb),              pc),
-                Paragraph("wfs_du:info_surf",          pc),
             ])
 
-        tbl = Table(rows, colWidths=[tw*0.24, tw*0.18, tw*0.34, tw*0.24])
+        tbl = Table(rows, colWidths=[tw*0.35, tw*0.65])
         tbl.setStyle(TableStyle([
             ("GRID",         (0, 0), (-1, -1), 0.5, C_BORDER),
             ("VALIGN",       (0, 0), (-1, -1), "TOP"),

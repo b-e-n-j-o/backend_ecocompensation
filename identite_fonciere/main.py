@@ -304,6 +304,7 @@ async def generer_rapport(body: RapportRequest):
                     plu_gdf=plu_gdf,
                     pct_stats=plu_pct_stats,
                     out_path=plu_png_path,
+                    parcelle_results=ok,
                     dpi=opts.dpi_carte,
                 )
                 plu_map_png = plu_png_path
@@ -344,6 +345,7 @@ async def generer_rapport(body: RapportRequest):
                     uf_gdf=uf_gdf,
                     sup_gdfs=sup_gdfs,
                     out_path=servitudes_map_png,
+                    parcelle_results=ok,
                     buffer_m=300.0,
                     dpi=opts.dpi_carte,
                 )
@@ -383,6 +385,7 @@ async def generer_rapport(body: RapportRequest):
                     uf_gdf=uf_gdf,
                     pres_gdfs=pres_gdfs,
                     out_path=prescriptions_map_png,
+                    parcelle_results=ok,
                     buffer_m=300.0,
                     dpi=opts.dpi_carte,
                 )
@@ -401,6 +404,7 @@ async def generer_rapport(body: RapportRequest):
                     dpu_gdf=dpu_result["dpu_gdf"],
                     out_path=dpu_map_png,
                     intersecte=dpu_result["intersecte"],
+                    parcelle_results=ok,
                     dpi=opts.dpi_carte,
                 )
         except Exception as e:
@@ -418,6 +422,7 @@ async def generer_rapport(body: RapportRequest):
                     subdivisions_gdf=subdivision_result["subdivisions_gdf"],
                     out_path=subdivision_map_png,
                     subdivisee=subdivision_result["subdivisee"],
+                    parcelle_results=ok,
                     dpi=opts.dpi_carte,
                 )
         except Exception as e:

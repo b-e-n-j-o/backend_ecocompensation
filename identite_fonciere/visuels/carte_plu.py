@@ -74,11 +74,51 @@ def _add_basemap(ax, crs_str: str) -> None:
         logger.warning("Carte générée sans fond de tuiles (PLU).")
 
 
+def _plot_parcelles_overlay(ax, parcelle_results: Optional[List[Any]]) -> None:
+    """Trace les limites des parcelles composant l'UF + étiquettes de numéro."""
+    if not parcelle_results:
+        return
+    for parc in parcelle_results:
+        if not getattr(parc, "ok", False) or getattr(parc, "gdf", None) is None or parc.gdf.empty:
+            continue
+        try:
+            parc_3857 = parc.gdf.to_crs(3857)
+            parc_3857.plot(
+                ax=ax,
+                facecolor="none",
+                edgecolor="#FFD600",
+                linewidth=1.1,
+                zorder=4.5,
+            )
+            for geom in parc_3857.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                rp = geom.representative_point()
+                raw_num = str(getattr(parc.ref, "numero", "") or "")
+                num = raw_num.lstrip("0") or raw_num or "—"
+                ax.text(
+                    rp.x,
+                    rp.y,
+                    num,
+                    fontsize=7,
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontweight="bold",
+                    path_effects=[pe.withStroke(linewidth=1.8, foreground="black")],
+                    zorder=6,
+                    clip_on=True,
+                )
+        except Exception as exc:
+            logger.debug("Parcelle PLU ignorée (%s)", exc)
+
+
 def render_plu_map(
     uf_gdf: gpd.GeoDataFrame,
     plu_gdf: gpd.GeoDataFrame,
     pct_stats: Dict[str, float],
     out_path: str,
+    parcelle_results: Optional[List[Any]] = None,
     dpi: int = 150,
 ) -> str:
     """
@@ -129,6 +169,9 @@ def render_plu_map(
                                 zorder=5, clip_on=True)
                 except Exception:
                     pass
+
+    # Limites des parcelles composantes + labels
+    _plot_parcelles_overlay(ax_map, parcelle_results)
 
     # Contour UF
     parc_3857.plot(ax=ax_map, facecolor="none", edgecolor="#FFD600",

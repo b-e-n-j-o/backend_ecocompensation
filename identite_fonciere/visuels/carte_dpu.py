@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import geopandas as gpd
 import matplotlib
 import matplotlib.patches as mpatches
+import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import requests
 from matplotlib import gridspec
@@ -55,6 +56,45 @@ def _add_basemap(ax, crs_str: str) -> None:
     ok = add_basemap_with_retry(ax=ax, crs_str=crs_str, logger=logger)
     if not ok:
         logger.warning("Carte générée sans fond de tuiles (DPU).")
+
+
+def _plot_parcelles_overlay(ax, parcelle_results: Optional[List[Any]]) -> None:
+    """Trace les limites des parcelles composant l'UF + numéros."""
+    if not parcelle_results:
+        return
+    for parc in parcelle_results:
+        if not getattr(parc, "ok", False) or getattr(parc, "gdf", None) is None or parc.gdf.empty:
+            continue
+        try:
+            parc_3857 = parc.gdf.to_crs(3857)
+            parc_3857.plot(
+                ax=ax,
+                facecolor="none",
+                edgecolor="#FFD600",
+                linewidth=1.1,
+                zorder=4.5,
+            )
+            for geom in parc_3857.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                rp = geom.representative_point()
+                raw_num = str(getattr(parc.ref, "numero", "") or "")
+                num = raw_num.lstrip("0") or raw_num or "—"
+                ax.text(
+                    rp.x,
+                    rp.y,
+                    num,
+                    fontsize=7,
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontweight="bold",
+                    path_effects=[pe.withStroke(linewidth=1.8, foreground="black")],
+                    zorder=6,
+                    clip_on=True,
+                )
+        except Exception as exc:
+            logger.debug("Parcelle DPU ignorée (%s)", exc)
 
 
 def fetch_dpu_in_bbox(
@@ -238,6 +278,7 @@ def render_dpu_map(
     dpu_gdf: gpd.GeoDataFrame,
     out_path: str,
     intersecte: bool,
+    parcelle_results: Optional[List[Any]] = None,
     buffer_m: float = DPU_BUFFER_M,
     dpi: int = 150,
 ) -> str:
@@ -272,6 +313,9 @@ def render_dpu_map(
                           linewidth=1.5, zorder=2)
         except Exception:
             pass
+
+    # Limites des parcelles composantes + labels
+    _plot_parcelles_overlay(ax_map, parcelle_results)
 
     # Contour UF
     uf_3857.plot(ax=ax_map, facecolor="none", edgecolor="#FFD600",
