@@ -22,6 +22,7 @@ import requests
 from .core.parcelle import ParcelleRef, fetch_parcelles
 from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
 from .core.intersections import compute_intersections
+from .core.document_urba.plu_only.reglement_qualite import analyser_qualite_reglement
 from .visuels.carte_plu import compute_plu_result, render_plu_map
 from .visuels.carte_servitudes import render_servitudes_map
 from .visuels.carte_prescriptions import render_prescriptions_map
@@ -95,6 +96,10 @@ class UrbanDocsResponse(BaseModel):
     files: List[UrbanDocFile]
     reglement_name: Optional[str] = None
     reglement_url: Optional[str] = None
+    reglement_qualite_verdict: Optional[str] = None
+    reglement_qualite_utilisable: Optional[bool] = None
+    reglement_qualite_detail: Optional[str] = None
+    reglement_qualite_tokens_estimes: Optional[int] = None
 
 
 def _fetch_doc_urba_com_prod(insee: str) -> Optional[dict]:
@@ -146,6 +151,42 @@ def _identify_reglement(files: dict) -> tuple[Optional[str], Optional[str], list
         return None, None, scored_files
     best = scored_files[0]
     return best.name, best.url, scored_files
+
+
+def _analyze_reglement_from_url(reglement_url: str) -> Optional[dict]:
+    """
+    Télécharge le PDF règlement et retourne un résumé qualité.
+    L'analyse est volontairement best-effort : en cas d'échec,
+    on ne bloque pas l'endpoint /urban-documents.
+    """
+    if not reglement_url:
+        return None
+    try:
+        resp = requests.get(reglement_url, timeout=60)
+        resp.raise_for_status()
+        pdf_bytes = resp.content
+        if pdf_bytes[:4] != b"%PDF":
+            return {
+                "verdict": "INVALIDE",
+                "utilisable": False,
+                "detail": "Fichier téléchargé non reconnu comme PDF",
+                "tokens_estimes": 0,
+            }
+        q = analyser_qualite_reglement(pdf_bytes)
+        return {
+            "verdict": q.verdict,
+            "utilisable": q.utilisable,
+            "detail": q.detail,
+            "tokens_estimes": q.tokens_estimes,
+        }
+    except Exception as exc:
+        logger.warning("Analyse qualité règlement impossible (%s): %s", reglement_url, exc)
+        return {
+            "verdict": "ERREUR_ANALYSE",
+            "utilisable": False,
+            "detail": f"Analyse impossible: {exc}",
+            "tokens_estimes": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +533,7 @@ async def get_urban_documents(insee: str):
         details = details_resp.json()
         writing_materials = details.get("writingMaterials", {}) or {}
         reglement_name, reglement_url, files = _identify_reglement(writing_materials)
+        reglement_qualite = _analyze_reglement_from_url(reglement_url) if reglement_url else None
 
         return UrbanDocsResponse(
             insee=insee,
@@ -502,6 +544,10 @@ async def get_urban_documents(insee: str):
             files=files,
             reglement_name=reglement_name,
             reglement_url=reglement_url,
+            reglement_qualite_verdict=(reglement_qualite or {}).get("verdict"),
+            reglement_qualite_utilisable=(reglement_qualite or {}).get("utilisable"),
+            reglement_qualite_detail=(reglement_qualite or {}).get("detail"),
+            reglement_qualite_tokens_estimes=(reglement_qualite or {}).get("tokens_estimes"),
         )
     except HTTPException:
         raise
