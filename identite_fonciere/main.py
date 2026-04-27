@@ -103,6 +103,19 @@ class UrbanDocsResponse(BaseModel):
     reglement_qualite_tokens_estimes: Optional[int] = None
 
 
+class ReglementExtractibiliteResponse(BaseModel):
+    insee: str
+    commune: str
+    gpu_doc_id: str
+    reglement_name: Optional[str] = None
+    reglement_url: Optional[str] = None
+    reglement_trouve: bool
+    extractible: bool
+    verdict: Optional[str] = None
+    detail: Optional[str] = None
+    tokens_estimes: Optional[int] = None
+
+
 class CommuneEnBaseItem(BaseModel):
     code_insee: str
     code_dep: str
@@ -195,6 +208,39 @@ def _analyze_reglement_from_url(reglement_url: str) -> Optional[dict]:
             "detail": f"Analyse impossible: {exc}",
             "tokens_estimes": 0,
         }
+
+
+def _get_reglement_analysis_for_insee(insee: str) -> dict:
+    """
+    Récupère le règlement élu d'une commune et son analyse d'extractibilité.
+    """
+    props = _fetch_doc_urba_com_prod(insee)
+    if not props:
+        raise HTTPException(status_code=404, detail=f"Aucun document GPU pour INSEE {insee}")
+
+    gpu_doc_id = str(props.get("gpu_doc_id") or "")
+    if not gpu_doc_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"gpu_doc_id absent pour INSEE {insee}",
+        )
+
+    details_resp = requests.get(f"{GPU_API}/document/{gpu_doc_id}/details", timeout=20)
+    details_resp.raise_for_status()
+    details = details_resp.json()
+    writing_materials = details.get("writingMaterials", {}) or {}
+    reglement_name, reglement_url, files = _identify_reglement(writing_materials)
+    reglement_qualite = _analyze_reglement_from_url(reglement_url) if reglement_url else None
+
+    return {
+        "props": props,
+        "details": details,
+        "gpu_doc_id": gpu_doc_id,
+        "files": files,
+        "reglement_name": reglement_name,
+        "reglement_url": reglement_url,
+        "reglement_qualite": reglement_qualite,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -592,23 +638,14 @@ async def get_communes_en_base(
 )
 async def get_urban_documents(insee: str):
     try:
-        props = _fetch_doc_urba_com_prod(insee)
-        if not props:
-            raise HTTPException(status_code=404, detail=f"Aucun document GPU pour INSEE {insee}")
-
-        gpu_doc_id = str(props.get("gpu_doc_id") or "")
-        if not gpu_doc_id:
-            raise HTTPException(
-                status_code=404,
-                detail=f"gpu_doc_id absent pour INSEE {insee}",
-            )
-
-        details_resp = requests.get(f"{GPU_API}/document/{gpu_doc_id}/details", timeout=20)
-        details_resp.raise_for_status()
-        details = details_resp.json()
-        writing_materials = details.get("writingMaterials", {}) or {}
-        reglement_name, reglement_url, files = _identify_reglement(writing_materials)
-        reglement_qualite = _analyze_reglement_from_url(reglement_url) if reglement_url else None
+        analysis = _get_reglement_analysis_for_insee(insee)
+        props = analysis["props"]
+        details = analysis["details"]
+        gpu_doc_id = analysis["gpu_doc_id"]
+        files = analysis["files"]
+        reglement_name = analysis["reglement_name"]
+        reglement_url = analysis["reglement_url"]
+        reglement_qualite = analysis["reglement_qualite"]
 
         return UrbanDocsResponse(
             insee=insee,
@@ -632,6 +669,44 @@ async def get_urban_documents(insee: str):
     except Exception as e:
         logger.error("Erreur urban-documents insee=%s: %s", insee, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur urban-documents: {e}")
+
+
+@app.get(
+    "/urban-documents/{insee}/reglement-extractibilite",
+    response_model=ReglementExtractibiliteResponse,
+    summary="Déterminer si le règlement PLU élu est textuellement extractible",
+)
+async def get_reglement_extractibilite(insee: str):
+    try:
+        analysis = _get_reglement_analysis_for_insee(insee)
+        props = analysis["props"]
+        details = analysis["details"]
+        reglement_name = analysis["reglement_name"]
+        reglement_url = analysis["reglement_url"]
+        reglement_qualite = analysis["reglement_qualite"] or {}
+        verdict = reglement_qualite.get("verdict")
+        utilisable = bool(reglement_qualite.get("utilisable"))
+
+        return ReglementExtractibiliteResponse(
+            insee=insee,
+            commune=str(props.get("libelle") or details.get("title") or insee),
+            gpu_doc_id=analysis["gpu_doc_id"],
+            reglement_name=reglement_name,
+            reglement_url=reglement_url,
+            reglement_trouve=bool(reglement_url),
+            extractible=utilisable,
+            verdict=verdict,
+            detail=reglement_qualite.get("detail"),
+            tokens_estimes=reglement_qualite.get("tokens_estimes"),
+        )
+    except HTTPException:
+        raise
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else 502
+        raise HTTPException(status_code=status, detail=f"Erreur API GPU ({status})")
+    except Exception as e:
+        logger.error("Erreur reglement-extractibilite insee=%s: %s", insee, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur reglement-extractibilite: {e}")
 
 
 # ---------------------------------------------------------------------------
