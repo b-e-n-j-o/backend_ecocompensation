@@ -11,10 +11,12 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import requests
@@ -45,6 +47,7 @@ GPU_API = "https://www.geoportail-urbanisme.gouv.fr/api"
 WFS_BASE = "https://data.geopf.fr/wfs/ows"
 KEYWORDS_OK = ["reglement", "règlement", "regl", "regt"]
 KEYWORDS_NOK = ["graphique", "plan", "zonage", "legende", "carte"]
+BATCH_REGLEMENT_JOBS: dict[str, dict] = {}
 
 app = FastAPI(
     title="Identité Foncière V0",
@@ -138,6 +141,23 @@ class ReglementExtractibiliteBatchItem(BaseModel):
 class ReglementExtractibiliteBatchResponse(BaseModel):
     total: int
     processed: int
+    results: List[ReglementExtractibiliteBatchItem]
+
+
+class ReglementExtractibiliteBatchJobStartResponse(BaseModel):
+    job_id: str
+    status: str
+    total: int
+
+
+class ReglementExtractibiliteBatchJobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    total: int
+    processed: int
+    started_at: str
+    finished_at: Optional[str] = None
+    current_insee: Optional[str] = None
     results: List[ReglementExtractibiliteBatchItem]
 
 
@@ -813,6 +833,137 @@ async def post_reglement_extractibilite_batch(body: ReglementExtractibiliteBatch
         total=len(insees),
         processed=len(results),
         results=results,
+    )
+
+
+def _run_reglement_extractibilite_batch_job(job_id: str, insees: list[str]) -> None:
+    job = BATCH_REGLEMENT_JOBS[job_id]
+    job["status"] = "running"
+    for insee in insees:
+        job["current_insee"] = insee
+        try:
+            analysis = _get_reglement_analysis_for_insee(insee)
+            props = analysis["props"]
+            details = analysis["details"]
+            reglement_name = analysis["reglement_name"]
+            reglement_url = analysis["reglement_url"]
+            reglement_qualite = analysis["reglement_qualite"] or {}
+            verdict = reglement_qualite.get("verdict")
+            utilisable = bool(reglement_qualite.get("utilisable"))
+
+            item = ReglementExtractibiliteBatchItem(
+                insee=insee,
+                commune=str(props.get("libelle") or details.get("title") or insee),
+                gpu_doc_id=analysis["gpu_doc_id"],
+                reglement_name=reglement_name,
+                reglement_url=reglement_url,
+                reglement_trouve=bool(reglement_url),
+                extractible=utilisable,
+                verdict=verdict,
+                detail=reglement_qualite.get("detail"),
+                tokens_estimes=reglement_qualite.get("tokens_estimes"),
+            )
+        except HTTPException as e:
+            item = ReglementExtractibiliteBatchItem(
+                insee=insee,
+                reglement_trouve=False,
+                extractible=False,
+                verdict="ERREUR_ENDPOINT",
+                detail=str(e.detail),
+                erreur=str(e.detail),
+                status_code=e.status_code,
+            )
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 502
+            msg = f"Erreur API GPU ({status})"
+            item = ReglementExtractibiliteBatchItem(
+                insee=insee,
+                reglement_trouve=False,
+                extractible=False,
+                verdict="ERREUR_ENDPOINT",
+                detail=msg,
+                erreur=msg,
+                status_code=status,
+            )
+        except Exception as e:
+            logger.error("Erreur batch job reglement-extractibilite insee=%s: %s", insee, e, exc_info=True)
+            msg = f"Erreur reglement-extractibilite: {e}"
+            item = ReglementExtractibiliteBatchItem(
+                insee=insee,
+                reglement_trouve=False,
+                extractible=False,
+                verdict="ERREUR_ENDPOINT",
+                detail=msg,
+                erreur=msg,
+                status_code=500,
+            )
+
+        job["results"].append(item)
+        job["processed"] += 1
+        logger.info(
+            "Batch job %s: %d/%d - INSEE %s - verdict=%s",
+            job_id,
+            job["processed"],
+            job["total"],
+            insee,
+            item.verdict,
+        )
+
+    job["status"] = "done"
+    job["current_insee"] = None
+    job["finished_at"] = datetime.utcnow().isoformat() + "Z"
+
+
+@app.post(
+    "/urban-documents/reglement-extractibilite/batch/jobs",
+    response_model=ReglementExtractibiliteBatchJobStartResponse,
+    summary="Lancer un batch asynchrone d'extractibilité des règlements PLU",
+)
+async def start_reglement_extractibilite_batch_job(
+    body: ReglementExtractibiliteBatchRequest,
+    background_tasks: BackgroundTasks,
+):
+    insees = [str(insee).strip() for insee in body.insees if str(insee).strip()]
+    if not insees:
+        raise HTTPException(status_code=400, detail="Aucun code INSEE fourni")
+
+    job_id = uuid4().hex
+    BATCH_REGLEMENT_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "total": len(insees),
+        "processed": 0,
+        "started_at": datetime.utcnow().isoformat() + "Z",
+        "finished_at": None,
+        "current_insee": None,
+        "results": [],
+    }
+    background_tasks.add_task(_run_reglement_extractibilite_batch_job, job_id, insees)
+    return ReglementExtractibiliteBatchJobStartResponse(
+        job_id=job_id,
+        status="queued",
+        total=len(insees),
+    )
+
+
+@app.get(
+    "/urban-documents/reglement-extractibilite/batch/jobs/{job_id}",
+    response_model=ReglementExtractibiliteBatchJobStatusResponse,
+    summary="Consulter l'avancement d'un batch asynchrone d'extractibilité",
+)
+async def get_reglement_extractibilite_batch_job(job_id: str):
+    job = BATCH_REGLEMENT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"job_id inconnu: {job_id}")
+    return ReglementExtractibiliteBatchJobStatusResponse(
+        job_id=job["job_id"],
+        status=job["status"],
+        total=job["total"],
+        processed=job["processed"],
+        started_at=job["started_at"],
+        finished_at=job["finished_at"],
+        current_insee=job["current_insee"],
+        results=job["results"],
     )
 
 

@@ -1,6 +1,14 @@
 """
 Récupération du règlement PLU — Latresne (33234)
 Script de test minimal avec logs détaillés.
+
+Objectif du script :
+    - Récupérer le document d'urbanisme (doc_urba_com) pour la commune de Latresne (33234)
+    - Récupérer les métadonnées et URLs des pièces écrites
+    - Identifier le règlement
+    - Télécharger le PDF du règlement
+    - Vérifier la signature PDF
+    - Résumer
 """
 import io
 import time

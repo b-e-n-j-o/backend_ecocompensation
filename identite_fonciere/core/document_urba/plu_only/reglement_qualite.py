@@ -2,6 +2,9 @@
 reglement_qualite.py
 Analyse qualité d'un PDF de règlement PLU.
 
+entrée : bytes
+sortie : ReglementQualite
+
 Usage autonome :
     from reglement_qualite import analyser_qualite_reglement, ReglementQualite
 
