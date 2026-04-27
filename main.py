@@ -60,6 +60,7 @@ from routers.foncier_router import router as foncier_router
 from routers.pool_router import router as pool_router
 from routers.results_geojson_router import router as results_geojson_router
 from routers.durete_router import router as durete_router
+from routers.cadastre_bbox_router import router as cadastre_bbox_router
 from exports.router_exports import router as exports_router
 from routers.rapport_router import router as rapport_router
 from pool import pool_service
@@ -176,6 +177,7 @@ app.include_router(foncier_router, prefix="/api/foncier")
 app.include_router(pool_router)
 app.include_router(results_geojson_router)
 app.include_router(durete_router)
+app.include_router(cadastre_bbox_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
 

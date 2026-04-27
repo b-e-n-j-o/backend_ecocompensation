@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import requests
+import psycopg2
 
 from .core.parcelle import ParcelleRef, fetch_parcelles
 from .core.unites_foncieres import build_uf, parcelles_detail, uf_geojson, uf_surface_m2
@@ -100,6 +101,13 @@ class UrbanDocsResponse(BaseModel):
     reglement_qualite_utilisable: Optional[bool] = None
     reglement_qualite_detail: Optional[str] = None
     reglement_qualite_tokens_estimes: Optional[int] = None
+
+
+class CommuneEnBaseItem(BaseModel):
+    code_insee: str
+    code_dep: str
+    nom_commune: Optional[str] = None
+    nb_parcelles: int
 
 
 def _fetch_doc_urba_com_prod(insee: str) -> Optional[dict]:
@@ -508,6 +516,73 @@ async def generer_rapport(body: RapportRequest):
         filename=final_name,
         headers={"Content-Disposition": f'attachment; filename="{final_name}"'},
     )
+
+
+@app.get(
+    "/communes-en-base",
+    response_model=List[CommuneEnBaseItem],
+    summary="Lister les communes cadastrales déjà en base",
+)
+async def get_communes_en_base(
+    q: str | None = None,
+    limit: int = 2000,
+):
+    """
+    Retourne la liste des communes présentes dans `parcelles.communes`.
+    - `q` : filtre optionnel sur code INSEE / nom commune
+    - `limit` : borne max (1..10000)
+    """
+    if limit < 1:
+        raise HTTPException(status_code=400, detail="limit doit être >= 1")
+    limit = min(limit, 10000)
+
+    direct_url = (os.getenv("SUPABASE_DIRECT_URL") or "").strip()
+    if not direct_url:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_DIRECT_URL manquant pour lire parcelles.communes",
+        )
+
+    try:
+        with psycopg2.connect(direct_url, sslmode="require") as conn:
+            with conn.cursor() as cur:
+                if q and q.strip():
+                    pattern = f"%{q.strip()}%"
+                    cur.execute(
+                        """
+                        SELECT code_insee, code_dep, nom_commune, nb_parcelles
+                        FROM parcelles.communes
+                        WHERE code_insee ILIKE %s
+                           OR COALESCE(nom_commune, '') ILIKE %s
+                        ORDER BY code_dep, nom_commune NULLS LAST, code_insee
+                        LIMIT %s
+                        """,
+                        (pattern, pattern, limit),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT code_insee, code_dep, nom_commune, nb_parcelles
+                        FROM parcelles.communes
+                        ORDER BY code_dep, nom_commune NULLS LAST, code_insee
+                        LIMIT %s
+                        """,
+                        (limit,),
+                    )
+                rows = cur.fetchall()
+    except Exception as e:
+        logger.error("Erreur GET /communes-en-base: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur communes-en-base: {e}")
+
+    return [
+        CommuneEnBaseItem(
+            code_insee=r[0],
+            code_dep=r[1],
+            nom_commune=r[2],
+            nb_parcelles=int(r[3]),
+        )
+        for r in rows
+    ]
 
 
 @app.get(
