@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
+import argparse
 import csv
-import os
+import json
 from pathlib import Path
-
-from dotenv import load_dotenv
-import psycopg
 
 CSV_PATH = Path(
     "/Volumes/T7/Travaux_Freelance/KERELIA/CUAs/INTERSECTION_PIPELINE/LATRESNE/cua_latresne_v4/CONFIG/v_commune_2025.csv"
 )
 DEPARTEMENT = "33"
+OUTPUT_DEFAULT = Path(__file__).resolve().parent / "payload_insees_gironde.json"
 
 
 def lire_communes_csv_gironde(csv_path: Path) -> dict[str, str]:
@@ -28,56 +27,53 @@ def lire_communes_csv_gironde(csv_path: Path) -> dict[str, str]:
     return communes
 
 
-def lire_communes_db_gironde(conn) -> dict[str, str]:
-    """
-    Retourne un dict {code_insee: nom_commune} depuis parcelles.communes pour code_dep=33.
-    """
-    query = """
-        SELECT code_insee, nom_commune
-        FROM parcelles.communes
-        WHERE code_dep = %s
-    """
-    with conn.cursor() as cur:
-        cur.execute(query, (DEPARTEMENT,))
-        rows = cur.fetchall()
-    return {code_insee: (nom_commune or "") for code_insee, nom_commune in rows}
+def ecrire_payload_json(insees: list[str], output_path: Path) -> None:
+    payload = {"insees": insees}
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
-    load_dotenv()
-
-    db_url = os.getenv("SUPABASE_DIRECT_URL")
-    if not db_url:
-        raise RuntimeError(
-            "SUPABASE_DIRECT_URL introuvable. Ajoute-le dans ton .env puis relance."
+    parser = argparse.ArgumentParser(
+        description=(
+            "Construit un payload JSON d'INSEE Gironde pour "
+            "POST /urban-documents/reglement-extractibilite/batch"
         )
+    )
+    parser.add_argument(
+        "--csv-path",
+        type=Path,
+        default=CSV_PATH,
+        help="Chemin du CSV v_commune_2025.csv",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=OUTPUT_DEFAULT,
+        help="Chemin du JSON de sortie (payload batch)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Limiter le nombre de communes testées (0 = toutes)",
+    )
+    args = parser.parse_args()
 
-    if not CSV_PATH.exists():
-        raise FileNotFoundError(f"CSV introuvable: {CSV_PATH}")
+    if not args.csv_path.exists():
+        raise FileNotFoundError(f"CSV introuvable: {args.csv_path}")
 
-    communes_csv = lire_communes_csv_gironde(CSV_PATH)
+    communes_csv = lire_communes_csv_gironde(args.csv_path)
+    items = sorted(communes_csv.items())
+    if args.limit > 0:
+        items = items[:args.limit]
 
-    with psycopg.connect(db_url) as conn:
-        communes_db = lire_communes_db_gironde(conn)
+    insees = [code_insee for code_insee, _ in items]
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    ecrire_payload_json(insees, args.output_json)
 
-    codes_csv = set(communes_csv.keys())
-    codes_db = set(communes_db.keys())
+    print(f"Communes Gironde retenues: {len(insees)}")
+    print(f"Sortie JSON: {args.output_json.resolve()}")
 
-    manquantes_en_db = sorted(codes_csv - codes_db)
-    en_db_mais_pas_csv = sorted(codes_db - codes_csv)
-
-    print(f"Communes CSV Gironde (DEP=33): {len(codes_csv)}")
-    print(f"Communes DB Gironde (code_dep=33): {len(codes_db)}")
-    print()
-
-    print(f"=== Communes manquantes en base ({len(manquantes_en_db)}) ===")
-    for code in manquantes_en_db:
-        print(f"{code} - {communes_csv.get(code, '')}")
-
-    print()
-    print(f"=== Communes en base mais absentes du CSV ({len(en_db_mais_pas_csv)}) ===")
-    for code in en_db_mais_pas_csv:
-        print(f"{code} - {communes_db.get(code, '')}")
 
 
 if __name__ == "__main__":

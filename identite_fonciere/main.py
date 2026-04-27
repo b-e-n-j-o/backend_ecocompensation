@@ -116,6 +116,31 @@ class ReglementExtractibiliteResponse(BaseModel):
     tokens_estimes: Optional[int] = None
 
 
+class ReglementExtractibiliteBatchRequest(BaseModel):
+    insees: List[str] = Field(..., min_length=1, max_length=2000)
+
+
+class ReglementExtractibiliteBatchItem(BaseModel):
+    insee: str
+    commune: Optional[str] = None
+    gpu_doc_id: Optional[str] = None
+    reglement_name: Optional[str] = None
+    reglement_url: Optional[str] = None
+    reglement_trouve: bool
+    extractible: bool
+    verdict: Optional[str] = None
+    detail: Optional[str] = None
+    tokens_estimes: Optional[int] = None
+    erreur: Optional[str] = None
+    status_code: Optional[int] = None
+
+
+class ReglementExtractibiliteBatchResponse(BaseModel):
+    total: int
+    processed: int
+    results: List[ReglementExtractibiliteBatchItem]
+
+
 class CommuneEnBaseItem(BaseModel):
     code_insee: str
     code_dep: str
@@ -707,6 +732,88 @@ async def get_reglement_extractibilite(insee: str):
     except Exception as e:
         logger.error("Erreur reglement-extractibilite insee=%s: %s", insee, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Erreur reglement-extractibilite: {e}")
+
+
+@app.post(
+    "/urban-documents/reglement-extractibilite/batch",
+    response_model=ReglementExtractibiliteBatchResponse,
+    summary="Analyser l'extractibilité du règlement PLU pour une liste d'INSEE",
+)
+async def post_reglement_extractibilite_batch(body: ReglementExtractibiliteBatchRequest):
+    results: list[ReglementExtractibiliteBatchItem] = []
+    insees = [str(insee).strip() for insee in body.insees if str(insee).strip()]
+
+    for insee in insees:
+        try:
+            analysis = _get_reglement_analysis_for_insee(insee)
+            props = analysis["props"]
+            details = analysis["details"]
+            reglement_name = analysis["reglement_name"]
+            reglement_url = analysis["reglement_url"]
+            reglement_qualite = analysis["reglement_qualite"] or {}
+            verdict = reglement_qualite.get("verdict")
+            utilisable = bool(reglement_qualite.get("utilisable"))
+
+            results.append(
+                ReglementExtractibiliteBatchItem(
+                    insee=insee,
+                    commune=str(props.get("libelle") or details.get("title") or insee),
+                    gpu_doc_id=analysis["gpu_doc_id"],
+                    reglement_name=reglement_name,
+                    reglement_url=reglement_url,
+                    reglement_trouve=bool(reglement_url),
+                    extractible=utilisable,
+                    verdict=verdict,
+                    detail=reglement_qualite.get("detail"),
+                    tokens_estimes=reglement_qualite.get("tokens_estimes"),
+                )
+            )
+        except HTTPException as e:
+            results.append(
+                ReglementExtractibiliteBatchItem(
+                    insee=insee,
+                    reglement_trouve=False,
+                    extractible=False,
+                    verdict="ERREUR_ENDPOINT",
+                    detail=str(e.detail),
+                    erreur=str(e.detail),
+                    status_code=e.status_code,
+                )
+            )
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 502
+            msg = f"Erreur API GPU ({status})"
+            results.append(
+                ReglementExtractibiliteBatchItem(
+                    insee=insee,
+                    reglement_trouve=False,
+                    extractible=False,
+                    verdict="ERREUR_ENDPOINT",
+                    detail=msg,
+                    erreur=msg,
+                    status_code=status,
+                )
+            )
+        except Exception as e:
+            logger.error("Erreur batch reglement-extractibilite insee=%s: %s", insee, e, exc_info=True)
+            msg = f"Erreur reglement-extractibilite: {e}"
+            results.append(
+                ReglementExtractibiliteBatchItem(
+                    insee=insee,
+                    reglement_trouve=False,
+                    extractible=False,
+                    verdict="ERREUR_ENDPOINT",
+                    detail=msg,
+                    erreur=msg,
+                    status_code=500,
+                )
+            )
+
+    return ReglementExtractibiliteBatchResponse(
+        total=len(insees),
+        processed=len(results),
+        results=results,
+    )
 
 
 # ---------------------------------------------------------------------------
