@@ -231,7 +231,7 @@ async def generer_rapport(body: RapportRequest):
     ]
     opts = body.options
 
-    # 1. Récupération des géométries IGN
+    # 1. Récupération des géométries cadastrales (base interne)
     logger.info("🚀 Pipeline — %d parcelle(s)", len(refs))
     parc_results = fetch_parcelles(refs)
 

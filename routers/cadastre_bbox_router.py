@@ -204,14 +204,14 @@ def get_cadastre_commune_meta(
         f"""
         SELECT
             s.cnt AS nb_parcelles,
-            ST_XMin(ext)::double precision AS min_lon,
-            ST_YMin(ext)::double precision AS min_lat,
-            ST_XMax(ext)::double precision AS max_lon,
-            ST_YMax(ext)::double precision AS max_lat
+            ST_XMin(ext_4326)::double precision AS min_lon,
+            ST_YMin(ext_4326)::double precision AS min_lat,
+            ST_XMax(ext_4326)::double precision AS max_lon,
+            ST_YMax(ext_4326)::double precision AS max_lat
         FROM (
             SELECT
                 COUNT(*)::bigint AS cnt,
-                ST_Extent(ST_Transform(p.geom_2154, 4326)) AS ext
+                ST_Transform(ST_SetSRID(ST_Extent(p.geom_2154)::geometry, 2154), 4326) AS ext_4326
             FROM {table_name} p
             WHERE {dep_filter}
               AND p.code_insee = :insee
@@ -360,6 +360,7 @@ def get_cadastre_commune_tile(
     has_arpente = "arpente" in colset
     has_contenance = "contenance" in colset
     has_updated = "updated" in colset
+    has_geom_3857 = "geom_3857" in colset
 
     dep_filter = "(:dep_count = 0 OR p.code_dep = ANY(:deps))" if has_code_dep else "TRUE"
     code_dep_select = "p.code_dep" if has_code_dep else "LEFT(p.code_insee, 2)"
@@ -367,6 +368,12 @@ def get_cadastre_commune_tile(
     contenance_select = "p.contenance" if has_contenance else "NULL::double precision"
     arpente_select = "p.arpente" if has_arpente else "NULL::boolean"
     updated_select = "p.updated::text" if has_updated else "NULL::text"
+    geom_src = "p.geom_3857" if has_geom_3857 else "ST_Transform(p.geom_2154, 3857)"
+    geom_filter = (
+        "p.geom_3857 && b.g3857 AND ST_Intersects(p.geom_3857, b.g3857)"
+        if has_geom_3857
+        else "p.geom_2154 && b.g2154 AND ST_Intersects(p.geom_2154, b.g2154)"
+    )
 
     sql = text(
         f"""
@@ -387,7 +394,7 @@ def get_cadastre_commune_tile(
                 {arpente_select} AS arpente,
                 {updated_select} AS updated,
                 ST_AsMVTGeom(
-                    ST_Transform(p.geom_2154, 3857),
+                    {geom_src},
                     b.g3857,
                     4096,
                     256,
@@ -397,8 +404,7 @@ def get_cadastre_commune_tile(
             CROSS JOIN bounds b
             WHERE {dep_filter}
               AND p.code_insee = :insee
-              AND p.geom_2154 && b.g2154
-              AND ST_Intersects(p.geom_2154, b.g2154)
+              AND {geom_filter}
         )
         SELECT ST_AsMVT(src, 'parcelles', 4096, 'geom') AS tile
         FROM src
