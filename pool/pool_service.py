@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool (
     surface_ha double precision NULL,
     miller double precision NULL,
     distance_km double precision NULL,
+    dist_hydro_m double precision NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, idu)
 );
@@ -129,6 +130,30 @@ def ensure_tables(conn) -> None:
                 )
             ),
         )
+        _run_optional_in_savepoint(
+            conn,
+            "sp_pool_profiling_progress_col",
+            lambda: conn.execute(
+                text(
+                    """
+                    ALTER TABLE ecocompensation_results.parcelles_pool_runs
+                    ADD COLUMN IF NOT EXISTS profiling_progress jsonb NOT NULL DEFAULT '{}'::jsonb
+                    """
+                )
+            ),
+        )
+        _run_optional_in_savepoint(
+            conn,
+            "sp_pool_dist_hydro_col",
+            lambda: conn.execute(
+                text(
+                    """
+                    ALTER TABLE ecocompensation_results.parcelles_pool
+                    ADD COLUMN IF NOT EXISTS dist_hydro_m double precision NULL
+                    """
+                )
+            ),
+        )
         _ensure_tables_done = True
 
 
@@ -176,7 +201,7 @@ def insert_pool_parcelles(conn, project_id: str, run_id: str, parcelles: list[di
             text(
                 """
                 INSERT INTO ecocompensation_results.parcelles_pool
-                    (run_id, project_id, idu, rank, surface_ha, miller, distance_km)
+                    (run_id, project_id, idu, rank, surface_ha, miller, distance_km, dist_hydro_m)
                 VALUES
                     (
                         CAST(:run_id AS uuid),
@@ -185,13 +210,15 @@ def insert_pool_parcelles(conn, project_id: str, run_id: str, parcelles: list[di
                         :rank,
                         :surface_ha,
                         :miller,
-                        :distance_km
+                        :distance_km,
+                        :dist_hydro_m
                     )
                 ON CONFLICT (run_id, idu) DO UPDATE SET
                     rank = EXCLUDED.rank,
                     surface_ha = EXCLUDED.surface_ha,
                     miller = EXCLUDED.miller,
                     distance_km = EXCLUDED.distance_km,
+                    dist_hydro_m = EXCLUDED.dist_hydro_m,
                     created_at = now()
                 """
             ),
@@ -203,6 +230,7 @@ def insert_pool_parcelles(conn, project_id: str, run_id: str, parcelles: list[di
                 "surface_ha": p.get("surface_ha"),
                 "miller": p.get("miller"),
                 "distance_km": p.get("distance_km"),
+                "dist_hydro_m": p.get("dist_hydro_m"),
             },
         )
 
@@ -345,6 +373,7 @@ def get_parcelles_for_run_results(
                 pp.surface_ha,
                 pp.miller,
                 pp.distance_km,
+                pp.dist_hydro_m,
                 p.code_insee,
                 p.section,
                 p.numero
@@ -388,10 +417,67 @@ def get_parcelles_for_run_results(
                 "surface_ha": round(float(r["surface_ha"] or 0), 2),
                 "miller": round(float(r["miller"] or 0), 4),
                 "distance_km": round(float(r["distance_km"] or 0), 2),
-                "dist_hydro_m": None,
+                "dist_hydro_m": (
+                    round(float(r["dist_hydro_m"]), 1)
+                    if r.get("dist_hydro_m") is not None
+                    else None
+                ),
             }
         )
     return parcelles
+
+
+def get_parcelles_geometries_for_run(
+    conn, project_id: str, run_id: str
+) -> list[dict[str, Any]]:
+    """
+    Géométries WGS84 des parcelles d'un run pool.
+    Jointure parcelles_pool → parcelles (geom_2154) par project_id + idu.
+    """
+    rows = conn.execute(
+        text(
+            """
+            SELECT
+                pp.idu,
+                pp.rank,
+                ST_AsGeoJSON(ST_Transform(p.geom_2154, 4326))::json AS geometry
+            FROM ecocompensation_results.parcelles_pool pp
+            INNER JOIN ecocompensation_results.parcelles p
+                ON p.project_id = pp.project_id
+               AND p.idu = pp.idu
+            WHERE pp.project_id = CAST(:project_id AS uuid)
+              AND pp.run_id = CAST(:run_id AS uuid)
+              AND p.geom_2154 IS NOT NULL
+            ORDER BY pp.rank NULLS LAST, pp.idu
+            """
+        ),
+        {"project_id": project_id, "run_id": run_id},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_parcelles_geometries_by_idus(
+    conn, project_id: str, idus: list[str]
+) -> list[dict[str, Any]]:
+    """Géométries WGS84 pour une liste d'IDU (fallback last_results sans run_id)."""
+    if not idus:
+        return []
+    stmt = text(
+        """
+        SELECT
+            p.idu,
+            ST_AsGeoJSON(ST_Transform(p.geom_2154, 4326))::json AS geometry
+        FROM ecocompensation_results.parcelles p
+        WHERE p.project_id = CAST(:project_id AS uuid)
+          AND p.idu IN :idus
+          AND p.geom_2154 IS NOT NULL
+        """
+    ).bindparams(bindparam("idus", expanding=True))
+    rows = conn.execute(
+        stmt,
+        {"project_id": project_id, "idus": idus},
+    ).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def build_filter_snapshot_from_run(
@@ -696,6 +782,18 @@ def list_project_indesirable_idus(conn, project_id: str) -> list[str]:
         {"project_id": project_id},
     ).mappings().all()
     return [str(r["idu"]) for r in rows]
+
+
+def filter_parcelles_excluding_project_indesirables(
+    conn,
+    project_id: str,
+    parcelles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retire du jeu exporté / classement les parcelles marquées indésirables (projet)."""
+    excluded = set(list_project_indesirable_idus(conn, project_id))
+    if not excluded:
+        return parcelles
+    return [p for p in parcelles if str(p.get("idu") or "") not in excluded]
 
 
 def list_project_indesirables_rows(conn, project_id: str) -> list[dict[str, Any]]:

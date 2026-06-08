@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_PM_TABLE_CORE = "ecocompensation.parcelles_personnes_morales"
 # Source actuelle : ancienne base PPM (SUPABASE_PPM_*), schéma public — défaut tant que la migration n’est pas faite
 DEFAULT_PM_TABLE_PPM = "public.parcelles_personnes_morales"
+# Prospects : propriétaires ayant déjà réalisé de la compensation (jointure par idu, index idx_ppf_idu)
+DEFAULT_PROSPECTS_TABLE = "ecocompensation.parcelles_prospects_filtered"
 
 _NOMENCLATURE_N3: dict[str, str] | None = None
 
@@ -63,6 +65,11 @@ def _empty_payload() -> dict[str, object]:
         "siren": None,
         "denomination": None,
         "forme_juridique": None,
+        "compensation_deja_realisee": False,
+        "parcelle_deja_en_mc": None,
+        "nb_mc_distinctes": None,
+        "nb_parcelles_deja_en_mc": None,
+        "surface_deja_en_mc_m2": None,
     }
 
 
@@ -79,12 +86,45 @@ def _hit_payload(
     }
 
 
+def _as_optional_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _prospects_compensation_payload(
+    parcelle_deja_en_mc: object,
+    nb_mc_distinctes: object,
+    nb_parcelles_deja_en_mc: object,
+    surface_deja_en_mc_m2: object,
+) -> dict[str, object]:
+    out: dict[str, object] = {"compensation_deja_realisee": True}
+    if parcelle_deja_en_mc is not None:
+        out["parcelle_deja_en_mc"] = bool(parcelle_deja_en_mc)
+    nb_mc = _as_optional_int(nb_mc_distinctes)
+    if nb_mc is not None:
+        out["nb_mc_distinctes"] = nb_mc
+    nb_parc = _as_optional_int(nb_parcelles_deja_en_mc)
+    if nb_parc is not None:
+        out["nb_parcelles_deja_en_mc"] = nb_parc
+    if isinstance(surface_deja_en_mc_m2, (int, float)):
+        out["surface_deja_en_mc_m2"] = float(surface_deja_en_mc_m2)
+    return out
+
+
 class PersonnesMoralesProfiler(BasePoolProfiler):
     """
     Indique si la parcelle cadastrale figure dans la base « parcelles personnes morales »
-    (SIREN / dénomination / forme juridique).
+    (SIREN / dénomination / forme juridique), et si elle appartient à la liste des prospects
+    dont le propriétaire a déjà réalisé de la compensation sur d'autres fonciers
+    (ecocompensation.parcelles_prospects_filtered — jointure par idu, pas d'intersection spatiale).
 
-    Priorité (tant que les données ne sont pas migrées sur Ecocompensation) :
+    Priorité PM (tant que les données ne sont pas migrées sur Ecocompensation) :
       1) Requête sur la base PPM (get_engine_ppm / SUPABASE_PPM_*) — table public.parcelles_personnes_morales
       2) Repli : jointure sur ecocompensation.parcelles_personnes_morales si la PPM est indisponible.
     """
@@ -162,6 +202,42 @@ class PersonnesMoralesProfiler(BasePoolProfiler):
                     out[idu] = _hit_payload(r.get("siren"), r.get("denomination"), r.get("forme_juridique"))
         return out
 
+    def _hits_from_prospects_filtered(
+        self, conn, idus: list[str], prospects_table: str
+    ) -> dict[str, dict[str, object]]:
+        if not idus:
+            return {}
+        out: dict[str, dict[str, object]] = {}
+        chunk = 800
+        sql = (
+            text(
+                f"""
+                SELECT DISTINCT ON (idu)
+                    idu,
+                    parcelle_deja_en_mc,
+                    nb_mc_distinctes,
+                    nb_parcelles_deja_en_mc,
+                    surface_deja_en_mc_m2
+                FROM {prospects_table}
+                WHERE idu IN :idus
+                ORDER BY idu, siren
+                """
+            )
+            .bindparams(bindparam("idus", expanding=True))
+        )
+        for i in range(0, len(idus), chunk):
+            part = idus[i : i + chunk]
+            rows = conn.execute(sql, {"idus": part}).mappings().all()
+            for r in rows:
+                idu = str(r["idu"])
+                out[idu] = _prospects_compensation_payload(
+                    r.get("parcelle_deja_en_mc"),
+                    r.get("nb_mc_distinctes"),
+                    r.get("nb_parcelles_deja_en_mc"),
+                    r.get("surface_deja_en_mc_m2"),
+                )
+        return out
+
     def compute_for_run(self, conn, project_id: str, run_id: str) -> dict[str, dict]:
         all_idus = self._all_idus(conn, project_id, run_id)
         if not all_idus:
@@ -190,10 +266,22 @@ class PersonnesMoralesProfiler(BasePoolProfiler):
                 )
                 hits = {}
 
+        prospects_table = os.getenv("PARCELLES_PROSPECTS_TABLE", DEFAULT_PROSPECTS_TABLE)
+        prospects_hits: dict[str, dict[str, object]] = {}
+        try:
+            prospects_hits = self._hits_from_prospects_filtered(conn, all_idus, prospects_table)
+        except Exception:
+            logger.exception(
+                "Profiler PM : échec lecture prospects compensation (%s)",
+                prospects_table,
+            )
+
         payload: dict[str, dict] = {}
         base = _empty_payload()
         for idu in all_idus:
             payload[idu] = dict(base)
             if idu in hits:
                 payload[idu].update(hits[idu])
+            if idu in prospects_hits:
+                payload[idu].update(prospects_hits[idu])
         return payload

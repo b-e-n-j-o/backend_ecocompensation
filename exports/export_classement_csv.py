@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from exports.classement_export_attrs import build_parcelle_export_row, mmap_for_parcelle
-from exports.export_classement_pool_text import pool_metrics_json_compact
+from exports.qgis_encoding import QGIS_CSV_ENCODING, normalize_unicode_text
 from vrai_filtre import FiltreOptions
 
 if TYPE_CHECKING:
@@ -66,7 +66,7 @@ CSV_FIELDNAMES: list[str] = [
 
 
 def _csv_cell(v: Any) -> str:
-    """Valeurs scalaires pour CSV (booléens en true/false minuscules)."""
+    """Valeurs scalaires pour CSV (booléens en true/false minuscules, UTF-8 NFC)."""
     if v is None:
         return ""
     if isinstance(v, bool):
@@ -76,7 +76,9 @@ def _csv_cell(v: Any) -> str:
 
         if not isfinite(v):
             return ""
-    return str(v)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return str(v)
+    return normalize_unicode_text(v)
 
 
 def export_classement_csv(
@@ -98,7 +100,7 @@ def export_classement_csv(
         options = FiltreOptions.defaut()
 
     if isinstance(output_path, Path):
-        file_obj = open(output_path, "w", newline="", encoding="utf-8-sig")
+        file_obj = open(output_path, "w", newline="", encoding=QGIS_CSV_ENCODING)
     else:
         file_obj = output_path
 

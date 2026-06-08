@@ -213,14 +213,17 @@ async def run_orchestration(
                 conn.execute(
                     text("""
                         UPDATE ecocompensation.projects
-                        SET layers_status = layers_status || jsonb_build_object(:key, :val),
+                        SET layers_status = layers_status || jsonb_build_object(CAST(:key AS text), CAST(:val AS text)),
                             updated_at = now()
                         WHERE id = :pid;
                     """),
                     {"key": layer_key, "val": event, "pid": project_id},
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(
+                "Impossible de mettre à jour layers_status (project_id=%s, layer=%s, event=%s): %s",
+                project_id, layer_key, event, e,
+            )
 
     try:
         with engine.begin() as conn:
@@ -229,7 +232,7 @@ async def run_orchestration(
                 {"pid": project_id},
             )
     except Exception:
-        pass
+        logger.exception("Impossible de passer le projet en status='fetching' (project_id=%s)", project_id)
 
     mode = " (dry-run, données non conservées)" if dry_run else ""
     await push({
@@ -262,7 +265,7 @@ async def run_orchestration(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     max_uf_parcelles=uf_max_parcelles,
                 )
-            elif key == "fauna":
+            elif key in ("fauna", "enrich_candidates", "enrich_uf"):
                 result = await _run_layer_with_progress(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     species_list=fauna_species,
@@ -324,3 +327,71 @@ async def run_orchestration(
 
     logger.info(summary["message"])
     return results
+
+
+PARCELLES_PHASE_KEYS = ("parcelles", "enrich_candidates")
+UF_PHASE_KEYS = ("unites_foncieres", "sous_ensembles", "enrich_uf")
+
+
+async def fetch_project_two_phases(
+    engine,
+    project_id: str,
+    aoi_id: str,
+    push: ProgressPush = _noop_push,
+    *,
+    dry_run: bool = False,
+    uf_max_parcelles: int | None = None,
+    uf_min_area_ha: float = 7.0,
+    fauna_species: list[str] | None = None,
+    include_sig_layers: bool = True,
+) -> dict[str, LayerResult]:
+    """
+    Fetch en deux temps :
+      1. Parcelles (+ enrich_candidates) → event ``phase:parcelles_ready``
+      2. UF (unites_foncieres → sous_ensembles → enrich_uf) → event ``phase:uf_ready``
+      3. (optionnel) autres couches SIG du registre
+    """
+    all_results: dict[str, LayerResult] = {}
+
+    phase1_results = await run_orchestration(
+        engine, project_id, aoi_id, push,
+        layer_keys=list(PARCELLES_PHASE_KEYS),
+        dry_run=dry_run,
+        fauna_species=fauna_species,
+    )
+    all_results.update(phase1_results)
+    await push({
+        "event":     "phase:parcelles_ready",
+        "message":   "Parcelles disponibles — analyse UF en cours…",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    uf_results = await run_orchestration(
+        engine, project_id, aoi_id, push,
+        layer_keys=list(UF_PHASE_KEYS),
+        dry_run=dry_run,
+        uf_max_parcelles=uf_max_parcelles,
+        uf_min_area_ha=uf_min_area_ha,
+        fauna_species=fauna_species,
+    )
+    all_results.update(uf_results)
+
+    await push({
+        "event":     "phase:uf_ready",
+        "message":   "Unités foncières disponibles",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    if include_sig_layers:
+        phase12 = set(PARCELLES_PHASE_KEYS) | set(UF_PHASE_KEYS)
+        sig_keys = [cfg["key"] for cfg in LAYER_REGISTRY if cfg["key"] not in phase12]
+        if sig_keys:
+            sig_results = await run_orchestration(
+                engine, project_id, aoi_id, push,
+                layer_keys=sig_keys,
+                dry_run=dry_run,
+                fauna_species=fauna_species,
+            )
+            all_results.update(sig_results)
+
+    return all_results

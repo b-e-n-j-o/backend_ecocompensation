@@ -46,6 +46,7 @@ def _build_engine(
             "prepare_threshold":   None,
         },
         pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
 

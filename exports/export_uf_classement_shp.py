@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import geopandas as gpd
 from sqlalchemy import text
 from exports.classement_export_attrs import build_parcelle_export_row
+from exports.qgis_encoding import write_geodataframe_shapefile_qgis
 from exports.uf_export_adapter import build_subset_export_inputs
 
 if TYPE_CHECKING:
@@ -99,4 +100,4 @@ def export_uf_classement_shp(
     if output_path.suffix.lower() != ".shp":
         output_path = output_path.with_suffix(".shp")
 
-    gdf.to_file(output_path, driver="ESRI Shapefile", encoding="utf-8")
+    write_geodataframe_shapefile_qgis(gdf, output_path)

@@ -213,14 +213,17 @@ async def run_orchestration(
                 conn.execute(
                     text("""
                         UPDATE ecocompensation.projects
-                        SET layers_status = layers_status || jsonb_build_object(:key, :val),
+                        SET layers_status = layers_status || jsonb_build_object(CAST(:key AS text), CAST(:val AS text)),
                             updated_at = now()
                         WHERE id = :pid;
                     """),
                     {"key": layer_key, "val": event, "pid": project_id},
                 )
         except Exception:
-            pass
+            logger.exception(
+                "Impossible de mettre à jour layers_status (project_id=%s, layer=%s, event=%s)",
+                project_id, layer_key, event,
+            )
 
     try:
         with engine.begin() as conn:
@@ -229,7 +232,7 @@ async def run_orchestration(
                 {"pid": project_id},
             )
     except Exception:
-        pass
+        logger.exception("Impossible de passer le projet en status='fetching' (project_id=%s)", project_id)
 
     mode = " (dry-run, données non conservées)" if dry_run else ""
     await push({
@@ -262,7 +265,7 @@ async def run_orchestration(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     max_uf_parcelles=uf_max_parcelles,
                 )
-            elif key == "fauna":
+            elif key in ("fauna", "enrich_candidates"):
                 result = await _run_layer_with_progress(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     species_list=fauna_species,

@@ -23,6 +23,8 @@ from sqlalchemy import text
 
 from exports.classement_export_attrs import build_parcelle_export_row, mmap_for_parcelle
 
+from exports.qgis_encoding import write_geodataframe_shapefile_qgis
+
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
@@ -106,6 +108,6 @@ def export_classement_shp(
     if output_path.suffix.lower() != ".shp":
         output_path = output_path.with_suffix(".shp")
 
-    gdf_shp.to_file(output_path, driver="ESRI Shapefile", encoding="utf-8")
+    write_geodataframe_shapefile_qgis(gdf_shp, output_path)
     gpkg_path = output_path.with_suffix(".gpkg")
     gdf_gpkg.to_file(gpkg_path, driver="GPKG", layer="parcelles")

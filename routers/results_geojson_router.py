@@ -20,8 +20,17 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from db import get_engine
+from map_layers import (
+    get_cesbio_aoi_geojson,
+    get_fauna_aoi_geojson,
+    get_fauna_buffer_aoi_geojson,
+    load_filter_map_config,
+)
 
 logger = logging.getLogger(__name__)
+
+# Couches nationales clippées à l'AOI (filter_v2) — pas ecocompensation_results.*
+NATIONAL_MAP_LAYER_KEYS = frozenset({"cesbio", "fauna", "fauna_buffer"})
 
 router = APIRouter()
 engine = get_engine()
@@ -86,8 +95,7 @@ def _build_select_cols(layer_key: str, table_alias: str = "r") -> str:
 def get_results_layer_geojson(
     project_id: str,
     layer_key: str,
-    # db est injecté par dépendance dans ton app — adapter selon ton pattern
-    # ex: db: AsyncConnection = Depends(get_db)
+    run_id: str | None = None,
 ) -> JSONResponse:
     """
     Retourne un FeatureCollection GeoJSON (EPSG:4326) pour la couche
@@ -98,14 +106,34 @@ def get_results_layer_geojson(
     partie utile à l'écran (ex. polygone départemental réduit au buffer d'étude).
     Si le projet n'a pas d'AOI liée, les géométries brutes sont conservées.
 
-    Exemple : GET /api/projects/abc123/geojson/results/zone_vegetation
+    Exemple : GET /api/projects/abc123/geojson/results/cesbio?run_id=…
     """
+    if layer_key in NATIONAL_MAP_LAYER_KEYS:
+        try:
+            with engine.begin() as conn:
+                cfg = load_filter_map_config(conn, project_id, run_id)
+                if layer_key == "cesbio":
+                    fc = get_cesbio_aoi_geojson(conn, project_id, cfg.cesbio_libelles)
+                elif layer_key == "fauna":
+                    fc = get_fauna_aoi_geojson(conn, project_id, cfg.fauna_criteria)
+                else:
+                    fc = get_fauna_buffer_aoi_geojson(conn, project_id, cfg.fauna_criteria)
+        except Exception as exc:
+            logger.exception(
+                "Erreur GeoJSON couche nationale %s projet %s", layer_key, project_id
+            )
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse(
+            content=fc,
+            headers={"Cache-Control": "private, max-age=300"},
+        )
+
     table = LAYER_TABLE_MAP.get(layer_key)
     if not table:
         raise HTTPException(
             status_code=404,
             detail=f"Couche inconnue : '{layer_key}'. "
-                   f"Valeurs acceptées : {list(LAYER_TABLE_MAP.keys())}",
+                   f"Valeurs acceptées : {sorted(NATIONAL_MAP_LAYER_KEYS | set(LAYER_TABLE_MAP.keys()))}",
         )
 
     select_cols = _build_select_cols(layer_key)

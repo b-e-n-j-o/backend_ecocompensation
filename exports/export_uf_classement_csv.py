@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from exports.classement_export_attrs import build_parcelle_export_row
 from exports.export_classement_csv import CSV_FIELDNAMES, _csv_cell
-from exports.uf_export_adapter import build_subset_export_inputs
+from exports.qgis_encoding import QGIS_CSV_ENCODING
 
 if TYPE_CHECKING:
     pass
@@ -28,7 +28,7 @@ def export_uf_classement_csv(results_uf: dict, output_path: Path | io.StringIO) 
     from vrai_filtre import FiltreOptions
 
     if isinstance(output_path, Path):
-        file_obj = open(output_path, "w", newline="", encoding="utf-8-sig")
+        file_obj = open(output_path, "w", newline="", encoding=QGIS_CSV_ENCODING)
     else:
         file_obj = output_path
 

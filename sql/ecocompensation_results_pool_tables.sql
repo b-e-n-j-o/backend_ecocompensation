@@ -5,7 +5,8 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool_runs (
     options_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     total_count integer NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
-    result_summary jsonb NOT NULL DEFAULT '{}'::jsonb
+    result_summary jsonb NOT NULL DEFAULT '{}'::jsonb,
+    profiling_progress jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_pool_runs_project_created
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_pool (
     surface_ha double precision NULL,
     miller double precision NULL,
     distance_km double precision NULL,
+    dist_hydro_m double precision NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, idu)
 );

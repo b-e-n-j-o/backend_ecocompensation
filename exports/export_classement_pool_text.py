@@ -250,16 +250,40 @@ def format_arrachage_vignes_details(val: dict[str, Any]) -> str:
 
 def format_personnes_morales_details(val: dict[str, Any]) -> str:
     v = _as_dict(val)
+    parts: list[str] = []
     hit = v.get("intersects_pm_database") is True
     if not hit:
-        return "Non répertoriée en base personnes morales (parcelles_personnes_morales)."
-    parts = ["Répertoriée en base personnes morales."]
-    if v.get("siren"):
-        parts.append(f"SIREN: {v.get('siren')}")
-    if v.get("denomination"):
-        parts.append(str(v.get("denomination")))
-    if v.get("forme_juridique"):
-        parts.append(f"Forme juridique: {v.get('forme_juridique')}")
+        parts.append("Non répertoriée en base personnes morales (parcelles_personnes_morales).")
+    else:
+        parts.append("Répertoriée en base personnes morales.")
+        if v.get("siren"):
+            parts.append(f"SIREN: {v.get('siren')}")
+        if v.get("denomination"):
+            parts.append(str(v.get("denomination")))
+        if v.get("forme_juridique"):
+            parts.append(f"Forme juridique: {v.get('forme_juridique')}")
+    if v.get("compensation_deja_realisee") is True:
+        parts.append(
+            "Propriétaire ayant déjà réalisé de la compensation sur d'autres fonciers "
+            "(parcelles_prospects_filtered)."
+        )
+        if v.get("parcelle_deja_en_mc") is True:
+            parts.append("Cette parcelle est déjà concernée par une mesure de compensation.")
+        elif v.get("parcelle_deja_en_mc") is False:
+            parts.append("Cette parcelle n'est pas encore en mesure de compensation.")
+        nb_mc = v.get("nb_mc_distinctes")
+        if isinstance(nb_mc, int):
+            parts.append(f"Mesures compensatoires distinctes (propriétaire): {nb_mc}")
+        nb = v.get("nb_parcelles_deja_en_mc")
+        if isinstance(nb, int):
+            parts.append(f"Parcelles du propriétaire déjà en MC: {nb}")
+        surf = v.get("surface_deja_en_mc_m2")
+        if isinstance(surf, (int, float)):
+            parts.append(
+                f"Surface totale concernée par les MC (propriétaire): {float(surf):,.0f} m²".replace(",", " ")
+            )
+    elif not parts:
+        parts.append("Hors liste prospects compensation.")
     return "\n".join(parts)
 
 
@@ -334,7 +358,9 @@ def pool_metrics_json_compact(mmap: dict[str, dict[str, Any]]) -> str:
 def shp_trunc(text: str, max_len: int = 254) -> str:
     if not text:
         return ""
-    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    import unicodedata
+
+    t = unicodedata.normalize("NFC", str(text).replace("\r\n", "\n").replace("\r", "\n"))
     if len(t) <= max_len:
         return t
     return t[: max_len - 20] + "\n…(tronqué, voir CSV)"

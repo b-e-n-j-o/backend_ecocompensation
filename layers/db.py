@@ -46,6 +46,7 @@ def _build_engine(
             "prepare_threshold":   None,
         },
         pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
 
@@ -54,7 +55,7 @@ def get_engine() -> Engine:
     """Engine vers la base principale (ecocompensation + résultats)."""
     return _build_engine(
         host     = os.environ["SUPABASE_HOST"],
-        port     = os.getenv("SUPABASE_PORT", "6543"),
+        port     = os.getenv("SUPABASE_PORT", "5432"),
         db       = os.getenv("SUPABASE_DB", "postgres"),
         user     = os.environ["SUPABASE_USER"],
         password = os.environ["SUPABASE_PASSWORD"],
@@ -69,7 +70,7 @@ def get_engine_ppm() -> Engine:
     principales (même base).
     """
     host     = os.getenv("SUPABASE_PPM_HOST")     or os.environ["SUPABASE_HOST"]
-    port     = os.getenv("SUPABASE_PPM_PORT")     or os.getenv("SUPABASE_PORT", "6543")
+    port     = os.getenv("SUPABASE_PPM_PORT")     or os.getenv("SUPABASE_PORT", "5432")
     db       = os.getenv("SUPABASE_PPM_DB")       or os.getenv("SUPABASE_DB", "postgres")
     user     = os.getenv("SUPABASE_PPM_USER")     or os.environ["SUPABASE_USER"]
     password = os.getenv("SUPABASE_PPM_PASSWORD") or os.environ["SUPABASE_PASSWORD"]

@@ -68,6 +68,13 @@ def _load_parcelles_classement(project_id: str, run_id: str | None) -> tuple:
         pool_run_id = last_results.get("pool_run_id")
     if not parcelles:
         raise HTTPException(400, "Aucune parcelle")
+    with engine.begin() as conn:
+        pool_service.ensure_tables(conn)
+        parcelles = pool_service.filter_parcelles_excluding_project_indesirables(
+            conn, project_id, parcelles
+        )
+    if not parcelles:
+        raise HTTPException(400, "Aucune parcelle dans le classement (toutes sont indésirables).")
     options = _to_filtre_options_from_dict(last_filter_dict or {})
     return parcelles, options, pool_run_id, final_radius_km, aoi_id, proj
 

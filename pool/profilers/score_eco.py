@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
+
 from sqlalchemy import text
 
 from .base import BasePoolProfiler
@@ -14,49 +14,12 @@ ECO_MAX = 6
 
 class ScoreEcoProfiler(BasePoolProfiler):
     """
-    Score écologique (0..6), uniquement à partir de :
-    - la distance parcelle ↔ projet (``parcelles_pool.distance_km``) : même barème qu’avant (0..3) ;
-    - la métrique ``especes_faune`` déjà calculée : intersection, puis distance à l’observation la plus proche
-      par rapport au buffer du filtre (pas de rôle de l’adjacence entre parcelles).
-
-    Barème espèces (0..3) :
-    - 3 : intersection avec une observation ;
-    - 2 : pas d’intersection et observation la plus proche à ≤ buffer_max_m / 2 ;
-    - 1 : au-delà de la demi-buffer mais ≤ buffer_max_m ;
-    - 0 : au-delà du buffer ou pas d’observation / pas de buffer dans le filtre.
-
-    Nécessite ``EspecesProfiler`` en amont lorsque le filtre définit des critères faune ; sinon la partie espèces vaut 0.
+    Score écologique (0..6) :
+    - distance parcelle ↔ projet (``parcelles_pool.distance_km``) : 0..3 ;
+    - espèces faune : 0..3 depuis ``especes_faune`` (legacy) ou ``filter_enrich.fauna_distances`` (filter_v2).
     """
 
     metric_key = "score_eco"
-
-    @staticmethod
-    def _mem_logging_enabled() -> bool:
-        raw = str(os.getenv("POOL_PROFILE_MEM", "")).strip().lower()
-        return raw in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _mem_mb() -> float | None:
-        try:
-            import psutil  # lazy import pour ne rien imposer si non utilisé
-
-            return round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 2)
-        except Exception:
-            return None
-
-    def _mem_checkpoint(self, label: str) -> None:
-        if not self._mem_logging_enabled():
-            return
-        mb = self._mem_mb()
-        if mb is None:
-            log.info("[score_eco] %s | RAM: n/a", label)
-            return
-        log.info("[score_eco] %s | RAM RSS: %.2f MB", label, mb)
-
-    def _step_log(self, step: str, start_ts: float, extra: str = "") -> None:
-        elapsed = time.perf_counter() - start_ts
-        suffix = f" | {extra}" if extra else ""
-        log.info("[score_eco] STEP %s | duration_s=%.3f%s", step, elapsed, suffix)
 
     def _filter_options(self, conn, project_id: str, run_id: str) -> dict:
         row = conn.execute(
@@ -76,23 +39,26 @@ class ScoreEcoProfiler(BasePoolProfiler):
         return opts if isinstance(opts, dict) else {}
 
     @staticmethod
-    def _has_faune_criteria(opts: dict) -> bool:
-        crit = opts.get("faune_criteria")
+    def _fauna_criteria(opts: dict) -> list[dict]:
+        crit = opts.get("fauna_criteria")
         if not isinstance(crit, list):
-            return False
+            return []
+        out: list[dict] = []
         for c in crit:
             if not isinstance(c, dict):
                 continue
-            if str(c.get("tax_nom_val", "") or "").strip():
-                return True
-        return False
+            species = str(c.get("species") or c.get("tax_nom_val") or "").strip()
+            if not species:
+                continue
+            try:
+                dist_m = float(c.get("dist_m") or 0)
+            except (TypeError, ValueError):
+                dist_m = 0.0
+            out.append({"species": species, "dist_m": dist_m})
+        return out
 
     @staticmethod
     def _species_points_from_faune(j: dict) -> tuple[int, str, dict]:
-        """
-        Retourne (points, reason, extra) à partir du JSON ``especes_faune`` uniquement
-        (aucune requête spatiale ici).
-        """
         if j.get("intersects_any") is True:
             return 3, "intersection", {}
 
@@ -144,11 +110,71 @@ class ScoreEcoProfiler(BasePoolProfiler):
             return 1, "within_buffer", extra
         return 0, "beyond_buffer", extra
 
+    @staticmethod
+    def _species_points_from_filter_enrich(
+        fauna_distances: dict,
+        criteria: list[dict],
+    ) -> tuple[int, str, dict]:
+        if not criteria:
+            return 0, "no_faune_criteria", {}
+
+        best_points = 0
+        best_reason = "no_observation"
+        best_extra: dict = {}
+        best_species: str | None = None
+        best_dist: float | None = None
+        best_buffer: float | None = None
+
+        for crit in criteria:
+            species = crit["species"]
+            try:
+                buffer_m = float(crit.get("dist_m") or 0)
+            except (TypeError, ValueError):
+                buffer_m = 0.0
+
+            raw = fauna_distances.get(species)
+            if raw is None:
+                continue
+            try:
+                dist_m = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if dist_m < 0:
+                continue
+
+            if dist_m <= 0:
+                pts, reason = 3, "intersection"
+            elif buffer_m <= 0:
+                pts, reason = 0, "no_buffer_in_filter"
+            elif dist_m <= buffer_m / 2.0:
+                pts, reason = 2, "within_half_buffer"
+            elif dist_m <= buffer_m:
+                pts, reason = 1, "within_buffer"
+            else:
+                pts, reason = 0, "beyond_buffer"
+
+            if pts > best_points or (pts == best_points and (best_dist is None or dist_m < best_dist)):
+                best_points = pts
+                best_reason = reason
+                best_species = species
+                best_dist = dist_m
+                best_buffer = buffer_m if buffer_m > 0 else None
+                best_extra = {
+                    "nearest_observation_distance_m": round(dist_m, 2),
+                    "nearest_species": species,
+                    "buffer_radius_max_m": buffer_m if buffer_m > 0 else None,
+                    "buffer_half_m": buffer_m / 2.0 if buffer_m > 0 else None,
+                }
+
+        if best_species is None:
+            return 0, "no_observation", {}
+        return best_points, best_reason, best_extra
+
     def compute_for_run(self, conn, project_id: str, run_id: str) -> dict[str, dict]:
         t0 = time.perf_counter()
-        self._mem_checkpoint("start")
         opts = self._filter_options(conn, project_id, run_id)
-        has_faune = self._has_faune_criteria(opts)
+        fauna_criteria = self._fauna_criteria(opts)
+        has_faune = len(fauna_criteria) > 0
 
         base_rows = conn.execute(
             text(
@@ -166,42 +192,44 @@ class ScoreEcoProfiler(BasePoolProfiler):
             ),
             {"project_id": project_id, "run_id": run_id},
         ).mappings().all()
-        self._mem_checkpoint(f"after base_rows ({len(base_rows)} rows)")
 
-        fauna_by_idu: dict[str, dict] = {}
+        fauna_legacy_by_idu: dict[str, dict] = {}
+        filter_enrich_by_idu: dict[str, dict] = {}
+
         if has_faune:
-            ts_species = time.perf_counter()
-            species_metric_rows = conn.execute(
+            metric_rows = conn.execute(
                 text(
                     """
-                    SELECT idu, metric_value_jsonb
+                    SELECT idu, metric_key, metric_value_jsonb
                     FROM ecocompensation_results.parcelles_pool_metrics
                     WHERE project_id = CAST(:project_id AS uuid)
                       AND run_id = CAST(:run_id AS uuid)
-                      AND metric_key = 'especes_faune'
+                      AND metric_key IN ('especes_faune', 'filter_enrich')
                     """
                 ),
                 {"project_id": project_id, "run_id": run_id},
             ).mappings().all()
-            for r in species_metric_rows:
+
+            for r in metric_rows:
                 idu = str(r["idu"])
                 j = r.get("metric_value_jsonb")
-                if isinstance(j, dict):
-                    fauna_by_idu[idu] = j
-            self._step_log(
-                "species_metric_read",
-                ts_species,
-                f"rows={len(species_metric_rows)} idu_with_payload={len(fauna_by_idu)}",
-            )
-            if not species_metric_rows:
-                raise RuntimeError(
-                    "score_eco requires existing 'especes_faune' metrics when faune criteria are set. "
-                    "Run EspecesProfiler before ScoreEcoProfiler."
+                if not isinstance(j, dict):
+                    continue
+                key = str(r.get("metric_key") or "")
+                if key == "especes_faune":
+                    fauna_legacy_by_idu[idu] = j
+                elif key == "filter_enrich":
+                    filter_enrich_by_idu[idu] = j
+
+            if not fauna_legacy_by_idu and not filter_enrich_by_idu:
+                log.warning(
+                    "score_eco: faune criteria set but no especes_faune nor filter_enrich metrics "
+                    "(project_id=%s run_id=%s)",
+                    project_id,
+                    run_id,
                 )
-            self._mem_checkpoint(f"after fauna metrics ({len(fauna_by_idu)} idu)")
 
         payload: dict[str, dict] = {}
-        ts_payload = time.perf_counter()
         for r in base_rows:
             idu = str(r["idu"])
             distance_km = float(r["distance_km"] or 0.0)
@@ -223,9 +251,17 @@ class ScoreEcoProfiler(BasePoolProfiler):
                 species_points = 0
                 species_reason = "no_faune_criteria"
                 species_extra: dict = {}
+            elif idu in fauna_legacy_by_idu:
+                species_points, species_reason, species_extra = self._species_points_from_faune(
+                    fauna_legacy_by_idu[idu]
+                )
             else:
-                j = fauna_by_idu.get(idu) or {}
-                species_points, species_reason, species_extra = self._species_points_from_faune(j)
+                enrich = filter_enrich_by_idu.get(idu) or {}
+                fd = enrich.get("fauna_distances") if isinstance(enrich.get("fauna_distances"), dict) else {}
+                species_points, species_reason, species_extra = self._species_points_from_filter_enrich(
+                    fd,
+                    fauna_criteria,
+                )
 
             total_score = int(species_points + distance_points)
             payload[idu] = {
@@ -244,7 +280,12 @@ class ScoreEcoProfiler(BasePoolProfiler):
                     },
                 },
             }
-        self._step_log("payload_build", ts_payload, f"idu={len(payload)}")
-        self._mem_checkpoint(f"end payload ({len(payload)} idu)")
-        self._step_log("compute_total", t0, f"idu={len(payload)}")
+
+        log.info(
+            "[score_eco] compute_for_run project_id=%s run_id=%s idu=%d duration_s=%.2f",
+            project_id,
+            run_id,
+            len(payload),
+            time.perf_counter() - t0,
+        )
         return payload

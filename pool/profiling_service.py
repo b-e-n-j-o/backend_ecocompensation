@@ -6,33 +6,16 @@ import time
 from sqlalchemy import text
 
 from pool import pool_service
-from pool.profilers.arrachage_vignes import ArrachageVignesProfiler
-from pool.profilers.durete_fonciere import DureteFonciereProfiler
-from pool.profilers.especes import EspecesProfiler
-from pool.profilers.score_eco import ScoreEcoProfiler
-from pool.profilers.composite_score_v1 import CompositeScoreV1Profiler
-from pool.profilers.vegetation_hybride import VegetationHybrideProfiler
-from pool.profilers.zone_humide import ZoneHumideProfiler
 from pool.profilers.personnes_morales import PersonnesMoralesProfiler
+from pool.profilers.score_eco import ScoreEcoProfiler
 
 logger = logging.getLogger(__name__)
 
-
-# CosiaProfiler retiré du run (couche geo.cosia souvent trop lente). Réactiver :
-#   from pool.profilers.cosia import CosiaProfiler
-#   … puis CosiaProfiler(), typiquement après VegetationHybrideProfiler().
-# CarhabProfiler mis en standby pour accélérer le run global. Réactiver :
-#   from pool.profilers.carhab import CarhabProfiler
-#   … puis CarhabProfiler() dans PROFILERS.
+# filter_v2 : profilage léger sur tout le pool (PM + prospects + score éco).
+# Profilers lourds (zonage hybride, CARHAB, dureté…) retirés — réactiver au besoin pour runs legacy.
 PROFILERS = [
-    EspecesProfiler(),
     PersonnesMoralesProfiler(),
-    DureteFonciereProfiler(),
-    VegetationHybrideProfiler(),
-    ArrachageVignesProfiler(),
-    ZoneHumideProfiler(),  # placeholder (retourne vide)
     ScoreEcoProfiler(),
-    CompositeScoreV1Profiler(),
 ]
 
 
@@ -61,7 +44,6 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
         len(PROFILERS),
         idu_total if idu_total is not None else "unknown",
     )
-    # Requêtes spatiales (COSIA, CARHAB, hybride…) : dépassent souvent le statement_timeout par défaut Supabase.
     try:
         conn.execute(text("SET LOCAL statement_timeout = '15min'"))
     except Exception:
@@ -79,17 +61,7 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
             project_id,
             run_id,
         )
-        if profiler.metric_key == "durete_fonciere":
-            logger.info(
-                "POOL PHASE [%d/%d] INFO | metric=durete_fonciere mode=owner_grouped_by_siren "
-                "(1 calcul/SIREN puis réplication sur les IDU de la même PM). "
-                "Env: POOL_DURETE_PROGRESS=0 (couper logs fins), POOL_DURETE_VERBOSE=1 (logs pipeline métier).",
-                idx,
-                len(PROFILERS),
-            )
         try:
-            # Isole chaque profiler dans un SAVEPOINT:
-            # en cas d'erreur SQL (timeout, etc.), la transaction globale reste saine.
             with conn.begin_nested():
                 payload_by_idu = profiler.compute_for_run(conn, project_id, run_id)
                 upserts = 0
@@ -140,10 +112,7 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
 
 
 def compute_parcel_score_for_run(conn, project_id: str, run_id: str) -> int:
-    """
-    Recalcule uniquement la métrique `score_eco` pour un run.
-    Retourne le nombre de parcelles upsertées.
-    """
+    """Recalcule uniquement la métrique `score_eco` pour un run."""
     pool_service.ensure_tables(conn)
     profiler = ScoreEcoProfiler()
     payload_by_idu = profiler.compute_for_run(conn, project_id, run_id)

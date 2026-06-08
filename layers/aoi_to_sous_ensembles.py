@@ -20,7 +20,6 @@ individuelles y sont déjà stockées.
 from __future__ import annotations
 
 import os
-import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -269,7 +268,7 @@ def run(
             nonlocal total_inserted
             if not insert_buffer:
                 return
-            conn.execute(text("""
+            insert_sql = text("""
                 INSERT INTO ecocompensation_results.sous_ensembles
                     (project_id, uf_id, subset_id, k, idus,
                      surface_ha, geom_2154, miller, dist_centre_m,
@@ -279,7 +278,10 @@ def run(
                      :surface_ha, ST_GeomFromText(:geom_wkt, 2154),
                      :miller, :dist_centre_m,
                      :denomination, :siren)
-            """), insert_buffer)
+            """)
+            # execute() par ligne — évite executemany / pipeline psycopg3 (incompatible pgBouncer :6543)
+            for row in insert_buffer:
+                conn.execute(insert_sql, row)
             total_inserted += len(insert_buffer)
             insert_buffer.clear()
 
@@ -334,15 +336,8 @@ def run(
                 flush()
 
             if n_uf_done % 50 == 0 or n_uf_done == total_uf:
-                elapsed = time.perf_counter() - t0
-                rate    = n_uf_done / elapsed if elapsed > 0 else 1
-                eta     = (total_uf - n_uf_done) / rate
-                sys.stdout.write(
-                    f"\r   [{n_uf_done:>4}/{total_uf}]  "
-                    f"insérés: {total_inserted + len(insert_buffer):>6,}  "
-                    f"ETA: ~{eta:.0f}s    "
-                )
-                sys.stdout.flush()
+                n_ins = total_inserted + len(insert_buffer)
+                log(f"TILE_PROGRESS:{n_uf_done}/{total_uf}:{n_ins}")
 
         flush()
 

@@ -10,17 +10,19 @@ avec les parcelles de ecocompensation.parcelles.
 PROBLÈME RÉSOLU : Sur une AOI de 20km de rayon (~250k parcelles à insérer),
 le ST_Intersects en une seule transaction dépasse le statement_timeout de Supabase.
 
-SOLUTION : Tiling spatial en Python.
+SOLUTION : Tiling spatial adaptatif en Python.
   1. On récupère le bbox de l'AOI.
-  2. On le découpe en tuiles de TILE_SIZE_M mètres (défaut 5000m = 5km).
+  2. Taille de tuile adaptée au contexte :
+       - sans pré-filtre surface : tuiles 5 km (évite les timeouts sur ~250k parcelles)
+       - avec pré-filtre surface  : tuiles adaptatives 5–10 km (plafond 10×10 km)
   3. Pour chaque tuile, on INSERT les parcelles qui intersectent (tuile ∩ AOI).
-  4. Chaque INSERT porte sur ~quelques milliers de parcelles → reste sous le timeout.
-  5. Déduplication finale par IDU pour les parcelles à cheval sur plusieurs tuiles.
+  4. Déduplication inter-tuiles par NOT EXISTS sur (project_id, idu).
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Iterator
@@ -34,8 +36,10 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-TILE_SIZE_M = 5_000        # 5 km par tuile → ~quelques milliers de parcelles/tuile
-STATEMENT_TIMEOUT = "90s"  # Timeout par requête SQL (doit rester < timeout Supabase)
+MIN_TILE_SIZE_M = 5_000     # 5 km — tuile minimale (AOI denses sans pré-filtre)
+MAX_TILE_SIZE_M = 10_000    # 10 km — tuile maximale (filter pipeline : pas plus grand)
+MAX_TILES_FILTERED = 8      # cible d'allers-retours avec pré-filtre surface (si AOI compacte)
+STATEMENT_TIMEOUT = "90s"   # Timeout par requête SQL (doit rester < timeout Supabase)
 
 
 # ── DDL ───────────────────────────────────────────────────────────────────────
@@ -114,25 +118,71 @@ def iter_tiles(
 
 
 def count_tiles(xmin, ymin, xmax, ymax, tile_size) -> int:
-    import math
     nx = math.ceil((xmax - xmin) / tile_size)
     ny = math.ceil((ymax - ymin) / tile_size)
     return nx * ny
 
 
+def compute_tile_size(
+    xmin: float,
+    ymin: float,
+    xmax: float,
+    ymax: float,
+    *,
+    min_area_ha: float,
+) -> float:
+    """
+    Choisit la taille de tuile selon le contexte.
+
+    Sans pré-filtre surface : tuiles 5 km (comportement historique, évite timeout).
+    Avec pré-filtre surface  : tuiles adaptatives entre 5 et 10 km (jamais plus de 10×10 km).
+    """
+    if min_area_ha <= 0:
+        return MIN_TILE_SIZE_M
+
+    span = max(xmax - xmin, ymax - ymin)
+    target_dim = math.ceil(math.sqrt(MAX_TILES_FILTERED))
+    raw_size = math.ceil(span / target_dim)
+    tile_size = max(
+        MIN_TILE_SIZE_M,
+        min(
+            MAX_TILE_SIZE_M,
+            math.ceil(raw_size / MIN_TILE_SIZE_M) * MIN_TILE_SIZE_M,
+        ),
+    )
+
+    while (
+        count_tiles(xmin, ymin, xmax, ymax, tile_size) > MAX_TILES_FILTERED
+        and tile_size < MAX_TILE_SIZE_M
+    ):
+        tile_size = min(tile_size + MIN_TILE_SIZE_M, MAX_TILE_SIZE_M)
+
+    return tile_size
+
+
 # ── Core ──────────────────────────────────────────────────────────────────────
 
-def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
+def run(
+    engine,
+    project_id: str,
+    aoi_id: str,
+    cb=None,
+    *,
+    min_area_ha: float = 7.0,
+) -> int:
     """
     Construit ecocompensation_results.parcelles pour le projet donné via tiling.
 
-    :param engine:     Engine SQLAlchemy.
-    :param project_id: UUID du projet.
-    :param aoi_id:     UUID de l'AOI.
-    :param cb:         Callback de log optionnel cb(str).
-    :return:           Nombre de parcelles insérées (après déduplication).
+    :param engine:      Engine SQLAlchemy.
+    :param project_id:  UUID du projet.
+    :param aoi_id:      UUID de l'AOI.
+    :param cb:          Callback de log optionnel cb(str).
+    :param min_area_ha: Surface minimale (ha) appliquée au tiling — évite d'écrire
+                        des micro-parcelles immédiatement éliminées en post-filtre.
+    :return:            Nombre de parcelles insérées (après déduplication).
     """
     log = cb or (lambda msg: None)
+    min_area_m2 = min_area_ha * 10_000
 
     # ── 1. Récupérer le bbox de l'AOI ────────────────────────────────────────
     with engine.connect() as conn:
@@ -146,10 +196,17 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     area_ha = area_m2 / 10_000
     width_km = (xmax - xmin) / 1000
     height_km = (ymax - ymin) / 1000
-    n_tiles = count_tiles(xmin, ymin, xmax, ymax, TILE_SIZE_M)
+    tile_size_m = compute_tile_size(xmin, ymin, xmax, ymax, min_area_ha=min_area_ha)
+    n_tiles = count_tiles(xmin, ymin, xmax, ymax, tile_size_m)
+    tile_mode = "adaptatif" if min_area_ha > 0 else "fixe 5km"
 
     log(f"🗺️  AOI id={aoi_id} — surface ~{area_ha:,.0f} ha")
-    log(f"📐 Bbox : {width_km:.1f} km × {height_km:.1f} km → {n_tiles} tuiles de {TILE_SIZE_M//1000}km")
+    log(
+        f"📐 Bbox : {width_km:.1f} km × {height_km:.1f} km "
+        f"→ {n_tiles} tuiles de {tile_size_m // 1000}km ({tile_mode})"
+    )
+    if min_area_ha > 0:
+        log(f"📏 Filtre surface au tiling : ≥ {min_area_ha} ha")
 
     # ── 2. DDL ────────────────────────────────────────────────────────────────
     with engine.begin() as conn:
@@ -179,7 +236,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     tile_errors = 0
     t_global = time.perf_counter()
 
-    tiles = list(iter_tiles(xmin, ymin, xmax, ymax, TILE_SIZE_M))
+    tiles = list(iter_tiles(xmin, ymin, xmax, ymax, tile_size_m))
 
     for i, (tx0, ty0, tx1, ty1) in enumerate(tiles, 1):
         t_tile = time.perf_counter()
@@ -225,12 +282,14 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                             WHERE r.project_id = :pid
                               AND r.idu = p.idu
                         )
+                          AND ST_Area(p.geom_2154) >= :min_area_m2
                     """),
                     {
                         "aid": aoi_id,
                         "pid": project_id,
                         "tx0": tx0, "ty0": ty0,
                         "tx1": tx1, "ty1": ty1,
+                        "min_area_m2": min_area_m2,
                     },
                 )
                 n = result.rowcount or 0

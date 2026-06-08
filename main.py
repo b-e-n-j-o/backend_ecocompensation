@@ -53,9 +53,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 # ── Modules métier ────────────────────────────────────────────────────────────
-from orchestrator import run_orchestration
+from orchestrator import run_orchestration, fetch_project_two_phases
+from filter_orchestrator import FULL_PIPELINE_PHASES, run_filter_orchestration
+from layers.filter_pipeline import FaunaCriterion, FilterConfig
 from layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
+from layers.enrich_candidates import ensure_columns
+from layers.enrich_uf import ensure_columns as ensure_uf_columns
+from layers.uf_profiling import build_uf_pool_with_profiling
 from routers.foncier_router import router as foncier_router
 from routers.pool_router import router as pool_router
 from routers.results_geojson_router import router as results_geojson_router
@@ -63,6 +68,7 @@ from routers.durete_router import router as durete_router
 from routers.cadastre_bbox_router import router as cadastre_bbox_router
 from exports.router_exports import router as exports_router
 from routers.rapport_router import router as rapport_router
+from routers.fauna_router import router as fauna_router
 from pool import pool_service
 from pool.pool_service import persist_parcelles_pool_run
 
@@ -96,7 +102,6 @@ def _parse_cors_origins() -> list[str]:
     default_origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://ecocompensation-frontend.vercel.app/create-aoi",
         "https://ecocompensation-frontend.vercel.app",
         "https://ecocompensation-frontend-3nm5hbhou-matinducoins-projects.vercel.app",
     ]
@@ -154,6 +159,9 @@ ws_manager = ConnectionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    eng = get_engine()
+    ensure_columns(eng)
+    ensure_uf_columns(eng)
     yield
 
 
@@ -180,6 +188,7 @@ app.include_router(durete_router)
 app.include_router(cadastre_bbox_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
+app.include_router(fauna_router, prefix="/api/fauna", tags=["fauna"])
 
 # Monte le backend Identité Foncière depuis le package local backend/identite_fonciere.
 # Le préfixe dédié évite de surcharger ce main.py avec ses routes métiers.
@@ -285,7 +294,7 @@ class FromParcelleRequest(BaseModel):
     section:    str   = Field(..., min_length=1, max_length=4)
     numero:     str   = Field(..., min_length=1, max_length=10)
     name:       str   = Field(..., min_length=1)
-    buffer_km:  float = Field(default=5.0, ge=0.0, le=10.0)
+    buffer_km:  float = Field(default=5.0, ge=0.0, le=20.0)
 
 
 class ParcelleRefDTO(BaseModel):
@@ -297,7 +306,7 @@ class ParcelleRefDTO(BaseModel):
 class FromParcellesRequest(BaseModel):
     parcelles: list[ParcelleRefDTO] = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
-    buffer_km: float = Field(default=5.0, ge=0.0, le=10.0)
+    buffer_km: float = Field(default=5.0, ge=0.0, le=20.0)
 
 
 class FetchRequest(BaseModel):
@@ -325,6 +334,19 @@ class FetchRequest(BaseModel):
         ge=1.0,
         description="Surface minimale (ha) d'une unité foncière conservée au pré-filtre.",
     )
+
+
+class FaunaFilterCriterionDTO(BaseModel):
+    species: str = Field(..., min_length=1)
+    dist_m: float = Field(..., ge=0, le=50_000)
+
+
+class FilterPipelineRequest(BaseModel):
+    """POST /api/projects/{id}/filter-pipeline — nouveau pipeline sans staging."""
+    min_area_ha: float = Field(default=7.0, ge=0.1, le=500)
+    miller_thresh: float = Field(default=0.39, ge=0.0, le=1.0)
+    cesbio_libelles: list[str] = Field(default_factory=list)
+    fauna_criteria: list[FaunaFilterCriterionDTO] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────
@@ -886,6 +908,53 @@ def delete_project(project_id: str):
 # ─────────────────────────────────────────────
 
 _running_fetches: set[str] = set()
+_running_filters: set[str] = set()
+
+
+@app.post("/api/projects/{project_id}/filter-pipeline")
+async def start_filter_pipeline(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    body: FilterPipelineRequest,
+):
+    """
+    Lance le pipeline de filtrage écologique (tiling → filtre → enrich).
+    Les parcelles retenues restent dans ecocompensation_results.parcelles.
+    Progression via WS /ws/projects/{id}/fetch-progress.
+    """
+    proj = _get_project(project_id)
+    if proj["status"] in ("fetching", "filtering") or project_id in _running_filters:
+        raise HTTPException(409, "Filtrage déjà en cours")
+    if not body.cesbio_libelles and not body.fauna_criteria:
+        raise HTTPException(400, "Sélectionnez au moins un critère CESBIO ou Faune")
+
+    aoi_id = str(proj["aoi_id"])
+    config = FilterConfig(
+        min_area_ha=body.min_area_ha,
+        miller_thresh=body.miller_thresh,
+        cesbio_libelles=[x.strip() for x in body.cesbio_libelles if x.strip()],
+        fauna_criteria=[
+            FaunaCriterion(species=fc.species.strip(), dist_m=fc.dist_m)
+            for fc in body.fauna_criteria
+            if fc.species.strip()
+        ],
+    )
+    _running_filters.add(project_id)
+
+    async def _run():
+        try:
+            await run_filter_orchestration(
+                engine,
+                project_id,
+                aoi_id,
+                config,
+                lambda d: ws_manager.broadcast(project_id, d),
+            )
+        finally:
+            _running_filters.discard(project_id)
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "project_id": project_id}
 
 
 @app.post("/api/projects/{project_id}/fetch")
@@ -905,17 +974,29 @@ async def start_fetch(
 
     async def _run():
         try:
-            await run_orchestration(
-                engine,
-                project_id,
-                aoi_id,
-                lambda d: ws_manager.broadcast(project_id, d),
-                layer_keys=req.layers,
-                dry_run=req.dry_run,
-                uf_max_parcelles=req.uf_max_parcelles,
-                uf_min_area_ha=req.uf_min_area_ha,
-                fauna_species=req.fauna_species,
-            )
+            if req.layers is None:
+                await fetch_project_two_phases(
+                    engine,
+                    project_id,
+                    aoi_id,
+                    lambda d: ws_manager.broadcast(project_id, d),
+                    dry_run=req.dry_run,
+                    uf_max_parcelles=req.uf_max_parcelles,
+                    uf_min_area_ha=req.uf_min_area_ha,
+                    fauna_species=req.fauna_species,
+                )
+            else:
+                await run_orchestration(
+                    engine,
+                    project_id,
+                    aoi_id,
+                    lambda d: ws_manager.broadcast(project_id, d),
+                    layer_keys=req.layers,
+                    dry_run=req.dry_run,
+                    uf_max_parcelles=req.uf_max_parcelles,
+                    uf_min_area_ha=req.uf_min_area_ha,
+                    fauna_species=req.fauna_species,
+                )
         finally:
             _running_fetches.discard(project_id)
 
@@ -954,6 +1035,65 @@ def sous_ensembles_status(project_id: str):
             {"pid": project_id},
         ).scalar_one()
     return {"has_sous_ensembles": bool(exists)}
+
+
+@app.get("/api/projects/{project_id}/uf-pool")
+def get_uf_pool(
+    project_id: str,
+    cesbio_libelles: list[str] = Query(
+        default=["Forêts de conifères", "Forêts de feuillus"],
+    ),
+    fauna_species: str = Query(default=""),
+    fauna_dist_m: float = Query(default=1000.0, ge=0),
+    miller_thresh: float = Query(default=0.39, ge=0, le=1),
+):
+    """
+    Pool UF pré-filtré depuis les colonnes enrichies (sans spatial join).
+    Format compatible UnitesFoncieresTable.tsx.
+    """
+    proj = _get_project(project_id)
+    aoi_id = str(proj["aoi_id"])
+    cx, cy = _get_aoi_centre(aoi_id)
+
+    species = fauna_species.strip() if fauna_species else ""
+    if not species and proj.get("last_filter"):
+        try:
+            lf = proj["last_filter"]
+            if isinstance(lf, str):
+                lf = json.loads(lf)
+            fauna_list = lf.get("fauna_criteria") or []
+            if fauna_list and isinstance(fauna_list[0], dict):
+                species = str(fauna_list[0].get("tax_nom_val") or fauna_list[0].get("species") or "")
+        except Exception:
+            pass
+
+    libelles = [x.strip() for x in cesbio_libelles if x and str(x).strip()]
+    if not libelles:
+        libelles = ["Forêts de conifères", "Forêts de feuillus"]
+
+    fauna_criteria: list[dict] = []
+    if proj.get("last_filter"):
+        try:
+            lf = proj["last_filter"]
+            if isinstance(lf, str):
+                lf = json.loads(lf)
+            for fc in lf.get("fauna_criteria") or []:
+                if isinstance(fc, dict):
+                    fauna_criteria.append(fc)
+        except Exception:
+            pass
+
+    return build_uf_pool_with_profiling(
+        engine,
+        project_id,
+        cx,
+        cy,
+        cesbio_libelles=libelles,
+        fauna_species=species or None,
+        fauna_dist_m=fauna_dist_m,
+        fauna_criteria=fauna_criteria or None,
+        miller_thresh=miller_thresh,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -1167,21 +1307,17 @@ def get_parcelles_geojson(
         min_s = max_s = rng_s = None
 
     with engine.begin() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT
-                    p.idu,
-                    ST_AsGeoJSON(ST_Transform(p.geom_2154, 4326))::json AS geometry
-                FROM ecocompensation_results.parcelles p
-                WHERE (p.project_id = :pid OR p.aoi_id = :aoi_id_str)
-                  AND p.idu = ANY(:idus)
-            """),
-            {"pid": project_id, "aoi_id_str": aoi_id_str, "idus": idus},
-        ).mappings().all()
+        pool_service.ensure_tables(conn)
+        if pool_run_id:
+            rows = pool_service.get_parcelles_geometries_for_run(
+                conn, project_id, str(pool_run_id)
+            )
+        else:
+            rows = pool_service.get_parcelles_geometries_by_idus(conn, project_id, idus)
 
     features: list[dict] = []
     for r in rows:
-        idu = r["idu"]
+        idu = str(r["idu"])
         rank_norm = round(
             1.0 - ((idu_to_rank.get(idu, max_r) - min_r) / rng),
             4,
@@ -1225,12 +1361,28 @@ def get_uf_subsets_geojson(project_id: str):
         results_uf = json.loads(results_uf)
 
     unites = results_uf.get("unites_foncieres", [])
+    meta_by_subset: dict[str, dict] = {}
     subset_ids: list[str] = []
     for uf in unites:
         for ss in uf.get("sous_ensembles", []) or []:
             sid = ss.get("subset_id")
-            if sid:
-                subset_ids.append(sid)
+            if not sid:
+                continue
+            sid = str(sid)
+            subset_ids.append(sid)
+            score_eco = ss.get("score_eco") if isinstance(ss.get("score_eco"), dict) else {}
+            meta_by_subset[sid] = {
+                "uf_id": uf.get("uf_id"),
+                "uf_rang": uf.get("rang"),
+                "k": ss.get("k"),
+                "surface_ha": ss.get("surface_ha"),
+                "miller": ss.get("miller"),
+                "distance_centre_km": ss.get("distance_centre_km"),
+                "score_eco": score_eco.get("total_score") if score_eco else None,
+                "score_eco_max": score_eco.get("max_score") if score_eco else 6,
+                "veg_libelles": ss.get("veg_libelles") or [],
+                "fauna_distances": ss.get("fauna_distances") or {},
+            }
 
     if not subset_ids:
         raise HTTPException(400, "Aucun sous-ensemble UF dans les résultats")
@@ -1240,28 +1392,52 @@ def get_uf_subsets_geojson(project_id: str):
             text("""
                 SELECT
                     s.subset_id,
+                    s.uf_id,
+                    s.k,
                     s.siren,
                     s.denomination,
+                    ROUND(s.surface_ha::numeric, 2) AS surface_ha,
+                    ROUND(s.miller::numeric, 3) AS miller,
                     ST_AsGeoJSON(ST_Transform(s.geom_2154, 4326))::json AS geometry
                 FROM ecocompensation_results.sous_ensembles s
-                WHERE s.project_id = :pid
-                  AND s.subset_id = ANY(:subset_ids)
+                WHERE s.project_id = CAST(:pid AS uuid)
+                  AND s.subset_id = ANY(CAST(:subset_ids AS text[]))
             """),
             {"pid": project_id, "subset_ids": subset_ids},
         ).mappings().all()
 
-    features = [
-        {
+    features = []
+    for r in rows:
+        sid = str(r["subset_id"])
+        extra = meta_by_subset.get(sid, {})
+        score = extra.get("score_eco")
+        score_max = extra.get("score_eco_max") or 6
+        score_ratio = round(float(score) / float(score_max), 4) if score is not None and score_max else None
+        features.append({
             "type": "Feature",
-            "geometry": dict(r["geometry"]),
+            "geometry": dict(r["geometry"]) if r["geometry"] else None,
             "properties": {
-                "subset_id": r["subset_id"],
+                "subset_id": sid,
+                "uf_id": r.get("uf_id") or extra.get("uf_id"),
+                "uf_rang": extra.get("uf_rang"),
+                "k": r.get("k") if r.get("k") is not None else extra.get("k"),
                 "siren": r.get("siren"),
                 "denomination": r.get("denomination"),
+                "surface_ha": float(r["surface_ha"]) if r.get("surface_ha") is not None else extra.get("surface_ha"),
+                "miller": float(r["miller"]) if r.get("miller") is not None else extra.get("miller"),
+                "distance_centre_km": extra.get("distance_centre_km"),
+                "score_eco": score,
+                "score_eco_max": score_max,
+                "score_ratio": score_ratio,
+                "veg_libelles": extra.get("veg_libelles") or [],
+                "fauna_distances": extra.get("fauna_distances") or {},
             },
-        }
-        for r in rows
-    ]
+        })
+
+    features = [f for f in features if f.get("geometry")]
+
+    if not features:
+        raise HTTPException(400, "Géométries des sous-ensembles introuvables en base")
 
     return {"type": "FeatureCollection", "features": features}
 
@@ -1279,8 +1455,13 @@ async def fetch_progress_ws(project_id: str, websocket: WebSocket):
                                    "layers_status": proj.get("layers_status", {})})
         while True:
             await asyncio.sleep(30)
-            await websocket.send_json({"event": "ping"})
+            try:
+                await websocket.send_json({"event": "ping"})
+            except (WebSocketDisconnect, RuntimeError):
+                break
     except WebSocketDisconnect:
+        pass
+    finally:
         ws_manager.disconnect(project_id, websocket)
 
 
@@ -1301,6 +1482,12 @@ def get_memory():
 @app.get("/api/layers")
 def list_layers():
     return [{"key": l["key"], "label": l["label"], "fast": l["fast"]} for l in LAYER_REGISTRY]
+
+
+@app.get("/api/filter-phases")
+def list_filter_phases():
+    """Phases du nouveau pipeline (remplace la sélection de couches SIG)."""
+    return FULL_PIPELINE_PHASES
 
 
 @app.get("/api/reference/remontee-nappes-classefiab")

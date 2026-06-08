@@ -20,6 +20,7 @@ from sqlalchemy import text
 from db import get_engine
 from pool import pool_service
 from pool.pool_service import get_all_metrics_grouped_by_idu
+from exports.qgis_encoding import QGIS_CSV_ENCODING
 from vrai_filtre import FiltreOptions
 from exports.export_classement_csv import export_classement_csv
 from exports.export_uf_classement_csv import export_uf_classement_csv
@@ -123,6 +124,13 @@ def export_csv(
             last_filter_dict = last_filter if isinstance(last_filter, dict) else {}
         if not parcelles:
             raise HTTPException(400, "Aucune parcelle")
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            parcelles = pool_service.filter_parcelles_excluding_project_indesirables(
+                conn, project_id, parcelles
+            )
+        if not parcelles:
+            raise HTTPException(400, "Aucune parcelle dans le classement (toutes sont indésirables).")
         options = _to_filtre_options_from_dict(last_filter_dict or {})
         metrics_by_idu = None
         if pool_run_id:
@@ -134,7 +142,7 @@ def export_csv(
                     "Export CSV parcelles : lecture métriques pool ignorée (project_id=%s)",
                     project_id,
                 )
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding=QGIS_CSV_ENCODING) as nf:
             csv_path = Path(nf.name)
             export_classement_csv(parcelles, csv_path, metrics_by_idu=metrics_by_idu, options=options)
         background_tasks.add_task(os.remove, str(csv_path))
@@ -153,7 +161,7 @@ def export_csv(
             raise HTTPException(400, "Aucune parcelle indésirable")
         metrics_by_idu = payload.get("by_idu") if isinstance(payload.get("by_idu"), dict) else None
         options = _to_filtre_options_from_dict({})
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding=QGIS_CSV_ENCODING) as nf:
             csv_path = Path(nf.name)
             export_classement_csv(parcelles, csv_path, metrics_by_idu=metrics_by_idu, options=options)
         background_tasks.add_task(os.remove, str(csv_path))
@@ -173,7 +181,7 @@ def export_csv(
     n_ss = sum(len(uf.get("sous_ensembles") or []) for uf in unites)
     if n_ss == 0:
         raise HTTPException(400, "Aucun sous-ensemble UF à exporter")
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding="utf-8-sig") as nf:
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding=QGIS_CSV_ENCODING) as nf:
         csv_path = Path(nf.name)
         export_uf_classement_csv(last_results_uf, csv_path)
     background_tasks.add_task(os.remove, str(csv_path))
@@ -230,6 +238,13 @@ def export_shp(
             pool_run_id = last_results.get("pool_run_id")
         if not parcelles:
             raise HTTPException(400, "Aucune parcelle")
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            parcelles = pool_service.filter_parcelles_excluding_project_indesirables(
+                conn, project_id, parcelles
+            )
+        if not parcelles:
+            raise HTTPException(400, "Aucune parcelle dans le classement (toutes sont indésirables).")
         options = _to_filtre_options_from_dict(last_filter_dict or {})
         metrics_by_idu = None
         if pool_run_id:

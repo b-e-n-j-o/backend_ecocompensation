@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 
 from layers.aoi_to_unites_foncieres       import run as _run_unites_foncieres
 from layers.aoi_to_sous_ensembles         import run as _run_sous_ensembles
+from layers.enrich_uf                     import run as _run_enrich_uf
 from layers.aoi_to_parcelles_v2           import run as _run_parcelles
+from layers.enrich_candidates             import run as _run_enrich_candidates
 from layers.aoi_to_geomce                 import run as _run_geomce
 from layers.aoi_to_zone_de_vegetation     import run as _run_zone_de_vegetation
-from layers.aoi_to_cesbio                import run as _run_cesbio
-from layers.aoi_to_bd_topo_et_cesbio     import run as _run_bd_topo_et_cesbio
 from layers.aoi_to_carhab              import run as _run_carhab
 from layers.aoi_to_zone_humide            import run as _run_zone_humide
 from layers.aoi_to_remontee_de_nappes     import run as _run_remontee_de_nappes
@@ -45,7 +45,6 @@ from layers.aoi_to_reserves_naturelles_et_biologiques import (
 )
 from layers.aoi_to_sites_classes            import run as _run_sites_classes
 from layers.aoi_to_arrachage_vignes       import run as _run_arrachage_vignes
-from layers.aoi_to_fauna                  import run as _run_fauna
 
 
 # ── LayerResult ──────────────────────────────────────────────────────────────
@@ -92,19 +91,22 @@ def _make(key, table, fn):
     return wrapped
 
 
-def _make_fauna(key: str, table: str, fn):
-    """
-    Wrapper dédié aux couches faune : permet d'injecter une liste de taxons
-    au moment du fetch (optionnel).
-    Signature attendue : (..., cb=None, *, species_list=None) -> LayerResult
-    """
-
-    def wrapped(engine, project_id, aoi_id, cb=None, *, species_list: list[str] | None = None):
+def _make_enrich(key: str, table: str, fn):
+    """Wrapper enrich_candidates : passe species_list depuis l'orchestrateur."""
+    def wrapped(engine, project_id, aoi_id, cb=None, *, species_list=None):
         def inner(e, p, a, c):
-            return fn(e, p, a, c, species_list=species_list)  # type: ignore[call-arg]
-
+            return fn(e, p, a, c, species_list=species_list)
         return _wrap(key, table, inner, engine, project_id, aoi_id, cb)
+    wrapped.__name__ = f"layer_{key}"
+    return wrapped
 
+
+def _make_enrich_uf(key: str, table: str, fn):
+    """Wrapper enrich_uf : passe species_list depuis l'orchestrateur."""
+    def wrapped(engine, project_id, aoi_id, cb=None, *, species_list=None):
+        def inner(e, p, a, c):
+            return fn(e, p, a, c, species_list=species_list)
+        return _wrap(key, table, inner, engine, project_id, aoi_id, cb)
     wrapped.__name__ = f"layer_{key}"
     return wrapped
 
@@ -179,6 +181,17 @@ LAYER_REGISTRY: list[dict] = [
         # Dépend de unites_foncieres — placé juste après, vérifie lui-même la dépendance
         "fn":    _make_sous_ensembles("sous_ensembles", "ecocompensation_results.sous_ensembles", _run_sous_ensembles),
     },
+    {
+        "key":   "enrich_uf",
+        "label": "Flags UF (végétation + faune)",
+        "table": "ecocompensation_results.sous_ensembles",
+        "fast":  False,
+        "fn":    _make_enrich_uf(
+            "enrich_uf",
+            "ecocompensation_results.sous_ensembles",
+            _run_enrich_uf,
+        ),
+    },
 
     # ── Couches SIG (ordre inchangé) ────────────────────────────────────
     {
@@ -187,6 +200,17 @@ LAYER_REGISTRY: list[dict] = [
         "table": "ecocompensation_results.parcelles",
         "fast":  True,
         "fn":    _make("parcelles", "ecocompensation_results.parcelles", _run_parcelles),
+    },
+    {
+        "key":   "enrich_candidates",
+        "label": "Flags candidats (végétation + faune)",
+        "table": "ecocompensation_results.parcelles",
+        "fast":  True,
+        "fn":    _make_enrich(
+            "enrich_candidates",
+            "ecocompensation_results.parcelles",
+            _run_enrich_candidates,
+        ),
     },
     {
         "key":   "geomce",
@@ -201,24 +225,6 @@ LAYER_REGISTRY: list[dict] = [
         "table": "ecocompensation_results.zone_de_vegetation",
         "fast":  True,
         "fn":    _make("zone_de_vegetation", "ecocompensation_results.zone_de_vegetation", _run_zone_de_vegetation),
-    },
-    {
-        "key":   "cesbio",
-        "label": "Couverture sol CESBIO (OCS-GE)",
-        "table": "ecocompensation_results.cesbio",
-        "fast":  True,
-        "fn":    _make("cesbio", "ecocompensation_results.cesbio", _run_cesbio),
-    },
-    {
-        "key":   "bd_topo_et_cesbio",
-        "label": "Vegetation hybride BD TOPO + CESBIO",
-        "table": "ecocompensation_results.bd_topo_et_cesbio",
-        "fast":  True,
-        "fn":    _make(
-            "bd_topo_et_cesbio",
-            "ecocompensation_results.bd_topo_et_cesbio",
-            _run_bd_topo_et_cesbio,
-        ),
     },
     {
         "key":   "carhab",
@@ -336,12 +342,5 @@ LAYER_REGISTRY: list[dict] = [
         "table": "ecocompensation_results.arrachage_vignes",
         "fast":  False,
         "fn":    _make("arrachage_vignes", "ecocompensation_results.arrachage_vignes", _run_arrachage_vignes),
-    },
-    {
-        "key":   "fauna",
-        "label": "Faune",
-        "table": "ecocompensation_results.fauna",
-        "fast":  True,
-        "fn":    _make_fauna("fauna", "ecocompensation_results.fauna", _run_fauna),
     },
 ]
