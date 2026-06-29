@@ -47,6 +47,7 @@ from sqlalchemy import text
 
 from db import get_engine
 from vrai_filtre import FiltreOptions
+from layers.national_exclusions import national_exclusion_steps
 
 # ─────────────────────────────────────────────
 # Paramètres
@@ -206,29 +207,21 @@ def run(
         log("⚠️ Aucun sous-ensemble après Miller, arrêt.")
         return None if not return_results else ([], 0.0, funnel)
 
-    # 2) GEOMCE
-    geomce_tables = [
-        ("ecocompensation_results.mesures_compensatoire_surf",    "ms"),
-        ("ecocompensation_results.mesures_compensatoire_lin",     "ml"),
-        ("ecocompensation_results.mesures_compensatoire_pct",     "mp"),
-        ("ecocompensation_results.mesures_compensatoire_commune", "mc"),
-    ]
-    for table, alias in geomce_tables:
-        if has(table):
-            where_clauses.append(f"""
-                NOT EXISTS (
-                    SELECT 1 FROM {table} {alias}
-                    WHERE {alias}.project_id = :project_id
-                      AND s.geom_2154 && {alias}.geom_2154
-                      AND ST_Intersects(s.geom_2154, {alias}.geom_2154)
-                )
-            """)
+    # 2) Exclusions nationales (GEOMCE, préemption ENS, ENS)
+    excluded_layers = {
+        str(x).strip()
+        for x in getattr(options, "excluded_layers", []) or []
+        if str(x).strip()
+    }
+    geomce_applied = False
+    for _label, clause in national_exclusion_steps(excluded_layers, geom_alias="s"):
+        where_clauses.append(clause)
+        geomce_applied = True
     n2 = maybe_count(where_clauses)
-    log(f"2) Exclusion GEOMCE                                 → {n2}")
-    geomce_applied = any(has(t) for t, _ in geomce_tables)
+    log(f"2) Exclusions nationales (GEOMCE / préemption ENS / ENS)  → {n2}")
     if funnel_mode and geomce_applied:
         step_idx += 1
-        funnel.append({"step": step_idx, "label": "Après exclusion GEOMCE", "count": n2})
+        funnel.append({"step": step_idx, "label": "Après exclusions nationales", "count": n2})
 
     # 2) Natura 2000 (SIC / ZPS) : intersect / exclure / ignorer
     if options.natura2000_mode == "intersect" and has("ecocompensation_results.natura2000"):
@@ -240,11 +233,11 @@ def run(
                   AND ST_Intersects(s.geom_2154, n2.geom_2154)
             )
         """)
-    elif options.natura2000_mode == "exclude" and has("ecocompensation_results.natura2000"):
+    elif options.natura2000_mode == "exclude":
         where_clauses.append("""
             NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.natura2000 n2
-                WHERE n2.project_id = CAST(:project_id AS uuid)
+                SELECT 1 FROM ecocompensation.natura_2000 n2
+                WHERE n2.geom_2154 IS NOT NULL
                   AND s.geom_2154 && n2.geom_2154
                   AND ST_Intersects(s.geom_2154, n2.geom_2154)
             )
@@ -256,7 +249,9 @@ def run(
         else ("exclusion" if options.natura2000_mode == "exclude" else "ignoré")
     )
     log(f"3) Natura 2000 ({_natura_lbl})                            → {n3}")
-    natura_applied = options.natura2000_mode in ("intersect", "exclude") and has("ecocompensation_results.natura2000")
+    natura_applied = options.natura2000_mode == "exclude" or (
+        options.natura2000_mode == "intersect" and has("ecocompensation_results.natura2000")
+    )
     if funnel_mode and natura_applied:
         step_idx += 1
         funnel.append({"step": step_idx, "label": f"Après filtre Natura 2000 ({_natura_lbl})", "count": n3})

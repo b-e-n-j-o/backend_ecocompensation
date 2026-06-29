@@ -164,8 +164,11 @@ def build_uf_pool_response(
     cesbio_libelles: list[str],
     fauna_species: str | None = None,
     fauna_dist_m: float,
+    fauna_criteria: list[dict] | None = None,
     miller_thresh: float = 0.39,
     limit_uf: int = 50,
+    study_type: str = "faune_buffer",
+    min_zone_humide_ha: float = 0.0,
 ) -> dict:
     """
     Retourne les résultats UF filtrés et groupés par uf_id.
@@ -200,6 +203,7 @@ def build_uf_pool_response(
         "fauna_dist_m":    int(fauna_dist_m),
         "cx":              cx,
         "cy":              cy,
+        "min_zone_humide_ha": float(min_zone_humide_ha or 0),
     }
     fauna_sql = ""
     if fauna_species:
@@ -208,8 +212,13 @@ def build_uf_pool_response(
               AND (ss.fauna_distances->>:fauna_species) IS NOT NULL
               AND (ss.fauna_distances->>:fauna_species)::int BETWEEN 0 AND :fauna_dist_m"""
 
-    with engine.begin() as conn:
-        rows = conn.execute(text(f"""
+    is_zh = study_type == "zones_humides_intra"
+    cesbio_sql = ""
+    if not is_zh and cesbio_libelles:
+        cesbio_sql = "AND ss.veg_libelles && CAST(:cesbio_libelles AS text[])"
+
+    if is_zh:
+        sql = f"""
             SELECT
                 ss.subset_id,
                 ss.uf_id,
@@ -222,13 +231,44 @@ def build_uf_pool_response(
                 ROUND((ss.dist_centre_m / 1000.0)::numeric, 3) AS distance_centre_km,
                 ss.veg_libelles,
                 ss.fauna_distances,
+                ROUND(COALESCE(zh.zone_humide_ha, 0)::numeric, 4) AS zone_humide_ha,
+                {"(ss.fauna_distances->>:fauna_species)::int" if fauna_species else "NULL::int"} AS dist_fauna_m
+            FROM ecocompensation_results.sous_ensembles ss
+            LEFT JOIN LATERAL (
+                SELECT SUM(p.zone_humide_ha) AS zone_humide_ha
+                FROM ecocompensation_results.parcelles p
+                WHERE p.project_id = ss.project_id
+                  AND p.idu = ANY(ss.idus)
+            ) zh ON TRUE
+            WHERE ss.project_id = :project_id
+              AND ss.miller >= :miller_th{fauna_sql}
+            ORDER BY zh.zone_humide_ha DESC NULLS LAST, ss.uf_id, ss.surface_ha DESC
+        """
+    else:
+        sql = f"""
+            SELECT
+                ss.subset_id,
+                ss.uf_id,
+                ss.k,
+                ss.idus,
+                ss.siren,
+                ss.denomination,
+                ROUND(ss.surface_ha::numeric, 2)              AS surface_ha,
+                ROUND(ss.miller::numeric, 3)                  AS miller,
+                ROUND((ss.dist_centre_m / 1000.0)::numeric, 3) AS distance_centre_km,
+                ss.veg_libelles,
+                ss.fauna_distances,
+                0::numeric AS zone_humide_ha,
                 {"(ss.fauna_distances->>:fauna_species)::int" if fauna_species else "NULL::int"} AS dist_fauna_m
             FROM ecocompensation_results.sous_ensembles ss
             WHERE ss.project_id         = :project_id
               AND ss.miller              >= :miller_th
-              AND ss.veg_libelles        && CAST(:cesbio_libelles AS text[]){fauna_sql}
+              {cesbio_sql}{fauna_sql}
             ORDER BY ss.uf_id, ss.surface_ha DESC
-        """), params).mappings().all()
+        """
+
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
 
     # Groupement Python : uf_id → liste de sous-ensembles
     by_uf: dict[str, list[dict]] = defaultdict(list)
@@ -248,6 +288,7 @@ def build_uf_pool_response(
             "veg_libelles":       list(r["veg_libelles"] or []),
             "fauna_distances":    dict(r["fauna_distances"] or {}),
             "dist_fauna_m":       r["dist_fauna_m"],
+            "zone_humide_ha":     float(r["zone_humide_ha"] or 0),
         })
         if uf_id not in uf_meta:
             uf_meta[uf_id] = {
@@ -259,12 +300,19 @@ def build_uf_pool_response(
                 "distance_centre_km": float(r["distance_centre_km"] or 0),
             }
 
-    # Ranking des UF par meilleur surface_ha (premier ss de chaque groupe, déjà trié DESC)
-    ranked_uf_ids = sorted(
-        by_uf.keys(),
-        key=lambda uid: by_uf[uid][0]["surface_ha"],
-        reverse=True,
-    )[:limit_uf]
+    # Ranking des UF : surface humide (ZH) ou surface parcelle (faune)
+    if is_zh:
+        ranked_uf_ids = sorted(
+            by_uf.keys(),
+            key=lambda uid: by_uf[uid][0].get("zone_humide_ha", 0),
+            reverse=True,
+        )[:limit_uf]
+    else:
+        ranked_uf_ids = sorted(
+            by_uf.keys(),
+            key=lambda uid: by_uf[uid][0]["surface_ha"],
+            reverse=True,
+        )[:limit_uf]
 
     result = []
     for rang, uf_id in enumerate(ranked_uf_ids, 1):

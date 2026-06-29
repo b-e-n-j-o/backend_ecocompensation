@@ -53,12 +53,55 @@ def _distance_score(distance_km: float) -> tuple[int, str]:
     return 0, ">10km"
 
 
+def _zone_humide_points(zone_humide_ha: float) -> tuple[int, str]:
+    zh = float(zone_humide_ha or 0)
+    if zh >= 2.0:
+        return 3, ">=2ha"
+    if zh >= 1.0:
+        return 2, "1-2ha"
+    if zh > 0:
+        return 1, "<1ha"
+    return 0, "none"
+
+
 def compute_subset_score_eco(
     distance_centre_km: float,
     fauna_distances: dict,
     fauna_criteria: list[dict],
+    *,
+    zone_humide_ha: float = 0.0,
+    study_type: str = "faune_buffer",
 ) -> dict:
-    """Score éco 0..6 pour un sous-ensemble (même logique que ScoreEcoProfiler)."""
+    """Score éco 0..6 pour un sous-ensemble."""
+    if study_type == "zones_humides_intra":
+        zh_points, zh_reason = _zone_humide_points(zone_humide_ha)
+        if fauna_criteria:
+            species_points, species_reason, species_extra = ScoreEcoProfiler._species_points_from_filter_enrich(
+                fauna_distances or {},
+                fauna_criteria,
+            )
+            # Cap faune à 3 pts en mode ZH (complémentaire à la surface humide)
+            species_points = min(3, species_points)
+        else:
+            species_points, species_reason, species_extra = 0, "no_faune_criteria", {}
+        total = int(zh_points + species_points)
+        return {
+            "total_score": total,
+            "max_score": ECO_MAX,
+            "breakdown": {
+                "zone_humide": {
+                    "points": zh_points,
+                    "zone_humide_ha": round(float(zone_humide_ha or 0), 4),
+                    "reason": zh_reason,
+                },
+                "especes": {
+                    "points": species_points,
+                    "reason": species_reason,
+                    **species_extra,
+                },
+            },
+        }
+
     distance_points, distance_bucket = _distance_score(float(distance_centre_km or 0))
     if fauna_criteria:
         species_points, species_reason, species_extra = ScoreEcoProfiler._species_points_from_filter_enrich(
@@ -155,6 +198,7 @@ def attach_uf_profiling(
     fauna_criteria: list[dict] | None = None,
     fauna_species: str | None = None,
     fauna_dist_m: float = 1000.0,
+    study_type: str = "faune_buffer",
 ) -> dict:
     """
     Enrichit le dict retourné par build_uf_pool_response :
@@ -198,6 +242,8 @@ def attach_uf_profiling(
                 float(ss.get("distance_centre_km") or 0),
                 fd,
                 criteria,
+                zone_humide_ha=float(ss.get("zone_humide_ha") or 0),
+                study_type=study_type,
             )
 
     # Re-classement UF par meilleur score_eco puis surface
@@ -237,6 +283,8 @@ def build_uf_pool_with_profiling(
     fauna_criteria: list[dict] | None = None,
     miller_thresh: float = 0.39,
     limit_uf: int = 50,
+    study_type: str = "faune_buffer",
+    min_zone_humide_ha: float = 0.0,
 ) -> dict:
     from layers.enrich_uf import build_uf_pool_response
 
@@ -248,8 +296,11 @@ def build_uf_pool_with_profiling(
         cesbio_libelles=cesbio_libelles,
         fauna_species=fauna_species,
         fauna_dist_m=fauna_dist_m,
+        fauna_criteria=fauna_criteria,
         miller_thresh=miller_thresh,
         limit_uf=limit_uf,
+        study_type=study_type,
+        min_zone_humide_ha=min_zone_humide_ha,
     )
     return attach_uf_profiling(
         engine,
@@ -257,4 +308,5 @@ def build_uf_pool_with_profiling(
         fauna_criteria=fauna_criteria,
         fauna_species=fauna_species,
         fauna_dist_m=fauna_dist_m,
+        study_type=study_type,
     )

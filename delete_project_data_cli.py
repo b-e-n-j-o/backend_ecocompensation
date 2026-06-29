@@ -45,6 +45,8 @@ RESULT_TABLES: list[str] = [
     "ecocompensation_results.carhab",
     "ecocompensation_results.zone_humide",
     "ecocompensation_results.troncons_hydro",
+    "ecocompensation_results.troncons_hydros",
+    "ecocompensation_results.surfaces_hydros",
     "ecocompensation_results.surfaces_hydro",
     "ecocompensation_results.surfaces_elementaires",
     "ecocompensation_results.routes",

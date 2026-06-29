@@ -177,6 +177,39 @@ def recompute_metrics(project_id: str, run_id: str, score_only: bool = Query(Fal
     return {"status": "ok", "project_id": project_id, "run_id": run_id, "mode": "all_metrics"}
 
 
+@router.post("/{project_id}/pool/runs/{run_id}/recompute-durete")
+def recompute_durete(project_id: str, run_id: str):
+    """
+    Calcule la dureté foncière (attractivité) pour le pool du run.
+
+    Les parcelles marquées indésirables au niveau projet sont exclues du calcul.
+    Rafraîchit aussi les métriques PM et le score composite.
+    """
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Projet {project_id} introuvable")
+    try:
+        uuid.UUID(str(run_id))
+    except ValueError:
+        raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
+    with engine.begin() as conn:
+        pool_service.ensure_tables(conn)
+        if not pool_service.run_belongs_to_project(conn, project_id, run_id):
+            raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+        stats = profiling_service.compute_durete_for_run(
+            conn,
+            project_id=project_id,
+            run_id=run_id,
+            exclude_indesirables=True,
+        )
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "run_id": run_id,
+        "metric_key": "durete_fonciere",
+        **stats,
+    }
+
+
 @router.post("/{project_id}/pool/runs/{run_id}/recompute-score")
 def recompute_score(project_id: str, run_id: str):
     """

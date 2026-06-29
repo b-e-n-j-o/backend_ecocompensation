@@ -170,11 +170,24 @@ class ScoreEcoProfiler(BasePoolProfiler):
             return 0, "no_observation", {}
         return best_points, best_reason, best_extra
 
+    @staticmethod
+    def _zone_humide_points(zone_humide_ha: float) -> tuple[int, str]:
+        zh = float(zone_humide_ha or 0)
+        if zh >= 2.0:
+            return 3, ">=2ha"
+        if zh >= 1.0:
+            return 2, "1-2ha"
+        if zh > 0:
+            return 1, "<1ha"
+        return 0, "none"
+
     def compute_for_run(self, conn, project_id: str, run_id: str) -> dict[str, dict]:
         t0 = time.perf_counter()
         opts = self._filter_options(conn, project_id, run_id)
         fauna_criteria = self._fauna_criteria(opts)
         has_faune = len(fauna_criteria) > 0
+        study_type = str(opts.get("study_type") or "faune_buffer")
+        is_zh = study_type == "zones_humides_intra"
 
         base_rows = conn.execute(
             text(
@@ -196,7 +209,7 @@ class ScoreEcoProfiler(BasePoolProfiler):
         fauna_legacy_by_idu: dict[str, dict] = {}
         filter_enrich_by_idu: dict[str, dict] = {}
 
-        if has_faune:
+        if has_faune or is_zh:
             metric_rows = conn.execute(
                 text(
                     """
@@ -233,6 +246,38 @@ class ScoreEcoProfiler(BasePoolProfiler):
         for r in base_rows:
             idu = str(r["idu"])
             distance_km = float(r["distance_km"] or 0.0)
+
+            if is_zh:
+                enrich = filter_enrich_by_idu.get(idu) or {}
+                zh_ha = float(enrich.get("zone_humide_ha") or 0)
+                zh_points, zh_reason = self._zone_humide_points(zh_ha)
+                if has_faune:
+                    fd = enrich.get("fauna_distances") if isinstance(enrich.get("fauna_distances"), dict) else {}
+                    species_points, species_reason, species_extra = self._species_points_from_filter_enrich(
+                        fd,
+                        fauna_criteria,
+                    )
+                    species_points = min(3, species_points)
+                else:
+                    species_points, species_reason, species_extra = 0, "no_faune_criteria", {}
+                total_score = int(zh_points + species_points)
+                payload[idu] = {
+                    "total_score": total_score,
+                    "max_score": ECO_MAX,
+                    "breakdown": {
+                        "zone_humide": {
+                            "points": zh_points,
+                            "zone_humide_ha": round(zh_ha, 4),
+                            "reason": zh_reason,
+                        },
+                        "especes": {
+                            "points": species_points,
+                            "reason": species_reason,
+                            **species_extra,
+                        },
+                    },
+                }
+                continue
 
             if distance_km < 3:
                 distance_points = 3

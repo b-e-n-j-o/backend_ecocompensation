@@ -17,6 +17,7 @@ from functools import lru_cache
 from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine, Engine
+from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -34,19 +35,35 @@ def _build_engine(
         f"postgresql+psycopg://{user}:{quote_plus(password)}"
         f"@{host}:{port}/{db}"
     )
+    connect_args = {
+        "keepalives":          1,
+        "keepalives_idle":     30,
+        "keepalives_interval": 10,
+        "keepalives_count":    5,
+        # Supabase/pgBouncer: désactiver les prepared statements côté psycopg
+        # pour éviter les collisions "DuplicatePreparedStatement".
+        "prepare_threshold":   None,
+        "sslmode":             "require",
+        "connect_timeout":     15,
+    }
+
+    # Port 6543 = Supavisor transaction mode : pas de pool côté client
+    # (sinon ECHECKOUTTIMEOUT / EDBHANDLEREXITED avec pgBouncer).
+    if str(port) == "6543":
+        return create_engine(
+            url,
+            connect_args=connect_args,
+            poolclass=NullPool,
+        )
+
     return create_engine(
         url,
-        connect_args={
-            "keepalives":          1,
-            "keepalives_idle":     30,
-            "keepalives_interval": 10,
-            "keepalives_count":    5,
-            # Supabase/pgBouncer: désactiver les prepared statements côté psycopg
-            # pour éviter les collisions "DuplicatePreparedStatement".
-            "prepare_threshold":   None,
-        },
+        connect_args=connect_args,
         pool_pre_ping=True,
         pool_recycle=1800,
+        pool_size=2,
+        max_overflow=2,
+        pool_timeout=30,
     )
 
 

@@ -149,12 +149,21 @@ class DureteFonciereProfiler(BasePoolProfiler):
 
         return {str(r[0]): bool(r[1]) for r in rows}
 
-    def compute_for_run(self, conn, project_id: str, run_id: str) -> dict[str, dict]:
+    def compute_for_run(
+        self,
+        conn,
+        project_id: str,
+        run_id: str,
+        *,
+        only_idus: set[str] | None = None,
+    ) -> dict[str, dict]:
         progress_logs = _durete_progress_enabled()
         verbose_pipeline = _durete_verbose_pipeline_enabled()
         mode = _durete_mode()
 
         all_idus = self._all_idus(conn, project_id, run_id)
+        if only_idus is not None:
+            all_idus = [idu for idu in all_idus if idu in only_idus]
         if not all_idus:
             return {}
 

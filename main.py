@@ -56,6 +56,7 @@ from sqlalchemy import text
 from orchestrator import run_orchestration, fetch_project_two_phases
 from filter_orchestrator import FULL_PIPELINE_PHASES, run_filter_orchestration
 from layers.filter_pipeline import FaunaCriterion, FilterConfig
+from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
 from layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
 from layers.enrich_candidates import ensure_columns
@@ -295,6 +296,7 @@ class FromParcelleRequest(BaseModel):
     numero:     str   = Field(..., min_length=1, max_length=10)
     name:       str   = Field(..., min_length=1)
     buffer_km:  float = Field(default=5.0, ge=0.0, le=20.0)
+    study_type: str   = Field(default="faune_buffer")
 
 
 class ParcelleRefDTO(BaseModel):
@@ -307,6 +309,7 @@ class FromParcellesRequest(BaseModel):
     parcelles: list[ParcelleRefDTO] = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
     buffer_km: float = Field(default=5.0, ge=0.0, le=20.0)
+    study_type: str = Field(default="faune_buffer")
 
 
 class FetchRequest(BaseModel):
@@ -347,6 +350,30 @@ class FilterPipelineRequest(BaseModel):
     miller_thresh: float = Field(default=0.39, ge=0.0, le=1.0)
     cesbio_libelles: list[str] = Field(default_factory=list)
     fauna_criteria: list[FaunaFilterCriterionDTO] = Field(default_factory=list)
+    zone_humide_mode: str = Field(default="ignore")
+    zones_humides_probables_mode: str = Field(default="ignore")
+    min_zone_humide_ha: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=500.0,
+        description="Surface minimale (ha) de zone humide établie intersectant la parcelle.",
+    )
+    excluded_layers: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_EXCLUDED_LAYERS),
+        description="Couches nationales dont l'intersection exclut la parcelle (geomce, preemption_ens, ens).",
+    )
+    troncons_hydros_max_dist_m: float | None = Field(
+        default=None,
+        ge=0,
+        le=5000,
+        description="Distance max (m) au tronçon hydro le plus proche ; null = critère ignoré.",
+    )
+    surfaces_hydros_max_dist_m: float | None = Field(
+        default=None,
+        ge=0,
+        le=5000,
+        description="Distance max (m) à une surface hydro ; null = critère ignoré.",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -432,16 +459,30 @@ def _dto_to_filtre_options(dto: FiltreOptionsDTO) -> FiltreOptions:
 # ─────────────────────────────────────────────
 
 @app.get("/api/projects")
-def list_projects():
+def list_projects(study_type: str | None = None):
+    sql = """
+        SELECT id, name, status, layers_status, created_at, updated_at,
+               COALESCE(study_type, 'faune_buffer') AS study_type
+        FROM ecocompensation.projects
+    """
+    params: dict = {}
+    if study_type:
+        sql += " WHERE COALESCE(study_type, 'faune_buffer') = :study_type"
+        params["study_type"] = study_type
+    sql += " ORDER BY created_at DESC"
     with engine.begin() as conn:
-        rows = conn.execute(
-            text("SELECT id, name, status, layers_status, created_at, updated_at FROM ecocompensation.projects ORDER BY created_at DESC")
-        ).mappings().all()
+        rows = conn.execute(text(sql), params).mappings().all()
     return [dict(r) for r in rows]
 
 
 @app.get("/api/projects/history")
-def list_projects_history():
+def list_projects_history(study_type: str | None = None):
+    study_filter = ""
+    params: dict = {}
+    if study_type:
+        study_filter = " WHERE COALESCE(p.study_type, 'faune_buffer') = :study_type"
+        params["study_type"] = study_type
+
     with engine.begin() as conn:
         has_pool_runs = bool(
             conn.execute(
@@ -450,10 +491,7 @@ def list_projects_history():
             ).scalar()
         )
 
-        if has_pool_runs:
-            rows = conn.execute(
-                text(
-                    """
+        base_select = """
                     SELECT
                         p.id,
                         p.name,
@@ -462,14 +500,24 @@ def list_projects_history():
                         p.created_at,
                         p.updated_at,
                         p.last_filter,
+                        COALESCE(p.study_type, 'faune_buffer') AS study_type,
                         a.buffer_m,
                         f.area_ha AS foncier_area_ha,
-                        pr.total_count AS pool_total_count
+                        {pool_col}
                     FROM ecocompensation.projects p
                     LEFT JOIN ecocompensation.aoi a
                         ON a.id = p.aoi_id
                     LEFT JOIN ecocompensation.foncier f
                         ON f.id = p.foncier_id
+                    {pool_join}
+                    {study_filter}
+                    ORDER BY p.created_at DESC
+        """
+
+        if has_pool_runs:
+            sql = base_select.format(
+                pool_col="pr.total_count AS pool_total_count",
+                pool_join="""
                     LEFT JOIN LATERAL (
                         SELECT total_count
                         FROM ecocompensation_results.parcelles_pool_runs
@@ -477,34 +525,17 @@ def list_projects_history():
                         ORDER BY created_at DESC
                         LIMIT 1
                     ) pr ON TRUE
-                    ORDER BY p.created_at DESC
-                    """
-                )
-            ).mappings().all()
+                """,
+                study_filter=study_filter,
+            )
         else:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT
-                        p.id,
-                        p.name,
-                        p.status,
-                        p.layers_status,
-                        p.created_at,
-                        p.updated_at,
-                        p.last_filter,
-                        a.buffer_m,
-                        f.area_ha AS foncier_area_ha,
-                        NULL::integer AS pool_total_count
-                    FROM ecocompensation.projects p
-                    LEFT JOIN ecocompensation.aoi a
-                        ON a.id = p.aoi_id
-                    LEFT JOIN ecocompensation.foncier f
-                        ON f.id = p.foncier_id
-                    ORDER BY p.created_at DESC
-                    """
-                )
-            ).mappings().all()
+            sql = base_select.format(
+                pool_col="NULL::integer AS pool_total_count",
+                pool_join="",
+                study_filter=study_filter,
+            )
+
+        rows = conn.execute(text(sql), params).mappings().all()
 
     out: list[dict] = []
     for r in rows:
@@ -524,6 +555,7 @@ def list_projects_history():
                 "id": str(r["id"]),
                 "name": r.get("name"),
                 "status": r.get("status"),
+                "study_type": r.get("study_type") or "faune_buffer",
                 "layers_status": r.get("layers_status") or {},
                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
@@ -629,8 +661,16 @@ def _create_project_from_union_geometry(
     buffer_km: float,
     parcelles_refs: list[dict[str, str]],
     union_geom,
+    study_type: str = "faune_buffer",
 ):
-    buffer_m = int(buffer_km * 1000)
+    if study_type not in ("faune_buffer", "zones_humides_intra"):
+        raise HTTPException(400, "study_type invalide")
+    if study_type == "zones_humides_intra":
+        buffer_m = 0
+        aoi_geom_wkt = union_geom.wkt
+    else:
+        buffer_m = int(buffer_km * 1000)
+        aoi_geom_wkt = union_geom.buffer(buffer_m, resolution=32).wkt
     area_ha = float(union_geom.area / 10_000.0)
     with engine.begin() as conn:
         project_id = str(uuid.uuid4())
@@ -657,7 +697,7 @@ def _create_project_from_union_geometry(
                 "project_id": project_id,
                 "code": parcelles_refs[0]["code_insee"],
                 "buf": buffer_m,
-                "wkt": union_geom.buffer(buffer_m, resolution=32).wkt,
+                "wkt": aoi_geom_wkt,
             },
         ).scalar_one())
         conn.execute(
@@ -706,12 +746,18 @@ def _create_project_from_union_geometry(
         proj = conn.execute(
             text(
                 """
-                INSERT INTO ecocompensation.projects (id, name, aoi_id, foncier_id, status)
-                VALUES (:project_id, :name, :aoi_id, :foncier_id, 'created')
+                INSERT INTO ecocompensation.projects (id, name, aoi_id, foncier_id, status, study_type)
+                VALUES (:project_id, :name, :aoi_id, :foncier_id, 'created', :study_type)
                 RETURNING id, name, status, created_at
                 """
             ),
-            {"project_id": project_id, "name": project_name, "aoi_id": aoi_id, "foncier_id": foncier_id},
+            {
+                "project_id": project_id,
+                "name": project_name,
+                "aoi_id": aoi_id,
+                "foncier_id": foncier_id,
+                "study_type": study_type,
+            },
         ).mappings().one()
     return {
         "id": str(proj["id"]),
@@ -737,6 +783,7 @@ def create_project_from_parcelle(body: FromParcelleRequest):
             "numero": body.numero.strip(),
         }],
         union_geom=union_geom,
+        study_type=body.study_type,
     )
 
 
@@ -768,6 +815,7 @@ def create_project_from_parcelles(body: FromParcellesRequest):
         buffer_km=body.buffer_km,
         parcelles_refs=uniq_refs,
         union_geom=union_geom,
+        study_type=body.study_type,
     )
 
 
@@ -925,7 +973,30 @@ async def start_filter_pipeline(
     proj = _get_project(project_id)
     if proj["status"] in ("fetching", "filtering") or project_id in _running_filters:
         raise HTTPException(409, "Filtrage déjà en cours")
-    if not body.cesbio_libelles and not body.fauna_criteria:
+
+    study_type = str(proj.get("study_type") or "faune_buffer")
+    search_mode = "within_foncier" if study_type == "zones_humides_intra" else "exclude_source_buffer"
+
+    zh_mode = body.zone_humide_mode if body.zone_humide_mode in ("ignore", "intersect", "exclude") else "ignore"
+    zhp_mode = (
+        body.zones_humides_probables_mode
+        if body.zones_humides_probables_mode in ("ignore", "intersect", "exclude")
+        else "ignore"
+    )
+
+    if study_type == "zones_humides_intra":
+        if (
+            zh_mode == "ignore"
+            and zhp_mode == "ignore"
+            and not body.fauna_criteria
+            and body.troncons_hydros_max_dist_m is None
+            and body.surfaces_hydros_max_dist_m is None
+        ):
+            raise HTTPException(
+                400,
+                "Sélectionnez au moins un critère zones humides, hydrographique ou faunistique.",
+            )
+    elif not body.cesbio_libelles and not body.fauna_criteria:
         raise HTTPException(400, "Sélectionnez au moins un critère CESBIO ou Faune")
 
     aoi_id = str(proj["aoi_id"])
@@ -938,6 +1009,17 @@ async def start_filter_pipeline(
             for fc in body.fauna_criteria
             if fc.species.strip()
         ],
+        search_mode=search_mode,
+        zone_humide_mode=zh_mode,
+        zones_humides_probables_mode=zhp_mode,
+        min_zone_humide_ha=body.min_zone_humide_ha,
+        excluded_layers=[
+            x.strip()
+            for x in body.excluded_layers
+            if x and str(x).strip()
+        ] or list(DEFAULT_EXCLUDED_LAYERS),
+        troncons_hydros_max_dist_m=body.troncons_hydros_max_dist_m,
+        surfaces_hydros_max_dist_m=body.surfaces_hydros_max_dist_m,
     )
     _running_filters.add(project_id)
 
@@ -1046,6 +1128,8 @@ def get_uf_pool(
     fauna_species: str = Query(default=""),
     fauna_dist_m: float = Query(default=1000.0, ge=0),
     miller_thresh: float = Query(default=0.39, ge=0, le=1),
+    study_type: str = Query(default=""),
+    min_zone_humide_ha: float | None = Query(default=None, ge=0),
 ):
     """
     Pool UF pré-filtré depuis les colonnes enrichies (sans spatial join).
@@ -1083,6 +1167,21 @@ def get_uf_pool(
         except Exception:
             pass
 
+    resolved_study_type = (study_type or "").strip() or str(proj.get("study_type") or "faune_buffer")
+    resolved_min_zh = min_zone_humide_ha
+    if resolved_min_zh is None and proj.get("last_filter"):
+        try:
+            lf = proj["last_filter"]
+            if isinstance(lf, str):
+                lf = json.loads(lf)
+            raw_min = lf.get("min_zone_humide_ha")
+            if raw_min is not None:
+                resolved_min_zh = float(raw_min)
+        except Exception:
+            pass
+    if resolved_min_zh is None:
+        resolved_min_zh = 0.0
+
     return build_uf_pool_with_profiling(
         engine,
         project_id,
@@ -1093,6 +1192,8 @@ def get_uf_pool(
         fauna_dist_m=fauna_dist_m,
         fauna_criteria=fauna_criteria or None,
         miller_thresh=miller_thresh,
+        study_type=resolved_study_type,
+        min_zone_humide_ha=resolved_min_zh,
     )
 
 

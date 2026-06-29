@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from db import get_engine
+from layers.layer_runner import LAYER_REGISTRY
 from map_layers import (
     get_cesbio_aoi_geojson,
     get_fauna_aoi_geojson,
@@ -28,6 +29,8 @@ from map_layers import (
 )
 
 logger = logging.getLogger(__name__)
+
+EMPTY_FEATURE_COLLECTION: dict[str, Any] = {"type": "FeatureCollection", "features": []}
 
 # Couches nationales clippées à l'AOI (filter_v2) — pas ecocompensation_results.*
 NATIONAL_MAP_LAYER_KEYS = frozenset({"cesbio", "fauna", "fauna_buffer"})
@@ -43,9 +46,18 @@ LAYER_TABLE_MAP: dict[str, str] = {
     "fauna":             "fauna",
     "vegetation_hybride": "bd_topo_et_cesbio",
     "zone_humide":       "zone_humide",
+    "zones_humides_probables": "zones_humides_probables",
+    "espaces_naturels_sensibles_ens": "espaces_naturels_sensibles_ens",
+    "preemption_ens": "preemption_espaces_naturels_sensibles",
+    "troncons_hydros": "troncons_hydros",
+    "surfaces_hydros": "surfaces_hydros",
     "carhab":            "carhab",
     "ebc":               "ebc",
-    # Ajouter d'autres couches ici au fur et à mesure
+}
+
+# Colonne géométrie par couche (défaut geom_2154).
+LAYER_GEOM_COLUMN: dict[str, str] = {
+    "zones_humides_probables": "geom",
 }
 
 # Propriétés à exposer par couche (whitelist).
@@ -55,6 +67,27 @@ LAYER_PROPERTIES: dict[str, list[str] | None] = {
     "fauna": ["id_obs", "nom_vernaculaire", "nom_taxref", "cd_ref", "niveau_patrimonialite", "protection_nationale", "geom_type", "date_debut", "date_fin"],
     "vegetation_hybride": ["libelle_prio", "nature", "libelle", "source"],
     "zone_humide": ["source", "libelle", "inv_nom"],
+    "zones_humides_probables": ["rid", "value"],
+    "espaces_naturels_sensibles_ens": ["nom_site", "commune", "texte", "idu"],
+    "preemption_ens": ["nom_zpens", "commune", "texte", "idu"],
+    "troncons_hydros": [
+        "cleabs",
+        "nom",
+        "nature",
+        "classe_de_largeur",
+        "numero_d_ordre",
+        "code_hydrographique",
+        "type_de_bras",
+    ],
+    "surfaces_hydros": [
+        "cleabs",
+        "nom",
+        "nature",
+        "position_par_rapport_au_sol",
+        "statut",
+        "code_hydrographique",
+        "persistance",
+    ],
     "carhab": [
         "nom_eunis",
         "code_eunis",
@@ -72,9 +105,10 @@ LAYER_PROPERTIES: dict[str, list[str] | None] = {
 def _build_select_cols(layer_key: str, table_alias: str = "r") -> str:
     """Construit la liste SELECT des propriétés scalaires à retourner."""
     cols = LAYER_PROPERTIES.get(layer_key)
+    id_col = "cleabs" if layer_key in ("troncons_hydros", "surfaces_hydros") else "id"
     if not cols:
-        return f"{table_alias}.id::text AS id"
-    parts: list[str] = [f"{table_alias}.id::text AS id"]
+        return f"{table_alias}.{id_col}::text AS id"
+    parts: list[str] = [f"{table_alias}.{id_col}::text AS id"]
     for c in cols:
         if c == "id":
             continue
@@ -85,6 +119,49 @@ def _build_select_cols(layer_key: str, table_alias: str = "r") -> str:
         else:
             parts.append(f"{table_alias}.{c}")
     return ", ".join(parts)
+
+
+def _results_table_exists(conn, table: str) -> bool:
+    fqn = f"ecocompensation_results.{table}"
+    return bool(
+        conn.execute(
+            text("SELECT to_regclass(:r) IS NOT NULL"),
+            {"r": fqn},
+        ).scalar_one()
+    )
+
+
+def _materialize_results_layer_if_missing(project_id: str, layer_key: str, table: str) -> None:
+    """Crée / peuple la table projet si le prefetch filtrage ne l'a pas encore fait."""
+    with engine.connect() as conn:
+        if _results_table_exists(conn, table):
+            return
+        row = conn.execute(
+            text(
+                """
+                SELECT aoi_id::text AS aoi_id
+                FROM ecocompensation.projects
+                WHERE id = CAST(:pid AS uuid)
+                """
+            ),
+            {"pid": project_id},
+        ).mappings().one_or_none()
+    if not row or not row.get("aoi_id"):
+        return
+
+    index = {cfg["key"]: cfg for cfg in LAYER_REGISTRY}
+    cfg = index.get(layer_key)
+    if not cfg:
+        return
+
+    try:
+        cfg["fn"](engine, project_id, str(row["aoi_id"]), None)
+    except Exception:
+        logger.exception(
+            "Materialisation couche %s échouée pour project_id=%s",
+            layer_key,
+            project_id,
+        )
 
 
 @router.get(
@@ -137,6 +214,8 @@ def get_results_layer_geojson(
         )
 
     select_cols = _build_select_cols(layer_key)
+    geom_col = LAYER_GEOM_COLUMN.get(layer_key, "geom_2154")
+    order_col = "cleabs" if layer_key in ("troncons_hydros", "surfaces_hydros") else "id"
 
     # Filtrage "persistence projet" :
     # pour vegetation_hybride, ne renvoyer que les valeurs choisies dans le dernier filtre.
@@ -187,21 +266,34 @@ def get_results_layer_geojson(
         """
         query_params["vegetation_values"] = vegetation_values
 
+    _materialize_results_layer_if_missing(project_id, layer_key, table)
+
     query = f"""
         SELECT
             {select_cols},
-            ST_AsGeoJSON(ST_Transform(r.geom_2154, 4326), 6)::json AS geometry
+            ST_AsGeoJSON(ST_Transform(r.{geom_col}, 4326), 6)::json AS geometry
         FROM ecocompensation_results.{table} AS r
         WHERE r.project_id = :pid
-          AND r.geom_2154 IS NOT NULL
+          AND r.{geom_col} IS NOT NULL
           {extra_where}
-        ORDER BY r.id
+        ORDER BY r.{order_col}
     """
 
     try:
         with engine.begin() as conn:
             rows = conn.execute(text(query), query_params).mappings().all()
     except Exception as exc:
+        err = str(exc)
+        if "UndefinedTable" in err or "does not exist" in err:
+            logger.warning(
+                "Table results absente pour couche %s projet %s — GeoJSON vide",
+                layer_key,
+                project_id,
+            )
+            return JSONResponse(
+                content=EMPTY_FEATURE_COLLECTION,
+                headers={"Cache-Control": "private, max-age=60"},
+            )
         logger.exception("Erreur GeoJSON results layer %s projet %s", layer_key, project_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

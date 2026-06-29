@@ -32,10 +32,14 @@ from layers.aoi_to_carhab              import run as _run_carhab
 from layers.aoi_to_zone_humide            import run as _run_zone_humide
 from layers.aoi_to_remontee_de_nappes     import run as _run_remontee_de_nappes
 from layers.aoi_to_troncons_hydro         import run as _run_troncons_hydro
+from layers.aoi_to_troncons_hydros        import run as _run_troncons_hydros
+from layers.aoi_to_surfaces_hydros        import run as _run_surfaces_hydros
 from layers.aoi_to_routes                 import run as _run_routes
 from layers.aoi_to_voies_ferrees          import run as _run_voies_ferrees
 from layers.aoi_to_fragmentation_polygone import run as _run_fragmentation_polygone
 from layers.aoi_to_zones_humides_probables import run as _run_zones_humides_probables
+from layers.aoi_to_espaces_naturels_sensibles_ens import run as _run_ens
+from layers.aoi_to_preemption_ens import run as _run_preemption_ens
 from layers.aoi_to_surfaces_hydro         import run as _run_surfaces_hydro
 from layers.aoi_to_ebc                    import run as _run_ebc
 from layers.aoi_to_natura_2000            import run as _run_natura2000
@@ -241,6 +245,28 @@ LAYER_REGISTRY: list[dict] = [
         "fn":    _make("zone_humide", "ecocompensation_results.zone_humide", _run_zone_humide),
     },
     {
+        "key":   "espaces_naturels_sensibles_ens",
+        "label": "Espaces naturels sensibles (ENS)",
+        "table": "ecocompensation_results.espaces_naturels_sensibles_ens",
+        "fast":  True,
+        "fn":    _make(
+            "espaces_naturels_sensibles_ens",
+            "ecocompensation_results.espaces_naturels_sensibles_ens",
+            _run_ens,
+        ),
+    },
+    {
+        "key":   "preemption_ens",
+        "label": "Préemption espaces naturels sensibles",
+        "table": "ecocompensation_results.preemption_espaces_naturels_sensibles",
+        "fast":  True,
+        "fn":    _make(
+            "preemption_ens",
+            "ecocompensation_results.preemption_espaces_naturels_sensibles",
+            _run_preemption_ens,
+        ),
+    },
+    {
         "key":   "remontee_de_nappes",
         "label": "Remontée de nappes",
         "table": "ecocompensation_results.remontee_de_nappes",
@@ -257,6 +283,28 @@ LAYER_REGISTRY: list[dict] = [
         "table": "ecocompensation_results.troncons_hydro",
         "fast":  False,
         "fn":    _make("troncons_hydro", "ecocompensation_results.troncons_hydro", _run_troncons_hydro),
+    },
+    {
+        "key":   "troncons_hydros",
+        "label": "Tronçons hydrographiques (BD TOPO national)",
+        "table": "ecocompensation_results.troncons_hydros",
+        "fast":  True,
+        "fn":    _make(
+            "troncons_hydros",
+            "ecocompensation_results.troncons_hydros",
+            _run_troncons_hydros,
+        ),
+    },
+    {
+        "key":   "surfaces_hydros",
+        "label": "Surfaces hydrographiques (BD TOPO national)",
+        "table": "ecocompensation_results.surfaces_hydros",
+        "fast":  True,
+        "fn":    _make(
+            "surfaces_hydros",
+            "ecocompensation_results.surfaces_hydros",
+            _run_surfaces_hydros,
+        ),
     },
     {
         "key":   "routes",

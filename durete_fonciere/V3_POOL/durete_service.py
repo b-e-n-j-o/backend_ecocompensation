@@ -67,7 +67,7 @@ def run_durete_batch_in_memory(
     items: Iterable[dict[str, Any]],
     *,
     avec_rpg: bool = True,
-    model: str = "gemini-3.1-flash-lite-preview",
+    model: str = "gemini-3.1-flash-lite",
     workers: int = 1,
     verbose: bool | None = None,
 ) -> list[dict]:

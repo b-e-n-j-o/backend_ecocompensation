@@ -6,6 +6,8 @@ import time
 from sqlalchemy import text
 
 from pool import pool_service
+from pool.profilers.composite_score_v1 import CompositeScoreV1Profiler
+from pool.profilers.durete_fonciere import DureteFonciereProfiler
 from pool.profilers.personnes_morales import PersonnesMoralesProfiler
 from pool.profilers.score_eco import ScoreEcoProfiler
 
@@ -109,6 +111,121 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
         total_upserts,
         total_s,
     )
+
+
+def _upsert_profiler_payload(
+    conn,
+    project_id: str,
+    run_id: str,
+    metric_key: str,
+    payload_by_idu: dict,
+) -> int:
+    count = 0
+    for idu, payload in payload_by_idu.items():
+        pool_service.upsert_metric(
+            conn,
+            project_id=project_id,
+            run_id=run_id,
+            idu=idu,
+            metric_key=metric_key,
+            metric_value=payload,
+        )
+        count += 1
+    return count
+
+
+def compute_durete_for_run(
+    conn,
+    project_id: str,
+    run_id: str,
+    *,
+    exclude_indesirables: bool = True,
+) -> dict:
+    """
+    Calcule la dureté foncière (attractivité) pour les parcelles du run pool.
+
+    - Pré-requis PM : rafraîchit `parcelles_personnes_morales` sur tout le run.
+    - Dureté : uniquement sur les IDU actifs (hors pool indésirables projet si demandé).
+    - Met à jour `composite_score_v1` après la dureté.
+    """
+    t0 = time.perf_counter()
+    pool_service.ensure_tables(conn)
+    try:
+        conn.execute(text("SET LOCAL statement_timeout = '30min'"))
+    except Exception:
+        pass
+
+    pool_idus = {
+        str(r["idu"])
+        for r in pool_service.get_pool(conn, project_id=project_id, run_id=run_id)
+        if r.get("idu")
+    }
+    skipped_indesirables = 0
+    if exclude_indesirables:
+        excluded = set(pool_service.list_project_indesirable_idus(conn, project_id))
+        active_idus = pool_idus - excluded
+        skipped_indesirables = len(pool_idus & excluded)
+    else:
+        active_idus = pool_idus
+
+    if not active_idus:
+        return {
+            "updated_count": 0,
+            "active_idus": 0,
+            "skipped_indesirables": skipped_indesirables,
+            "eligible_pm": 0,
+            "composite_updated": 0,
+            "duration_s": round(time.perf_counter() - t0, 2),
+        }
+
+    pm_profiler = PersonnesMoralesProfiler()
+    pm_payload = pm_profiler.compute_for_run(conn, project_id, run_id)
+    pm_upserts = _upsert_profiler_payload(
+        conn, project_id, run_id, pm_profiler.metric_key, pm_payload
+    )
+
+    durete_profiler = DureteFonciereProfiler()
+    durete_payload = durete_profiler.compute_for_run(
+        conn, project_id, run_id, only_idus=active_idus
+    )
+    durete_upserts = _upsert_profiler_payload(
+        conn, project_id, run_id, durete_profiler.metric_key, durete_payload
+    )
+
+    eligible_pm = sum(
+        1
+        for idu in active_idus
+        if (durete_payload.get(idu) or {}).get("eligible") is True
+    )
+
+    composite_profiler = CompositeScoreV1Profiler()
+    composite_payload = composite_profiler.compute_for_run(conn, project_id, run_id)
+    composite_upserts = _upsert_profiler_payload(
+        conn, project_id, run_id, composite_profiler.metric_key, composite_payload
+    )
+
+    duration_s = round(time.perf_counter() - t0, 2)
+    logger.info(
+        "DURETE POOL DONE | project_id=%s run_id=%s active_idus=%d skipped_indesirables=%d "
+        "durete_upserts=%d eligible_pm=%d composite_upserts=%d duration_s=%.2f",
+        project_id,
+        run_id,
+        len(active_idus),
+        skipped_indesirables,
+        durete_upserts,
+        eligible_pm,
+        composite_upserts,
+        duration_s,
+    )
+    return {
+        "updated_count": durete_upserts,
+        "active_idus": len(active_idus),
+        "skipped_indesirables": skipped_indesirables,
+        "eligible_pm": eligible_pm,
+        "pm_upserts": pm_upserts,
+        "composite_updated": composite_upserts,
+        "duration_s": duration_s,
+    }
 
 
 def compute_parcel_score_for_run(conn, project_id: str, run_id: str) -> int:

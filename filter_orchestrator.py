@@ -21,6 +21,7 @@ from typing import Awaitable, Callable
 from sqlalchemy import text
 
 from layers.filter_pipeline import FilterConfig, FilterPipelineResult, run as run_filter_pipeline
+from layers.layer_runner import LAYER_REGISTRY
 from orchestrator import UF_PHASE_KEYS, run_orchestration
 from layers.uf_profiling import build_uf_pool_with_profiling
 from pool import pool_service
@@ -55,6 +56,7 @@ async def _noop_push(data: dict) -> None:
 def _filter_options_json(config: FilterConfig) -> dict:
     return {
         "pipeline": "filter_v2",
+        "search_mode": config.search_mode,
         "min_area_ha": config.min_area_ha,
         "miller_thresh": config.miller_thresh,
         "cesbio_libelles": config.cesbio_libelles,
@@ -62,7 +64,96 @@ def _filter_options_json(config: FilterConfig) -> dict:
             {"species": fc.species, "dist_m": fc.dist_m}
             for fc in config.fauna_criteria
         ],
+        "zone_humide_mode": config.zone_humide_mode,
+        "zones_humides_probables_mode": config.zones_humides_probables_mode,
+        "min_zone_humide_ha": config.min_zone_humide_ha,
+        "excluded_layers": list(config.excluded_layers),
+        "troncons_hydros_max_dist_m": config.troncons_hydros_max_dist_m,
+        "surfaces_hydros_max_dist_m": config.surfaces_hydros_max_dist_m,
+        "natura2000_mode": (
+            "exclude" if "natura_2000" in config.excluded_layers else "ignore"
+        ),
+        "natura2000_source": "ecocompensation.natura_2000",
+        "study_type": (
+            "zones_humides_intra"
+            if config.search_mode == "within_foncier"
+            else "faune_buffer"
+        ),
     }
+
+
+def _prefetch_map_display_layers(
+    engine,
+    project_id: str,
+    aoi_id: str,
+    config: FilterConfig,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Charge les couches SIG pour affichage carte (ZH, ENS, préemption…)."""
+    if config.search_mode != "within_foncier":
+        return
+    index = {cfg["key"]: cfg for cfg in LAYER_REGISTRY}
+    keys = ["zone_humide", "espaces_naturels_sensibles_ens", "preemption_ens"]
+    if config.zones_humides_probables_mode in ("intersect", "exclude"):
+        keys.append("zones_humides_probables")
+    if config.troncons_hydros_max_dist_m is not None:
+        keys.append("troncons_hydros")
+    if config.surfaces_hydros_max_dist_m is not None:
+        keys.append("surfaces_hydros")
+
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    for key in keys:
+        cfg = index.get(key)
+        if not cfg:
+            continue
+        _log(f"PREFETCH_MAP:{key}:start")
+        try:
+            result = cfg["fn"](engine, project_id, aoi_id, _log)
+            n = getattr(result, "n_inserted", result) if result is not None else 0
+            _log(f"PREFETCH_MAP:{key}:done:{n}")
+        except Exception as exc:
+            logger.warning("Prefetch carte %s project_id=%s: %s", key, project_id, exc)
+            _log(f"PREFETCH_MAP:{key}:error:{exc}")
+
+
+def _prefetch_filter_layers(
+    engine,
+    project_id: str,
+    aoi_id: str,
+    config: FilterConfig,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """Charge les couches SIG nécessaires au filtrage (ZH, ZH probables…)."""
+    index = {cfg["key"]: cfg for cfg in LAYER_REGISTRY}
+    keys: list[str] = []
+    if config.zone_humide_mode in ("intersect", "exclude"):
+        keys.append("zone_humide")
+    if config.zones_humides_probables_mode in ("intersect", "exclude"):
+        keys.append("zones_humides_probables")
+    if config.troncons_hydros_max_dist_m is not None:
+        keys.append("troncons_hydros")
+    if config.surfaces_hydros_max_dist_m is not None:
+        keys.append("surfaces_hydros")
+
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    for key in keys:
+        cfg = index.get(key)
+        if not cfg:
+            continue
+        _log(f"PREFETCH_LAYER:{key}:start")
+        try:
+            result = cfg["fn"](engine, project_id, aoi_id, _log)
+            n = getattr(result, "n_inserted", result) if result is not None else 0
+            _log(f"PREFETCH_LAYER:{key}:done:{n}")
+        except Exception as exc:
+            logger.warning("Prefetch couche %s project_id=%s: %s", key, project_id, exc)
+            _log(f"PREFETCH_LAYER:{key}:error:{exc}")
 
 
 def _persist_pipeline_results(
@@ -90,7 +181,13 @@ def _persist_pipeline_results(
                         ST_Distance(ST_Centroid(p.geom_2154), ST_Centroid(a.geom_2154)) / 1000.0
                     )::numeric, 3) AS distance_km,
                     p.veg_libelles,
-                    p.fauna_distances
+                    p.fauna_distances,
+                    COALESCE(p.zone_humide_ha, 0) AS zone_humide_ha,
+                    p.dist_hydro_m,
+                    COALESCE(p.troncons_hydro_info, '[]'::jsonb) AS troncons_hydro_info,
+                    p.dist_surface_hydro_m,
+                    COALESCE(p.surface_hydro_ha, 0) AS surface_hydro_ha,
+                    COALESCE(p.surfaces_hydro_info, '[]'::jsonb) AS surfaces_hydro_info
                 FROM ecocompensation_results.parcelles p
                 CROSS JOIN ecocompensation.aoi a
                 WHERE p.project_id = CAST(:pid AS uuid)
@@ -111,15 +208,45 @@ def _persist_pipeline_results(
             "surface_ha": float(row["surface_ha"] or 0),
             "miller": float(row["miller"] or 0),
             "distance_km": float(row["distance_km"] or 0),
-            "dist_hydro_m": None,
+            "dist_hydro_m": (
+                float(row["dist_hydro_m"])
+                if row.get("dist_hydro_m") is not None
+                else None
+            ),
+            "troncons_hydro_info": list(row.get("troncons_hydro_info") or []),
+            "dist_surface_hydro_m": (
+                float(row["dist_surface_hydro_m"])
+                if row.get("dist_surface_hydro_m") is not None
+                else None
+            ),
+            "surface_hydro_ha": float(row.get("surface_hydro_ha") or 0),
+            "surfaces_hydro_info": list(row.get("surfaces_hydro_info") or []),
             "veg_libelles": list(row["veg_libelles"] or []),
             "fauna_distances": dict(row["fauna_distances"] or {}),
+            "zone_humide_ha": float(row["zone_humide_ha"] or 0),
         })
 
-    funnel = [
-        {"step": 1, "label": f"Candidats (≥{config.min_area_ha} ha)", "count": result.n_tiled},
-        {"step": 2, "label": "Après filtrage écologique", "count": result.n_after_filter},
-    ]
+    funnel: list[dict] = []
+    if result.n_tiled > 0:
+        funnel.append({
+            "step": 0,
+            "label": f"Candidats (≥{config.min_area_ha} ha)",
+            "count": result.n_tiled,
+        })
+    if result.funnel:
+        offset = len(funnel)
+        for step in result.funnel:
+            funnel.append({
+                "step": offset + int(step.get("step", 0)),
+                "label": str(step.get("label", "")),
+                "count": int(step.get("count", 0)),
+            })
+    elif result.n_after_filter >= 0:
+        funnel.append({
+            "step": len(funnel),
+            "label": "Après filtrage écologique",
+            "count": result.n_after_filter,
+        })
     options_json = _filter_options_json(config)
     result_summary = {
         "pipeline": "filter_v2",
@@ -167,6 +294,18 @@ def _persist_pipeline_results(
                 enrich["veg_libelles"] = p["veg_libelles"]
             if p.get("fauna_distances"):
                 enrich["fauna_distances"] = p["fauna_distances"]
+            if p.get("zone_humide_ha") is not None:
+                enrich["zone_humide_ha"] = p["zone_humide_ha"]
+            if p.get("dist_hydro_m") is not None:
+                enrich["dist_hydro_m"] = p["dist_hydro_m"]
+            if p.get("troncons_hydro_info"):
+                enrich["troncons_hydro_info"] = p["troncons_hydro_info"]
+            if p.get("dist_surface_hydro_m") is not None:
+                enrich["dist_surface_hydro_m"] = p["dist_surface_hydro_m"]
+            if p.get("surface_hydro_ha") is not None:
+                enrich["surface_hydro_ha"] = p["surface_hydro_ha"]
+            if p.get("surfaces_hydro_info"):
+                enrich["surfaces_hydro_info"] = p["surfaces_hydro_info"]
             if enrich:
                 pool_service.upsert_metric(
                     conn,
@@ -287,6 +426,12 @@ async def _run_uf_after_filter(
             fauna_dist_m=config.fauna_criteria[0].dist_m if config.fauna_criteria else 1000.0,
             fauna_criteria=fauna_criteria or None,
             miller_thresh=config.miller_thresh,
+            study_type=(
+                "zones_humides_intra"
+                if config.search_mode == "within_foncier"
+                else "faune_buffer"
+            ),
+            min_zone_humide_ha=config.min_zone_humide_ha,
         )
         with engine.begin() as conn:
             conn.execute(
@@ -451,6 +596,18 @@ async def run_filter_orchestration(
             )
     except Exception:
         logger.exception("status=filtering failed project_id=%s", project_id)
+
+    await emit("running", "parcelles", "Préparation des couches de filtrage…")
+
+    await loop.run_in_executor(
+        None,
+        lambda: _prefetch_filter_layers(engine, project_id, aoi_id, config),
+    )
+
+    await loop.run_in_executor(
+        None,
+        lambda: _prefetch_map_display_layers(engine, project_id, aoi_id, config),
+    )
 
     await emit("running", "parcelles", "Parcelles candidates en cours…")
 

@@ -38,6 +38,7 @@ from typing import Callable, Literal
 from sqlalchemy import text
 
 from db import get_engine
+from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS, national_exclusion_steps
 
 # Cible sortie (à rendre paramétrable par l'interface)
 TARGET_COUNT = 50
@@ -94,7 +95,7 @@ class FiltreOptions:
                 "mode": "OR",
             },
             carhab_nom_eunis=[],
-            excluded_layers=["geomce"],
+            excluded_layers=list(DEFAULT_EXCLUDED_LAYERS),
             ebc_mode="ignore",
             natura2000_mode="exclude",
             reserves_naturelles_mode="ignore",
@@ -324,55 +325,16 @@ def run(
         log("⚠️ Aucune parcelle après Miller + superficie, arrêt.")
         return None if not return_parcelles else ([], 0.0, funnel)
 
-    # --- 3) Exclusion GEOMCE (pilotée par excluded_layers)
-    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_surf"):
-        where_clauses.append(
-            """
-            NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.mesures_compensatoire_surf ms
-                WHERE ST_Intersects(p.geom_2154, ms.geom_2154)
-            )
-            """
-        )
-    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_lin"):
-        where_clauses.append(
-            """
-            NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.mesures_compensatoire_lin ml
-                WHERE ST_Intersects(p.geom_2154, ml.geom_2154)
-            )
-            """
-        )
-    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_pct"):
-        where_clauses.append(
-            """
-            NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.mesures_compensatoire_pct mp
-                WHERE ST_Intersects(p.geom_2154, mp.geom_2154)
-            )
-            """
-        )
-    if "geomce" in excluded_layers and has("ecocompensation_results.mesures_compensatoire_commune"):
-        where_clauses.append(
-            """
-            NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.mesures_compensatoire_commune mc
-                WHERE ST_Intersects(p.geom_2154, mc.geom_2154)
-            )
-            """
-        )
-    geomce_applied = "geomce" in excluded_layers and (
-        has("ecocompensation_results.mesures_compensatoire_surf")
-        or has("ecocompensation_results.mesures_compensatoire_lin")
-        or has("ecocompensation_results.mesures_compensatoire_pct")
-        or has("ecocompensation_results.mesures_compensatoire_commune")
-    )
+    # --- 3) Exclusions nationales (GEOMCE, préemption ENS, ENS)
     n3 = maybe_count(where_clauses)
-    log(f"3) Exclusion mesures compensatoires (GEOMCE)         → {n3} parcelles")
-    emit_progress("Après exclusion GEOMCE", n3)
-    if funnel_mode and geomce_applied:
-        step_idx += 1
-        funnel.append({"step": step_idx, "label": "Après exclusion GEOMCE", "count": n3})
+    for label, clause in national_exclusion_steps(excluded_layers, geom_alias="p"):
+        where_clauses.append(clause)
+        n3 = maybe_count(where_clauses)
+        log(f"3) {label}                              → {n3} parcelles")
+        emit_progress(label, n3)
+        if funnel_mode:
+            step_idx += 1
+            funnel.append({"step": step_idx, "label": label, "count": n3})
 
     # --- 3b) Exclusion du pool indésirable projet (pilotée par excluded_layers)
     if "project_indesirables" in excluded_layers and has("ecocompensation_results.parcelles_project_indesirables"):
@@ -405,12 +367,12 @@ def run(
             )
             """
         )
-    elif options.natura2000_mode == "exclude" and has("ecocompensation_results.natura2000"):
+    elif options.natura2000_mode == "exclude":
         where_clauses.append(
             """
             NOT EXISTS (
-                SELECT 1 FROM ecocompensation_results.natura2000 n2
-                WHERE n2.project_id = CAST(:project_id AS uuid)
+                SELECT 1 FROM ecocompensation.natura_2000 n2
+                WHERE n2.geom_2154 IS NOT NULL
                   AND p.geom_2154 && n2.geom_2154
                   AND ST_Intersects(p.geom_2154, n2.geom_2154)
             )
@@ -424,7 +386,9 @@ def run(
     )
     log(f"4) Natura 2000 ({_natura_label})                          → {n4} parcelles")
     emit_progress(f"Après filtre Natura 2000 ({_natura_label})", n4)
-    natura_applied = options.natura2000_mode in ("intersect", "exclude") and has("ecocompensation_results.natura2000")
+    natura_applied = options.natura2000_mode == "exclude" or (
+        options.natura2000_mode == "intersect" and has("ecocompensation_results.natura2000")
+    )
     if funnel_mode and natura_applied:
         step_idx += 1
         funnel.append({"step": step_idx, "label": f"Après filtre Natura 2000 ({_natura_label})", "count": n4})

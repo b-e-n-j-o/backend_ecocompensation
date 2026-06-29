@@ -10,16 +10,64 @@ Les routes /api/fauna/taxa déjà définies dans main.py restent inchangées.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
+import zipfile
+from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+import geopandas as gpd
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
+from shapely.geometry import shape
 from sqlalchemy import bindparam, text
 
 from db import get_engine
+from exports.qgis_encoding import write_geodataframe_shapefile_qgis
 
 router = APIRouter()
 _engine = get_engine()
+
+_FAUNA_POINT_COLS = """
+    id_obs,
+    id_releve,
+    cd_ref,
+    nom_vernaculaire,
+    nom_cite,
+    nom_taxref,
+    classe,
+    ordre,
+    famille,
+    date_debut,
+    date_fin,
+    annee_obs,
+    geom_id,
+    geom_type,
+    lon,
+    lat,
+    geometry
+"""
+
+_FAUNA_POINT_PROPS = """
+    'id_obs', id_obs,
+    'id_releve', id_releve,
+    'cd_ref', cd_ref,
+    'nom_vernaculaire', nom_vernaculaire,
+    'nom_cite', nom_cite,
+    'nom_taxref', nom_taxref,
+    'classe', classe,
+    'ordre', ordre,
+    'famille', famille,
+    'date_debut', date_debut,
+    'date_fin', date_fin,
+    'annee_obs', annee_obs,
+    'geom_id', geom_id,
+    'geom_type', geom_type,
+    'lon', lon,
+    'lat', lat
+"""
 
 
 # =========================================================================
@@ -46,17 +94,25 @@ class FaunaTaxonRefItem(BaseModel):
 
 
 class ObservationsRequest(BaseModel):
-    taxa: list[str] = Field(
-        ...,
-        min_length=1,
-        description="Noms vernaculaires = colonne tax de fauna_taxa_ref (= nom_vernaculaire dans fauna)",
+    taxa: Optional[list[str]] = Field(
+        None,
+        description="Noms vernaculaires (= tax dans fauna_taxa_ref). Omis ou vide = toutes espèces (bbox requise).",
     )
-    buffer_m: float = Field(0, ge=0, le=50000, description="Rayon du buffer en mètres (0 = pas de buffer)")
+    buffer_m: float = Field(
+        0,
+        ge=0,
+        le=50000,
+        description="Buffer par défaut (m) si buffer_by_taxon ne précise pas l'espèce",
+    )
+    buffer_by_taxon: Optional[dict[str, float]] = Field(
+        None,
+        description="Buffer en mètres par nom vernaculaire (prioritaire sur buffer_m)",
+    )
     bbox: Optional[list[float]] = Field(
         None,
         min_length=4,
         max_length=4,
-        description="Optionnel : [minLon, minLat, maxLon, maxLat] en WGS84 pour filtrer sur la vue carte",
+        description="[minLon, minLat, maxLon, maxLat] en WGS84",
     )
     date_min: Optional[str] = None
     date_max: Optional[str] = None
@@ -64,25 +120,51 @@ class ObservationsRequest(BaseModel):
 
     @field_validator("taxa", mode="before")
     @classmethod
-    def normalize_taxa(cls, v: object) -> list[str]:
+    def normalize_taxa(cls, v: object) -> Optional[list[str]]:
+        if v is None:
+            return None
         if not isinstance(v, list):
-            raise TypeError("taxa doit être une liste de chaînes")
+            raise TypeError("taxa doit être une liste de chaînes ou null")
         cleaned = [str(t).strip() for t in v if t is not None and str(t).strip()]
-        if not cleaned:
-            raise ValueError("Au moins un taxon non vide est requis")
-        return cleaned
+        return cleaned or None
+
+    @field_validator("buffer_by_taxon", mode="before")
+    @classmethod
+    def normalize_buffer_by_taxon(cls, v: object) -> Optional[dict[str, float]]:
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise TypeError("buffer_by_taxon doit être un objet {espèce: mètres}")
+        out: dict[str, float] = {}
+        for k, val in v.items():
+            key = str(k).strip()
+            if not key:
+                continue
+            try:
+                out[key] = float(val)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"Buffer invalide pour {key!r}") from e
+        return out or None
 
     @model_validator(mode="after")
-    def validate_bbox(self) -> ObservationsRequest:
-        if self.bbox is None:
-            return self
-        if len(self.bbox) != 4:
-            raise ValueError("bbox doit contenir exactement 4 nombres [minLon, minLat, maxLon, maxLat]")
-        w, s, e, n = (float(x) for x in self.bbox)
-        if w >= e or s >= n:
-            raise ValueError("bbox invalide : minLon < maxLon et minLat < maxLat requis")
-        if not (-180.0 <= w <= 180.0 and -180.0 <= e <= 180.0 and -90.0 <= s <= 90.0 and -90.0 <= n <= 90.0):
-            raise ValueError("bbox hors plage lon/lat autorisée")
+    def validate_request(self) -> ObservationsRequest:
+        if self.bbox is not None:
+            if len(self.bbox) != 4:
+                raise ValueError("bbox doit contenir exactement 4 nombres [minLon, minLat, maxLon, maxLat]")
+            w, s, e, n = (float(x) for x in self.bbox)
+            if w >= e or s >= n:
+                raise ValueError("bbox invalide : minLon < maxLon et minLat < maxLat requis")
+            if not (
+                -180.0 <= w <= 180.0
+                and -180.0 <= e <= 180.0
+                and -90.0 <= s <= 90.0
+                and -90.0 <= n <= 90.0
+            ):
+                raise ValueError("bbox hors plage lon/lat autorisée")
+        has_taxa = bool(self.taxa)
+        has_bbox = self.bbox is not None and len(self.bbox) == 4
+        if not has_taxa and not has_bbox:
+            raise ValueError("Au moins taxa ou bbox est requis")
         return self
 
 
@@ -90,10 +172,18 @@ def _no_prep(t: Any) -> Any:
     return t.execution_options(no_prepare=True)
 
 
+def _has_taxa(req: ObservationsRequest) -> bool:
+    return bool(req.taxa)
+
+
 def _build_base_where_tax_geom_dates(req: ObservationsRequest) -> tuple[list[str], dict[str, Any]]:
-    """Prédicats communs : espèces + géométrie + dates (sans bbox)."""
-    parts = ["nom_vernaculaire IN :taxa", "geometry IS NOT NULL"]
-    params: dict[str, Any] = {"taxa": list(req.taxa)}
+    """Prédicats communs : espèces (optionnel) + géométrie + dates (sans bbox)."""
+    parts = ["geometry IS NOT NULL"]
+    params: dict[str, Any] = {}
+
+    if _has_taxa(req):
+        parts.append("nom_vernaculaire IN :taxa")
+        params["taxa"] = list(req.taxa or [])
 
     if req.date_min:
         parts.append("date_debut >= CAST(:date_min AS date)")
@@ -121,6 +211,303 @@ def _bbox_params(req: ObservationsRequest) -> dict[str, Any]:
         "bbox_maxx": req.bbox[2],
         "bbox_maxy": req.bbox[3],
     }
+
+
+def _bind_taxa_if_needed(stmt: Any, req: ObservationsRequest) -> Any:
+    if _has_taxa(req):
+        return stmt.bindparams(bindparam("taxa", expanding=True))
+    return stmt
+
+
+def _resolve_taxon_buffers(req: ObservationsRequest) -> dict[str, float]:
+    """Espèce → buffer (m) ; ignoré si all-species (pas de taxa)."""
+    if not _has_taxa(req):
+        return {}
+    by_taxon = req.buffer_by_taxon or {}
+    out: dict[str, float] = {}
+    for tax in req.taxa or []:
+        buf = by_taxon.get(tax, req.buffer_m)
+        if buf and buf > 0:
+            out[tax] = float(buf)
+    return out
+
+
+def _points_geojson_sql(req: ObservationsRequest, has_bbox: bool) -> tuple[Any, dict[str, Any]]:
+    """Construit la requête points (FeatureCollection GeoJSON)."""
+    base_parts, base_params = _build_base_where_tax_geom_dates(req)
+    base_where_sql = " AND ".join(base_parts)
+
+    geom_expr = "ST_Transform(ST_PointOnSurface(ST_MakeValid(geometry)), 4326)"
+
+    if has_bbox:
+        bbox_sql = _bbox_predicate_sql()
+        bbox_p = _bbox_params(req)
+        params = {**base_params, **bbox_p, "obs_limit": req.limit}
+
+        # Sans taxa : filtre bbox d'abord (index GiST 4326) sur toute la table.
+        if not _has_taxa(req):
+            sql = _no_prep(
+                text(
+                    f"""
+        WITH base AS MATERIALIZED (
+            SELECT {_FAUNA_POINT_COLS}
+            FROM ecocompensation.fauna
+            WHERE {base_where_sql}
+              AND {_bbox_predicate_sql()}
+        ),
+        src AS (
+            SELECT
+                id_obs, id_releve, cd_ref, nom_vernaculaire, nom_cite, nom_taxref,
+                classe, ordre, famille, date_debut, date_fin, annee_obs,
+                geom_id, geom_type, lon, lat,
+                {geom_expr} AS geom
+            FROM base
+            LIMIT :obs_limit
+        )
+        SELECT jsonb_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'type', 'Feature',
+                    'geometry', ST_AsGeoJSON(geom)::jsonb,
+                    'properties', jsonb_build_object({_FAUNA_POINT_PROPS})
+                )
+            ), '[]'::jsonb)
+        ) AS fc
+        FROM src
+        """
+                )
+            )
+            return sql, params
+
+        sql = _bind_taxa_if_needed(
+            _no_prep(
+                text(
+                    f"""
+        WITH base AS MATERIALIZED (
+            SELECT {_FAUNA_POINT_COLS}
+            FROM ecocompensation.fauna
+            WHERE {base_where_sql}
+        ),
+        src AS (
+            SELECT
+                id_obs, id_releve, cd_ref, nom_vernaculaire, nom_cite, nom_taxref,
+                classe, ordre, famille, date_debut, date_fin, annee_obs,
+                geom_id, geom_type, lon, lat,
+                {geom_expr} AS geom
+            FROM base
+            WHERE {bbox_sql}
+            LIMIT :obs_limit
+        )
+        SELECT jsonb_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'type', 'Feature',
+                    'geometry', ST_AsGeoJSON(geom)::jsonb,
+                    'properties', jsonb_build_object({_FAUNA_POINT_PROPS})
+                )
+            ), '[]'::jsonb)
+        ) AS fc
+        FROM src
+        """
+                )
+            ),
+            req,
+        )
+        return sql, params
+
+    params = {**base_params, "obs_limit": req.limit}
+    sql = _bind_taxa_if_needed(
+        _no_prep(
+            text(
+                f"""
+        WITH src AS (
+            SELECT
+                id_obs, id_releve, cd_ref, nom_vernaculaire, nom_cite, nom_taxref,
+                classe, ordre, famille, date_debut, date_fin, annee_obs,
+                geom_id, geom_type, lon, lat,
+                {geom_expr} AS geom
+            FROM ecocompensation.fauna
+            WHERE {base_where_sql}
+            LIMIT :obs_limit
+        )
+        SELECT jsonb_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'type', 'Feature',
+                    'geometry', ST_AsGeoJSON(geom)::jsonb,
+                    'properties', jsonb_build_object({_FAUNA_POINT_PROPS})
+                )
+            ), '[]'::jsonb)
+        ) AS fc
+        FROM src
+        """
+            )
+        ),
+        req,
+    )
+    return sql, params
+
+
+def _buffers_geojson_sql(
+    req: ObservationsRequest,
+    has_bbox: bool,
+    taxon_buffers: dict[str, float],
+) -> tuple[Any, dict[str, Any]] | tuple[None, None]:
+    if not taxon_buffers:
+        return None, None
+
+    base_parts, base_params = _build_base_where_tax_geom_dates(req)
+    base_where_sql = " AND ".join(base_parts)
+    taxa_list = list(taxon_buffers.keys())
+    buf_list = [taxon_buffers[t] for t in taxa_list]
+
+    params: dict[str, Any] = {
+        **base_params,
+        "taxa_list": taxa_list,
+        "buf_list": buf_list,
+    }
+
+    taxon_cfg_cte = """
+        taxon_cfg AS (
+            SELECT t.tax::text AS nom_vernaculaire, t.buf::float8 AS buf_m
+            FROM unnest(CAST(:taxa_list AS text[]), CAST(:buf_list AS float8[])) AS t(tax, buf)
+        )"""
+
+    if has_bbox:
+        bbox_sql = _bbox_predicate_sql()
+        bbox_p = _bbox_params(req)
+        params.update(bbox_p)
+        sql = _no_prep(
+            text(
+                f"""
+        WITH {taxon_cfg_cte},
+        base AS MATERIALIZED (
+            SELECT f.nom_vernaculaire, f.geometry, tc.buf_m
+            FROM ecocompensation.fauna f
+            INNER JOIN taxon_cfg tc ON f.nom_vernaculaire = tc.nom_vernaculaire
+            WHERE {base_where_sql}
+        ),
+        filt AS (
+            SELECT nom_vernaculaire, geometry, buf_m
+            FROM base
+            WHERE {bbox_sql}
+        ),
+        src AS (
+            SELECT
+                nom_vernaculaire,
+                buf_m,
+                ST_Union(ST_MakeValid(geometry)) AS geom
+            FROM filt
+            GROUP BY nom_vernaculaire, buf_m
+        )
+        SELECT jsonb_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'type', 'Feature',
+                    'geometry', ST_AsGeoJSON(
+                        ST_Buffer(
+                            ST_Transform(geom, 4326)::geography,
+                            buf_m
+                        )::geometry
+                    )::jsonb,
+                    'properties', jsonb_build_object(
+                        'nom_vernaculaire', nom_vernaculaire,
+                        'buffer_m', buf_m
+                    )
+                )
+            ), '[]'::jsonb)
+        ) AS fc
+        FROM src
+        """
+            )
+        )
+        if _has_taxa(req):
+            sql = sql.bindparams(bindparam("taxa", expanding=True))
+        return sql, params
+
+    sql = _no_prep(
+        text(
+            f"""
+        WITH {taxon_cfg_cte},
+        src AS (
+            SELECT
+                f.nom_vernaculaire,
+                tc.buf_m,
+                ST_Union(ST_MakeValid(f.geometry)) AS geom
+            FROM ecocompensation.fauna f
+            INNER JOIN taxon_cfg tc ON f.nom_vernaculaire = tc.nom_vernaculaire
+            WHERE {base_where_sql}
+            GROUP BY f.nom_vernaculaire, tc.buf_m
+        )
+        SELECT jsonb_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'type', 'Feature',
+                    'geometry', ST_AsGeoJSON(
+                        ST_Buffer(
+                            ST_Transform(geom, 4326)::geography,
+                            buf_m
+                        )::geometry
+                    )::jsonb,
+                    'properties', jsonb_build_object(
+                        'nom_vernaculaire', nom_vernaculaire,
+                        'buffer_m', buf_m
+                    )
+                )
+            ), '[]'::jsonb)
+        ) AS fc
+        FROM src
+        """
+        )
+    )
+    if _has_taxa(req):
+        sql = sql.bindparams(bindparam("taxa", expanding=True))
+    return sql, params
+
+
+def _fetch_observations(req: ObservationsRequest) -> dict[str, Any]:
+    has_bbox = req.bbox is not None and len(req.bbox) == 4
+    points_sql, params_points = _points_geojson_sql(req, has_bbox)
+    taxon_buffers = _resolve_taxon_buffers(req)
+    buffers_sql, params_buf = _buffers_geojson_sql(req, has_bbox, taxon_buffers)
+
+    try:
+        with _engine.connect() as conn:
+            row_points = conn.execute(points_sql, params_points).mappings().one_or_none()
+            points_fc = row_points["fc"] if row_points else {"type": "FeatureCollection", "features": []}
+
+            buffers_fc = None
+            if buffers_sql is not None and params_buf is not None:
+                row_buf = conn.execute(buffers_sql, params_buf).mappings().one_or_none()
+                buffers_fc = row_buf["fc"] if row_buf else None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}") from e
+
+    if isinstance(points_fc, str):
+        points_fc = json.loads(points_fc)
+    if isinstance(buffers_fc, str):
+        buffers_fc = json.loads(buffers_fc)
+
+    return {"points": points_fc, "buffers": buffers_fc}
+
+
+def _geojson_fc_to_gdf(fc: dict[str, Any]) -> gpd.GeoDataFrame:
+    features = fc.get("features") or []
+    if not features:
+        raise ValueError("Aucune observation à exporter")
+    rows: list[dict[str, Any]] = []
+    geoms = []
+    for f in features:
+        props = dict(f.get("properties") or {})
+        props.pop("_color", None)
+        geoms.append(shape(f["geometry"]))
+        rows.append(props)
+    return gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
 
 
 # =========================================================================
@@ -177,13 +564,7 @@ def search_species(
     q: str = Query(..., min_length=1, description="Texte saisi"),
     limit: int = Query(20, ge=1, le=100),
 ):
-    """Recherche par nom_vernaculaire (insensible à la casse).
-
-    N'utilise pas ``unaccent()`` : l'extension PostgreSQL ``unaccent`` n'est pas
-    toujours activée (ex. Supabase). Pour une recherche insensible aux accents,
-    exécuter en base : ``CREATE EXTENSION IF NOT EXISTS unaccent;`` puis rétablir
-    ``unaccent(lower(...))`` dans la clause LIKE si besoin.
-    """
+    """Recherche par nom_vernaculaire (insensible à la casse)."""
     pattern = f"%{q}%"
     sql = _no_prep(
         text(
@@ -217,243 +598,41 @@ def search_species(
 @router.post("/observations")
 def get_observations(req: ObservationsRequest):
     """
-    Renvoie un objet :
-    {
-        "points":  FeatureCollection (geometry points),
-        "buffers": FeatureCollection | null  (un polygone par espèce, dissous)
-    }
+    Renvoie ``{ points: FeatureCollection, buffers: FeatureCollection | null }``.
 
-    Géométries source en **EPSG:2154** ; sortie GeoJSON en **4326**.
-
-    Si ``bbox`` est fournie : filtre **d'abord par taxon** (CTE ``MATERIALIZED``), puis bbox
-    sur ce sous-ensemble — évite un parcours GiST large (~centaines de k lignes) puis filtre nom.
+    - ``taxa`` optionnel : si absent, ``bbox`` est obligatoire (toutes espèces dans l'emprise).
+    - ``buffer_by_taxon`` : buffer distinct par espèce (sinon ``buffer_m`` par défaut).
+    - Attributs : colonnes complètes de ``ecocompensation.fauna`` (hors geometry brute).
     """
-    base_parts, base_params = _build_base_where_tax_geom_dates(req)
-    base_where_sql = " AND ".join(base_parts)
-    has_bbox = req.bbox is not None and len(req.bbox) == 4
+    return _fetch_observations(req)
 
-    if has_bbox:
-        bbox_sql = _bbox_predicate_sql()
-        bbox_p = _bbox_params(req)
-        params_points = {**base_params, **bbox_p, "obs_limit": req.limit}
-        points_sql = _no_prep(
-            text(
-                f"""
-        WITH base AS MATERIALIZED (
-            SELECT
-                id_obs,
-                id_releve,
-                cd_ref,
-                nom_vernaculaire,
-                nom_taxref,
-                classe,
-                ordre,
-                famille,
-                date_debut,
-                date_fin,
-                annee_obs,
-                geometry
-            FROM ecocompensation.fauna
-            WHERE {base_where_sql}
-        ),
-        src AS (
-            SELECT
-                id_obs,
-                id_releve,
-                cd_ref,
-                nom_vernaculaire,
-                nom_taxref,
-                classe,
-                ordre,
-                famille,
-                date_debut,
-                date_fin,
-                annee_obs,
-                ST_Transform(
-                    ST_PointOnSurface(ST_MakeValid(geometry)),
-                    4326
-                ) AS geom
-            FROM base
-            WHERE {bbox_sql}
-            LIMIT :obs_limit
-        )
-        SELECT jsonb_build_object(
-            'type', 'FeatureCollection',
-            'features', COALESCE(jsonb_agg(
-                jsonb_build_object(
-                    'type', 'Feature',
-                    'geometry', ST_AsGeoJSON(geom)::jsonb,
-                    'properties', jsonb_build_object(
-                        'id_obs', id_obs,
-                        'id_releve', id_releve,
-                        'cd_ref', cd_ref,
-                        'nom_vernaculaire', nom_vernaculaire,
-                        'nom_taxref', nom_taxref,
-                        'classe', classe,
-                        'ordre', ordre,
-                        'famille', famille,
-                        'date_debut', date_debut,
-                        'date_fin', date_fin,
-                        'annee_obs', annee_obs
-                    )
-                )
-            ), '[]'::jsonb)
-        ) AS fc
-        FROM src
-        """
-            ).bindparams(bindparam("taxa", expanding=True))
-        )
-    else:
-        params_points = {**base_params, "obs_limit": req.limit}
-        points_sql = _no_prep(
-            text(
-                f"""
-        WITH src AS (
-            SELECT
-                id_obs,
-                id_releve,
-                cd_ref,
-                nom_vernaculaire,
-                nom_taxref,
-                classe,
-                ordre,
-                famille,
-                date_debut,
-                date_fin,
-                annee_obs,
-                ST_Transform(
-                    ST_PointOnSurface(ST_MakeValid(geometry)),
-                    4326
-                ) AS geom
-            FROM ecocompensation.fauna
-            WHERE {base_where_sql}
-            LIMIT :obs_limit
-        )
-        SELECT jsonb_build_object(
-            'type', 'FeatureCollection',
-            'features', COALESCE(jsonb_agg(
-                jsonb_build_object(
-                    'type', 'Feature',
-                    'geometry', ST_AsGeoJSON(geom)::jsonb,
-                    'properties', jsonb_build_object(
-                        'id_obs', id_obs,
-                        'id_releve', id_releve,
-                        'cd_ref', cd_ref,
-                        'nom_vernaculaire', nom_vernaculaire,
-                        'nom_taxref', nom_taxref,
-                        'classe', classe,
-                        'ordre', ordre,
-                        'famille', famille,
-                        'date_debut', date_debut,
-                        'date_fin', date_fin,
-                        'annee_obs', annee_obs
-                    )
-                )
-            ), '[]'::jsonb)
-        ) AS fc
-        FROM src
-        """
-            ).bindparams(bindparam("taxa", expanding=True))
-        )
 
-    buffers_fc = None
-    buffers_sql = None
-    params_buf: dict[str, Any] | None = None
-    if req.buffer_m and req.buffer_m > 0:
-        if has_bbox:
-            params_buf = {**base_params, **bbox_p, "buf_m": req.buffer_m}
-            buffers_sql = _no_prep(
-                text(
-                    f"""
-            WITH base AS MATERIALIZED (
-                SELECT nom_vernaculaire, geometry
-                FROM ecocompensation.fauna
-                WHERE {base_where_sql}
-            ),
-            filt AS (
-                SELECT nom_vernaculaire, geometry
-                FROM base
-                WHERE {bbox_sql}
-            ),
-            src AS (
-                SELECT
-                    nom_vernaculaire,
-                    ST_Union(ST_MakeValid(geometry)) AS geom
-                FROM filt
-                GROUP BY nom_vernaculaire
-            )
-            SELECT jsonb_build_object(
-                'type', 'FeatureCollection',
-                'features', COALESCE(jsonb_agg(
-                    jsonb_build_object(
-                        'type', 'Feature',
-                        'geometry', ST_AsGeoJSON(
-                            ST_Buffer(
-                                ST_Transform(geom, 4326)::geography,
-                                :buf_m
-                            )::geometry
-                        )::jsonb,
-                        'properties', jsonb_build_object(
-                            'nom_vernaculaire', nom_vernaculaire,
-                            'buffer_m', CAST(:buf_m AS float)
-                        )
-                    )
-                ), '[]'::jsonb)
-            ) AS fc
-            FROM src
-            """
-                ).bindparams(bindparam("taxa", expanding=True))
-            )
-        else:
-            params_buf = {**base_params, "buf_m": req.buffer_m}
-            buffers_sql = _no_prep(
-                text(
-                    f"""
-            WITH src AS (
-                SELECT
-                    nom_vernaculaire,
-                    ST_Union(ST_MakeValid(geometry)) AS geom
-                FROM ecocompensation.fauna
-                WHERE {base_where_sql}
-                GROUP BY nom_vernaculaire
-            )
-            SELECT jsonb_build_object(
-                'type', 'FeatureCollection',
-                'features', COALESCE(jsonb_agg(
-                    jsonb_build_object(
-                        'type', 'Feature',
-                        'geometry', ST_AsGeoJSON(
-                            ST_Buffer(
-                                ST_Transform(geom, 4326)::geography,
-                                :buf_m
-                            )::geometry
-                        )::jsonb,
-                        'properties', jsonb_build_object(
-                            'nom_vernaculaire', nom_vernaculaire,
-                            'buffer_m', CAST(:buf_m AS float)
-                        )
-                    )
-                ), '[]'::jsonb)
-            ) AS fc
-            FROM src
-            """
-                ).bindparams(bindparam("taxa", expanding=True))
-            )
-
+@router.post("/observations/export/shp")
+def export_observations_shp(req: ObservationsRequest, background_tasks: BackgroundTasks):
+    """Exporte les observations (même filtre que /observations) en shapefile zippé (UTF-8 + .cpg)."""
+    data = _fetch_observations(req)
+    points_fc = data.get("points") or {"type": "FeatureCollection", "features": []}
     try:
-        with _engine.connect() as conn:
-            row_points = conn.execute(points_sql, params_points).mappings().one_or_none()
-            points_fc = row_points["fc"] if row_points else {"type": "FeatureCollection", "features": []}
+        gdf = _geojson_fc_to_gdf(points_fc)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
-            if buffers_sql is not None and params_buf is not None:
-                row_buf = conn.execute(buffers_sql, params_buf).mappings().one_or_none()
-                buffers_fc = row_buf["fc"] if row_buf else None
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}") from e
+    with tempfile.TemporaryDirectory() as tmpdir:
+        shp_path = Path(tmpdir) / "fauna_observations.shp"
+        write_geodataframe_shapefile_qgis(gdf, shp_path)
+        zip_path = Path(tmpdir) / "fauna_observations.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                f = shp_path.with_suffix(ext)
+                if f.exists():
+                    zf.write(f, f.name)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as nf:
+            shutil.copy2(zip_path, nf.name)
+            final_path = nf.name
 
-    if isinstance(points_fc, str):
-        points_fc = json.loads(points_fc)
-    if isinstance(buffers_fc, str):
-        buffers_fc = json.loads(buffers_fc)
-
-    return {"points": points_fc, "buffers": buffers_fc}
+    background_tasks.add_task(os.remove, final_path)
+    return FileResponse(
+        final_path,
+        media_type="application/zip",
+        filename="fauna_observations.zip",
+    )
