@@ -6,6 +6,11 @@ import time
 from sqlalchemy import text
 
 from pool import pool_service
+from pool.profiler_registry import (
+    get_profilers_for_study_type,
+    profiling_summary_label,
+    resolve_study_type,
+)
 from pool.profilers.composite_score_v1 import CompositeScoreV1Profiler
 from pool.profilers.durete_fonciere import DureteFonciereProfiler
 from pool.profilers.personnes_morales import PersonnesMoralesProfiler
@@ -13,17 +18,12 @@ from pool.profilers.score_eco import ScoreEcoProfiler
 
 logger = logging.getLogger(__name__)
 
-# filter_v2 : profilage léger sur tout le pool (PM + prospects + score éco).
-# Profilers lourds (zonage hybride, CARHAB, dureté…) retirés — réactiver au besoin pour runs legacy.
-PROFILERS = [
-    PersonnesMoralesProfiler(),
-    ScoreEcoProfiler(),
-]
-
 
 def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
     t0 = time.perf_counter()
     pool_service.ensure_tables(conn)
+    study_type = resolve_study_type(conn, project_id, run_id)
+    profilers = get_profilers_for_study_type(study_type)
     try:
         idu_total = conn.execute(
             text(
@@ -40,10 +40,11 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
         idu_total = None
 
     logger.info(
-        "POOL RUN START | project_id=%s run_id=%s profilers=%d parcelles_pool=%s",
+        "POOL RUN START | project_id=%s run_id=%s study_type=%s profilers=%s parcelles_pool=%s",
         project_id,
         run_id,
-        len(PROFILERS),
+        study_type,
+        [p.metric_key for p in profilers],
         idu_total if idu_total is not None else "unknown",
     )
     try:
@@ -53,12 +54,12 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
     n_ok = 0
     n_err = 0
     total_upserts = 0
-    for idx, profiler in enumerate(PROFILERS, 1):
+    for idx, profiler in enumerate(profilers, 1):
         p0 = time.perf_counter()
         logger.info(
             "POOL PHASE [%d/%d] START | metric=%s project_id=%s run_id=%s",
             idx,
-            len(PROFILERS),
+            len(profilers),
             profiler.metric_key,
             project_id,
             run_id,
@@ -83,7 +84,7 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
                 logger.info(
                     "POOL PHASE [%d/%d] DONE | metric=%s upserts=%d duration_s=%.2f",
                     idx,
-                    len(PROFILERS),
+                    len(profilers),
                     profiler.metric_key,
                     upserts,
                     elapsed,
@@ -94,7 +95,7 @@ def compute_metrics_for_run(conn, project_id: str, run_id: str) -> None:
             logger.exception(
                 "POOL PHASE [%d/%d] ERROR | metric=%s duration_s=%.2f project_id=%s run_id=%s",
                 idx,
-                len(PROFILERS),
+                len(profilers),
                 profiler.metric_key,
                 elapsed,
                 project_id,
@@ -229,8 +230,18 @@ def compute_durete_for_run(
 
 
 def compute_parcel_score_for_run(conn, project_id: str, run_id: str) -> int:
-    """Recalcule uniquement la métrique `score_eco` pour un run."""
+    """Recalcule uniquement la métrique `score_eco` pour un run (faune_buffer)."""
     pool_service.ensure_tables(conn)
+    study_type = resolve_study_type(conn, project_id, run_id)
+    profiler_keys = {p.metric_key for p in get_profilers_for_study_type(study_type)}
+    if "score_eco" not in profiler_keys:
+        logger.info(
+            "score_eco ignoré pour study_type=%s (project_id=%s run_id=%s)",
+            study_type,
+            project_id,
+            run_id,
+        )
+        return 0
     profiler = ScoreEcoProfiler()
     payload_by_idu = profiler.compute_for_run(conn, project_id, run_id)
     count = 0

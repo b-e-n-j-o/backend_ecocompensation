@@ -1,4 +1,5 @@
-.env
+data_interne/mbtiles/*.mbtiles
+data_interne/mbtiles/*.geojsons
 __pycache__/
 *.pyc
 *.gpkg
@@ -7,3 +8,7 @@ __pycache__/
 *.shx
 *.zip
 *.csv
+.env
+**/.env
+.env.*
+!.env.example

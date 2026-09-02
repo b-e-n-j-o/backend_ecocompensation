@@ -6,19 +6,17 @@ main.py
 
 FastAPI — routes uniquement. Zéro logique métier.
 Toute la logique métier vit dans :
-  - vrai_filtre.py          → filtre + scoring parcelles seules
-  - filtre_uf.py            → filtre + scoring unités foncières
-  - orchestrator.py         → orchestration des couches
-  - layers/layer_runner.py  → registre des couches
+  - layers/filter_pipeline.py → pipeline filter_v2 (tiling + filtre SQL)
+  - filter_orchestrator.py    → orchestration filter_v2 + UF
+  - layers/layer_runner.py    → registre des clips AOI (ZH, UF)
 
 Endpoints :
     POST   /api/projects                      créer un projet
     GET    /api/projects                      lister les projets
     GET    /api/projects/{id}                 détail d'un projet
     DELETE /api/projects/{id}                 supprimer projet + données AOI
-    POST   /api/projects/{id}/fetch           lancer l'orchestration des couches
-    POST   /api/projects/{id}/filter          filtrage parcelles seules + scoring
-    POST   /api/projects/{id}/filter/uf       filtrage unités foncières + scoring
+    POST   /api/projects/{id}/filter-pipeline pipeline filter_v2 (CreateAoiPage)
+    POST   /api/projects/{id}/fetch           clips AOI restants / UF (CLI)
     GET    /api/projects/{id}/results         derniers résultats
     GET    /api/projects/{id}/geojson         GeoJSON parcelles
     GET    /api/projects/{id}/export/csv      export CSV (?scope=parcelles|uf)
@@ -26,7 +24,7 @@ Endpoints :
     GET    /api/projects/{id}/export/rapport-pdf   rapport PDF classement parcelles
     GET    /api/memory                        RAM du processus backend
     GET    /api/layers                        liste des couches
-    WS     /ws/projects/{id}/fetch-progress   suivi temps réel des fetches
+    WS     /ws/projects/{id}/fetch-progress   suivi temps réel (fetch + filter_v2)
 """
 
 from __future__ import annotations
@@ -55,11 +53,10 @@ from sqlalchemy import text
 # ── Modules métier ────────────────────────────────────────────────────────────
 from orchestrator import run_orchestration, fetch_project_two_phases
 from filter_orchestrator import FULL_PIPELINE_PHASES, run_filter_orchestration
-from layers.filter_pipeline import FaunaCriterion, FilterConfig
+from layers.filter_pipeline import FaunaCriterion, FilterConfig, ensure_columns
 from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
 from layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
-from layers.enrich_candidates import ensure_columns
 from layers.enrich_uf import ensure_columns as ensure_uf_columns
 from layers.uf_profiling import build_uf_pool_with_profiling
 from routers.foncier_router import router as foncier_router
@@ -70,17 +67,8 @@ from routers.cadastre_bbox_router import router as cadastre_bbox_router
 from exports.router_exports import router as exports_router
 from routers.rapport_router import router as rapport_router
 from routers.fauna_router import router as fauna_router
+from data_interne.router import router as data_interne_router
 from pool import pool_service
-from pool.pool_service import persist_parcelles_pool_run
-
-from vrai_filtre import (
-    FiltreOptions,
-    run_filter_and_score,      # filtre parcelles + scoring
-)
-from filtre_uf import (
-    FiltreOptions as FiltreOptionsUF,   # même dataclass, réexportée
-    run_filter_uf_and_score,            # filtre UF + scoring
-)
 
 # ─────────────────────────────────────────────
 # Config
@@ -190,6 +178,7 @@ app.include_router(cadastre_bbox_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
 app.include_router(fauna_router, prefix="/api/fauna", tags=["fauna"])
+app.include_router(data_interne_router, prefix="/api/data-interne", tags=["data-interne"])
 
 # Monte le backend Identité Foncière depuis le package local backend/identite_fonciere.
 # Le préfixe dédié évite de surcharger ce main.py avec ses routes métiers.
@@ -205,90 +194,6 @@ except Exception as e:
 # ─────────────────────────────────────────────
 # Schémas Pydantic
 # ─────────────────────────────────────────────
-
-class FiltreOptionsDTO(BaseModel):
-    class VegetationHybrideDTO(BaseModel):
-        zdv_natures: list[str] = Field(default_factory=list)
-        cesbio_libelles: list[str] = Field(default_factory=list)
-        mode: str = Field(default="OR", pattern="^(OR|AND)$")
-
-    class FauneCriterionDTO(BaseModel):
-        tax_nom_val: str = Field(..., min_length=1)
-        mode: str = Field(default="intersect", pattern="^(intersect|within_radius)$")
-        radius_m: float = Field(default=500.0, ge=0.0, le=5000.0)
-        sources: list[str] = Field(default_factory=lambda: ["pct", "lin", "surf"])
-
-    vegetation_hybride: VegetationHybrideDTO = Field(default_factory=VegetationHybrideDTO)
-    funnel_mode: bool = Field(
-        default=False,
-        description="Active le calcul détaillé de l'entonnoir (plus lent).",
-    )
-    log_progress: bool = Field(
-        default=False,
-        description="Active les logs de progression du filtrage (étapes et volumes).",
-    )
-    carhab_nom_eunis:         list[str] = Field(
-        default_factory=list,
-        description="Habitats Carhab : libellés EUNIS (nom_eunis) ; intersection avec au moins un polygone.",
-    )
-    excluded_layers:          list[str] = Field(
-        default_factory=list,
-        description="Couches exclues automatiquement (ex: geomce, project_indesirables).",
-    )
-    arrachage_vignes_mode:    str   = Field(
-        default="ignore",
-        pattern="^(ignore|intersect|exclude)$",
-        description="Arrachage de vignes : ignorer, intersecter la couche, ou exclure les parcelles qui intersectent.",
-    )
-    zone_humide_mode:         str   = Field(
-        default="ignore",
-        pattern="^(ignore|intersect|exclude)$",
-        description="Zones humides : ignorer, intersecter la couche, ou exclure les parcelles qui intersectent.",
-    )
-    ebc_mode: str = Field(
-        default="ignore",
-        pattern="^(ignore|intersect|exclude)$",
-        description="Espaces boisés classés (EBC) : ignorer, intersecter, ou exclure.",
-    )
-    natura2000_mode: str = Field(
-        default="exclude",
-        pattern="^(ignore|intersect|exclude)$",
-        description="Natura 2000 : ignorer, intersecter, ou exclure (défaut = exclure, comportement historique).",
-    )
-    reserves_naturelles_mode: str = Field(
-        default="ignore",
-        pattern="^(ignore|intersect|exclude)$",
-        description="Réserves naturelles : ignorer, intersecter, ou exclure.",
-    )
-    znieff_mode: str = Field(
-        default="ignore",
-        pattern="^(ignore|intersect|exclude)$",
-        description="ZNIEFF (types I et II) : ignorer, intersecter, ou exclure.",
-    )
-    remontee_nappes_classefiab: list[str] = Field(
-        default_factory=list,
-        description="Remontées de nappes : valeurs classefiab à intersecter (liste vide = critère neutre).",
-    )
-    troncon_hydro_mode:       str   = "intersect"
-    troncon_hydro_radius_m:   float = 500.0
-    surface_hydro_mode:       str   = "within_radius"
-    surface_hydro_radius_m:   float = 500.0
-    faune_criteria:           list[FauneCriterionDTO] = Field(default_factory=list)
-    miller_threshold:         float = 0.39
-    min_area_ha:              float = 7.0
-    target_count:             int   = Field(
-        default=50,
-        ge=0,
-        le=20_000,
-        description="Nombre max de parcelles (resp. UF) retournées après classement ; 0 = illimité.",
-    )
-    radius_start_km:          float = 10.0
-    radius_min_km:            float = 1.0
-
-
-class FilterRequest(BaseModel):
-    options: FiltreOptionsDTO = Field(default_factory=FiltreOptionsDTO)
-
 
 class FromParcelleRequest(BaseModel):
     code_insee: str   = Field(..., min_length=4, max_length=5)
@@ -345,7 +250,7 @@ class FaunaFilterCriterionDTO(BaseModel):
 
 
 class FilterPipelineRequest(BaseModel):
-    """POST /api/projects/{id}/filter-pipeline — nouveau pipeline sans staging."""
+    """POST /api/projects/{id}/filter-pipeline — pipeline filter_v2."""
     min_area_ha: float = Field(default=7.0, ge=0.1, le=500)
     miller_thresh: float = Field(default=0.39, ge=0.0, le=1.0)
     cesbio_libelles: list[str] = Field(default_factory=list)
@@ -411,47 +316,6 @@ def _get_aoi_centre(aoi_id: str) -> tuple[float, float]:
     if not row:
         raise HTTPException(404, "AOI introuvable")
     return row["cx"], row["cy"]
-
-
-def _dto_to_filtre_options(dto: FiltreOptionsDTO) -> FiltreOptions:
-    return FiltreOptions(
-        vegetation_hybride={
-            "zdv_natures": [
-                x.strip() for x in dto.vegetation_hybride.zdv_natures if x and str(x).strip()
-            ],
-            "cesbio_libelles": [
-                x.strip()
-                for x in dto.vegetation_hybride.cesbio_libelles
-                if x and str(x).strip()
-            ],
-            "mode": dto.vegetation_hybride.mode,
-        },
-        carhab_nom_eunis=[x.strip() for x in dto.carhab_nom_eunis if x and str(x).strip()],
-        excluded_layers=[x.strip() for x in dto.excluded_layers if x and str(x).strip()],
-        ebc_mode=dto.ebc_mode,
-        natura2000_mode=dto.natura2000_mode,
-        reserves_naturelles_mode=dto.reserves_naturelles_mode,
-        znieff_mode=dto.znieff_mode,
-        remontee_nappes_classefiab=[
-            x.strip() for x in dto.remontee_nappes_classefiab if x and str(x).strip()
-        ],
-        arrachage_vignes_mode=dto.arrachage_vignes_mode,
-        zone_humide_mode=dto.zone_humide_mode,
-        troncon_hydro_mode=dto.troncon_hydro_mode,
-        troncon_hydro_radius_m=dto.troncon_hydro_radius_m,
-        surface_hydro_mode=dto.surface_hydro_mode,
-        surface_hydro_radius_m=dto.surface_hydro_radius_m,
-        faune_criteria=[
-            {
-                "tax_nom_val": c.tax_nom_val.strip(),
-                "mode": c.mode,
-                "radius_m": float(c.radius_m),
-                "sources": [s for s in c.sources if s in ("pct", "lin", "surf")] or ["pct", "lin", "surf"],
-            }
-            for c in dto.faune_criteria
-            if c.tax_nom_val.strip()
-        ],
-    )
 
 
 # ─────────────────────────────────────────────
@@ -1195,127 +1059,6 @@ def get_uf_pool(
         study_type=resolved_study_type,
         min_zone_humide_ha=resolved_min_zh,
     )
-
-
-# ─────────────────────────────────────────────
-# Route — Filter parcelles seules
-# ─────────────────────────────────────────────
-
-@app.post("/api/projects/{project_id}/filter")
-def run_filter(project_id: str, body: FilterRequest):
-    proj = _get_project(project_id)
-    if proj["status"] not in ("ready", "ready_with_errors", "done"):
-        raise HTTPException(400, f"Projet non prêt (status={proj['status']})")
-
-    aoi_id  = str(proj["aoi_id"])
-    opts_dto = body.options
-    cx, cy  = _get_aoi_centre(aoi_id)
-    options = _dto_to_filtre_options(opts_dto)
-    log_progress = bool(getattr(opts_dto, "log_progress", False))
-
-    ram_before = _get_process_memory_mb()
-
-    progress_cb = None
-    if log_progress:
-        logger.info("[filter][%s] Démarrage filtrage avec logs de progression activés", project_id)
-
-        def _progress_cb(step_label: str, count: int) -> None:
-            logger.info("[filter][%s] %s -> %s parcelles", project_id, step_label, count)
-
-        progress_cb = _progress_cb
-
-    # ── Toute la logique métier dans vrai_filtre.py ──
-    result = run_filter_and_score(
-        engine,
-        project_id,
-        aoi_id,
-        cx,
-        cy,
-        options,
-        opts_dto,
-        progress_callback=progress_cb,
-    )
-    try:
-        run_id = persist_parcelles_pool_run(
-            engine,
-            project_id=project_id,
-            options_json=opts_dto.model_dump(),
-            parcelles=result.get("parcelles", []),
-            scope="parcelles",
-            keep_last=5,
-            result_summary={
-                "final_radius_km": float(result.get("final_radius_km") or 0),
-                "funnel": result.get("funnel") or [],
-                "total": int(result.get("total") or 0),
-                **(
-                    {"pool_build": result["pool_build"]}
-                    if isinstance(result.get("pool_build"), dict)
-                    else {}
-                ),
-            },
-        )
-        result["pool_run_id"] = run_id
-    except Exception:
-        logger.exception("Persistance pool parcelles échouée")
-
-    ram_after = _get_process_memory_mb()
-    memory_info = {"ram_mb_before": ram_before, "ram_mb_after": ram_after,
-                   "ram_mb_delta": round(ram_after - ram_before, 2)}
-
-    # Persistance
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-                UPDATE ecocompensation.projects
-                SET last_filter = :f, last_results = :r, status = 'done', updated_at = now()
-                WHERE id = :pid
-            """),
-            {"f": json.dumps(opts_dto.model_dump()),
-             "r": json.dumps({**result, "memory": memory_info}),
-             "pid": project_id},
-        )
-
-    return {**result, "memory": memory_info}
-
-
-# ─────────────────────────────────────────────
-# Route — Filter unités foncières
-# ─────────────────────────────────────────────
-
-@app.post("/api/projects/{project_id}/filter/uf")
-def run_filter_uf(project_id: str, body: FilterRequest):
-    proj = _get_project(project_id)
-    if proj["status"] not in ("ready", "ready_with_errors", "done"):
-        raise HTTPException(400, f"Projet non prêt (status={proj['status']})")
-
-    aoi_id   = str(proj["aoi_id"])
-    opts_dto = body.options
-    cx, cy   = _get_aoi_centre(aoi_id)
-    options  = _dto_to_filtre_options(opts_dto)
-
-    ram_before = _get_process_memory_mb()
-
-    # ── Toute la logique métier dans filtre_uf.py ──
-    result = run_filter_uf_and_score(engine, project_id, aoi_id, cx, cy, options, opts_dto)
-
-    ram_after = _get_process_memory_mb()
-    memory_info = {"ram_mb_before": ram_before, "ram_mb_after": ram_after,
-                   "ram_mb_delta": round(ram_after - ram_before, 2)}
-
-    # Persistance
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-                UPDATE ecocompensation.projects
-                SET last_filter_uf = :f, last_results_uf = :r, status = 'done', updated_at = now()
-                WHERE id = :pid
-            """),
-            {"f": json.dumps(opts_dto.model_dump()),
-             "r": json.dumps({**result, "memory": memory_info}),
-             "pid": project_id},
-        )
-
-    return {**result, "memory": memory_info}
 
 
 # ─────────────────────────────────────────────

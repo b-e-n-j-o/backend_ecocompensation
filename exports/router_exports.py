@@ -21,7 +21,7 @@ from db import get_engine
 from pool import pool_service
 from pool.pool_service import get_all_metrics_grouped_by_idu
 from exports.qgis_encoding import QGIS_CSV_ENCODING
-from vrai_filtre import FiltreOptions
+from filtre_options import FiltreOptions
 from exports.export_classement_csv import export_classement_csv
 from exports.export_uf_classement_csv import export_uf_classement_csv
 from exports.export_classement_shp import export_classement_shp
@@ -44,41 +44,7 @@ def _get_project(project_id: str) -> dict:
 
 
 def _to_filtre_options_from_dict(raw: dict[str, Any]) -> FiltreOptions:
-    vh = raw.get("vegetation_hybride") or {}
-    faune = raw.get("faune_criteria") or []
-    return FiltreOptions(
-        vegetation_hybride={
-            "zdv_natures": [x.strip() for x in (vh.get("zdv_natures") or []) if x and str(x).strip()],
-            "cesbio_libelles": [x.strip() for x in (vh.get("cesbio_libelles") or []) if x and str(x).strip()],
-            "mode": (vh.get("mode") or "OR"),
-        },
-        carhab_nom_eunis=[x.strip() for x in (raw.get("carhab_nom_eunis") or []) if x and str(x).strip()],
-        excluded_layers=[x.strip() for x in (raw.get("excluded_layers") or []) if x and str(x).strip()],
-        ebc_mode=raw.get("ebc_mode", "ignore"),
-        natura2000_mode=raw.get("natura2000_mode", "exclude"),
-        reserves_naturelles_mode=raw.get("reserves_naturelles_mode", "ignore"),
-        znieff_mode=raw.get("znieff_mode", "ignore"),
-        remontee_nappes_classefiab=[
-            x.strip() for x in (raw.get("remontee_nappes_classefiab") or []) if x and str(x).strip()
-        ],
-        arrachage_vignes_mode=raw.get("arrachage_vignes_mode", "ignore"),
-        zone_humide_mode=raw.get("zone_humide_mode", "ignore"),
-        troncon_hydro_mode=raw.get("troncon_hydro_mode", "intersect"),
-        troncon_hydro_radius_m=float(raw.get("troncon_hydro_radius_m", 500.0)),
-        surface_hydro_mode=raw.get("surface_hydro_mode", "within_radius"),
-        surface_hydro_radius_m=float(raw.get("surface_hydro_radius_m", 500.0)),
-        faune_criteria=[
-            {
-                "tax_nom_val": str(c.get("tax_nom_val", "")).strip(),
-                "mode": c.get("mode", "intersect"),
-                "radius_m": float(c.get("radius_m", 500.0)),
-                "sources": [s for s in (c.get("sources") or ["pct", "lin", "surf"]) if s in ("pct", "lin", "surf")]
-                or ["pct", "lin", "surf"],
-            }
-            for c in faune
-            if isinstance(c, dict) and str(c.get("tax_nom_val", "")).strip()
-        ],
-    )
+    return FiltreOptions.from_dict(raw)
 
 
 @router.get("/api/projects/{project_id}/export/csv")

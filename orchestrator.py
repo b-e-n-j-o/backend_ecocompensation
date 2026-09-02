@@ -255,17 +255,13 @@ async def run_orchestration(
 
         # ── Exécution avec drain de progression ──────────────────────────────
         try:
-            if key == "unites_foncieres":
+            if key == "sous_ensembles":
                 result = await _run_layer_with_progress(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     min_area_ha=uf_min_area_ha,
-                )
-            elif key == "sous_ensembles":
-                result = await _run_layer_with_progress(
-                    fn, engine, project_id, aoi_id, key, push, loop,
                     max_uf_parcelles=uf_max_parcelles,
                 )
-            elif key in ("fauna", "enrich_candidates", "enrich_uf"):
+            elif key == "enrich_uf":
                 result = await _run_layer_with_progress(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     species_list=fauna_species,
@@ -285,6 +281,10 @@ async def run_orchestration(
 
         if dry_run and not result.error:
             cleanup_dry_run_writes(engine, layer_cfg["table"], project_id)
+            if key == "sous_ensembles":
+                cleanup_dry_run_writes(
+                    engine, "ecocompensation_results.unites_foncieres", project_id
+                )
 
         results[key] = result
 
@@ -329,8 +329,8 @@ async def run_orchestration(
     return results
 
 
-PARCELLES_PHASE_KEYS = ("parcelles", "enrich_candidates")
-UF_PHASE_KEYS = ("unites_foncieres", "sous_ensembles", "enrich_uf")
+PARCELLES_PHASE_KEYS = ("parcelles",)
+UF_PHASE_KEYS = ("sous_ensembles", "enrich_uf")
 
 
 async def fetch_project_two_phases(
@@ -347,8 +347,8 @@ async def fetch_project_two_phases(
 ) -> dict[str, LayerResult]:
     """
     Fetch en deux temps :
-      1. Parcelles (+ enrich_candidates) → event ``phase:parcelles_ready``
-      2. UF (unites_foncieres → sous_ensembles → enrich_uf) → event ``phase:uf_ready``
+      1. Parcelles (tiling cadastre) → event ``phase:parcelles_ready``
+      2. UF (sous_ensembles = PPM → k-sous-ensembles → enrich_uf) → event ``phase:uf_ready``
       3. (optionnel) autres couches SIG du registre
     """
     all_results: dict[str, LayerResult] = {}

@@ -114,6 +114,18 @@ class ObservationsRequest(BaseModel):
         max_length=4,
         description="[minLon, minLat, maxLon, maxLat] en WGS84",
     )
+    center: Optional[list[float]] = Field(
+        None,
+        min_length=2,
+        max_length=2,
+        description="[lon, lat] WGS84 — centre d'un rayon de recherche (exclusif avec bbox)",
+    )
+    radius_m: Optional[float] = Field(
+        None,
+        gt=0,
+        le=100_000,
+        description="Rayon en mètres autour de center (max 100 km)",
+    )
     date_min: Optional[str] = None
     date_max: Optional[str] = None
     limit: int = Field(20000, ge=1, le=100000)
@@ -161,10 +173,23 @@ class ObservationsRequest(BaseModel):
                 and -90.0 <= n <= 90.0
             ):
                 raise ValueError("bbox hors plage lon/lat autorisée")
+        if self.center is not None:
+            if len(self.center) != 2:
+                raise ValueError("center doit contenir [lon, lat]")
+            lon, lat = (float(x) for x in self.center)
+            if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+                raise ValueError("center hors plage lon/lat autorisée")
+            if self.radius_m is None or self.radius_m <= 0:
+                raise ValueError("radius_m est requis avec center")
+        elif self.radius_m is not None:
+            raise ValueError("center est requis avec radius_m")
         has_taxa = bool(self.taxa)
         has_bbox = self.bbox is not None and len(self.bbox) == 4
-        if not has_taxa and not has_bbox:
-            raise ValueError("Au moins taxa ou bbox est requis")
+        has_radius = self.center is not None and self.radius_m is not None
+        if has_bbox and has_radius:
+            raise ValueError("bbox et center/radius_m sont mutuellement exclusifs")
+        if not has_taxa and not has_bbox and not has_radius:
+            raise ValueError("Au moins taxa, bbox ou center+radius_m est requis")
         return self
 
 
@@ -176,31 +201,35 @@ def _has_taxa(req: ObservationsRequest) -> bool:
     return bool(req.taxa)
 
 
-def _build_base_where_tax_geom_dates(req: ObservationsRequest) -> tuple[list[str], dict[str, Any]]:
+def _build_base_where_tax_geom_dates(
+    req: ObservationsRequest, *, alias: str = ""
+) -> tuple[list[str], dict[str, Any]]:
     """Prédicats communs : espèces (optionnel) + géométrie + dates (sans bbox)."""
-    parts = ["geometry IS NOT NULL"]
+    prefix = f"{alias}." if alias else ""
+    parts = [f"{prefix}geometry IS NOT NULL"]
     params: dict[str, Any] = {}
 
     if _has_taxa(req):
-        parts.append("nom_vernaculaire IN :taxa")
+        parts.append(f"{prefix}nom_vernaculaire IN :taxa")
         params["taxa"] = list(req.taxa or [])
 
     if req.date_min:
-        parts.append("date_debut >= CAST(:date_min AS date)")
+        parts.append(f"{prefix}date_debut >= CAST(:date_min AS date)")
         params["date_min"] = req.date_min
 
     if req.date_max:
-        parts.append("date_debut <= CAST(:date_max AS date)")
+        parts.append(f"{prefix}date_debut <= CAST(:date_max AS date)")
         params["date_max"] = req.date_max
 
     return parts, params
 
 
-def _bbox_predicate_sql() -> str:
-    return (
-        "ST_Transform(geometry, 4326) && ST_MakeEnvelope("
-        ":bbox_minx, :bbox_miny, :bbox_maxx, :bbox_maxy, 4326)"
-    )
+def _has_bbox(req: ObservationsRequest) -> bool:
+    return req.bbox is not None and len(req.bbox) == 4
+
+
+def _has_radius(req: ObservationsRequest) -> bool:
+    return req.center is not None and len(req.center) == 2 and req.radius_m is not None and req.radius_m > 0
 
 
 def _bbox_params(req: ObservationsRequest) -> dict[str, Any]:
@@ -211,6 +240,35 @@ def _bbox_params(req: ObservationsRequest) -> dict[str, Any]:
         "bbox_maxx": req.bbox[2],
         "bbox_maxy": req.bbox[3],
     }
+
+
+def _spatial_predicate_sql(
+    req: ObservationsRequest, *, geom: str = "geometry"
+) -> tuple[str | None, dict[str, Any]]:
+    """Filtre spatial : bbox (&& envelope) ou disque (ST_DWithin geography)."""
+    if _has_radius(req):
+        assert req.center is not None and req.radius_m is not None
+        params = {
+            "center_lon": float(req.center[0]),
+            "center_lat": float(req.center[1]),
+            "radius_m": float(req.radius_m),
+        }
+        sql = (
+            f"ST_Transform({geom}, 4326) && ("
+            f"ST_Buffer(ST_SetSRID(ST_MakePoint(:center_lon, :center_lat), 4326)::geography, :radius_m)::geometry"
+            f") AND ST_DWithin("
+            f"ST_Transform({geom}, 4326)::geography, "
+            f"ST_SetSRID(ST_MakePoint(:center_lon, :center_lat), 4326)::geography, "
+            f":radius_m)"
+        )
+        return sql, params
+    if _has_bbox(req):
+        sql = (
+            f"ST_Transform({geom}, 4326) && ST_MakeEnvelope("
+            ":bbox_minx, :bbox_miny, :bbox_maxx, :bbox_maxy, 4326)"
+        )
+        return sql, _bbox_params(req)
+    return None, {}
 
 
 def _bind_taxa_if_needed(stmt: Any, req: ObservationsRequest) -> Any:
@@ -232,19 +290,19 @@ def _resolve_taxon_buffers(req: ObservationsRequest) -> dict[str, float]:
     return out
 
 
-def _points_geojson_sql(req: ObservationsRequest, has_bbox: bool) -> tuple[Any, dict[str, Any]]:
+def _points_geojson_sql(req: ObservationsRequest) -> tuple[Any, dict[str, Any]]:
     """Construit la requête points (FeatureCollection GeoJSON)."""
     base_parts, base_params = _build_base_where_tax_geom_dates(req)
     base_where_sql = " AND ".join(base_parts)
+    spatial_sql, spatial_params = _spatial_predicate_sql(req)
+    has_spatial = spatial_sql is not None
 
     geom_expr = "ST_Transform(ST_PointOnSurface(ST_MakeValid(geometry)), 4326)"
 
-    if has_bbox:
-        bbox_sql = _bbox_predicate_sql()
-        bbox_p = _bbox_params(req)
-        params = {**base_params, **bbox_p, "obs_limit": req.limit}
+    if has_spatial:
+        params = {**base_params, **spatial_params, "obs_limit": req.limit}
 
-        # Sans taxa : filtre bbox d'abord (index GiST 4326) sur toute la table.
+        # Sans taxa : filtre spatial d'abord (index GiST 4326) sur toute la table.
         if not _has_taxa(req):
             sql = _no_prep(
                 text(
@@ -253,7 +311,7 @@ def _points_geojson_sql(req: ObservationsRequest, has_bbox: bool) -> tuple[Any, 
             SELECT {_FAUNA_POINT_COLS}
             FROM ecocompensation.fauna
             WHERE {base_where_sql}
-              AND {_bbox_predicate_sql()}
+              AND {spatial_sql}
         ),
         src AS (
             SELECT
@@ -296,7 +354,7 @@ def _points_geojson_sql(req: ObservationsRequest, has_bbox: bool) -> tuple[Any, 
                 geom_id, geom_type, lon, lat,
                 {geom_expr} AS geom
             FROM base
-            WHERE {bbox_sql}
+            WHERE {spatial_sql}
             LIMIT :obs_limit
         )
         SELECT jsonb_build_object(
@@ -353,16 +411,17 @@ def _points_geojson_sql(req: ObservationsRequest, has_bbox: bool) -> tuple[Any, 
 
 def _buffers_geojson_sql(
     req: ObservationsRequest,
-    has_bbox: bool,
     taxon_buffers: dict[str, float],
 ) -> tuple[Any, dict[str, Any]] | tuple[None, None]:
     if not taxon_buffers:
         return None, None
 
-    base_parts, base_params = _build_base_where_tax_geom_dates(req)
+    # Alias `f` obligatoire : taxon_cfg expose aussi nom_vernaculaire.
+    base_parts, base_params = _build_base_where_tax_geom_dates(req, alias="f")
     base_where_sql = " AND ".join(base_parts)
     taxa_list = list(taxon_buffers.keys())
     buf_list = [taxon_buffers[t] for t in taxa_list]
+    spatial_sql, spatial_params = _spatial_predicate_sql(req)
 
     params: dict[str, Any] = {
         **base_params,
@@ -376,10 +435,8 @@ def _buffers_geojson_sql(
             FROM unnest(CAST(:taxa_list AS text[]), CAST(:buf_list AS float8[])) AS t(tax, buf)
         )"""
 
-    if has_bbox:
-        bbox_sql = _bbox_predicate_sql()
-        bbox_p = _bbox_params(req)
-        params.update(bbox_p)
+    if spatial_sql is not None:
+        params.update(spatial_params)
         sql = _no_prep(
             text(
                 f"""
@@ -393,7 +450,7 @@ def _buffers_geojson_sql(
         filt AS (
             SELECT nom_vernaculaire, geometry, buf_m
             FROM base
-            WHERE {bbox_sql}
+            WHERE {spatial_sql}
         ),
         src AS (
             SELECT
@@ -471,10 +528,9 @@ def _buffers_geojson_sql(
 
 
 def _fetch_observations(req: ObservationsRequest) -> dict[str, Any]:
-    has_bbox = req.bbox is not None and len(req.bbox) == 4
-    points_sql, params_points = _points_geojson_sql(req, has_bbox)
+    points_sql, params_points = _points_geojson_sql(req)
     taxon_buffers = _resolve_taxon_buffers(req)
-    buffers_sql, params_buf = _buffers_geojson_sql(req, has_bbox, taxon_buffers)
+    buffers_sql, params_buf = _buffers_geojson_sql(req, taxon_buffers)
 
     try:
         with _engine.connect() as conn:
@@ -600,7 +656,8 @@ def get_observations(req: ObservationsRequest):
     """
     Renvoie ``{ points: FeatureCollection, buffers: FeatureCollection | null }``.
 
-    - ``taxa`` optionnel : si absent, ``bbox`` est obligatoire (toutes espèces dans l'emprise).
+    - ``taxa`` optionnel : si absent, ``bbox`` **ou** ``center``+``radius_m`` est obligatoire.
+    - ``center`` + ``radius_m`` : disque géographique (exclusif avec ``bbox``).
     - ``buffer_by_taxon`` : buffer distinct par espèce (sinon ``buffer_m`` par défaut).
     - Attributs : colonnes complètes de ``ecocompensation.fauna`` (hors geometry brute).
     """

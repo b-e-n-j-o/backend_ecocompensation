@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from exports.classement_export_attrs import build_parcelle_export_row, mmap_for_parcelle
 from exports.qgis_encoding import QGIS_CSV_ENCODING, normalize_unicode_text
-from vrai_filtre import FiltreOptions
+from filtre_options import FiltreOptions
 
 if TYPE_CHECKING:
     pass

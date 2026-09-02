@@ -20,12 +20,14 @@ from typing import Awaitable, Callable
 
 from sqlalchemy import text
 
+from layers.compensation_zone_humide.aoi_to_bd_topo_et_cesbio import run as _run_bd_topo_et_cesbio
 from layers.filter_pipeline import FilterConfig, FilterPipelineResult, run as run_filter_pipeline
 from layers.layer_runner import LAYER_REGISTRY
 from orchestrator import UF_PHASE_KEYS, run_orchestration
 from layers.uf_profiling import build_uf_pool_with_profiling
 from pool import pool_service
 from pool.pool_service import persist_parcelles_pool_run
+from pool.profiler_registry import profiling_summary_label
 from pool.profiling_service import compute_metrics_for_run
 
 logger = logging.getLogger(__name__)
@@ -41,8 +43,7 @@ FILTER_PHASES = [
 ]
 
 UF_FILTER_PHASES = [
-    {"key": "unites_foncieres", "label": "Unités foncières (PPM + clustering)"},
-    {"key": "sous_ensembles", "label": "Sous-ensembles contigus"},
+    {"key": "sous_ensembles", "label": "Unités foncières (PPM → sous-ensembles)"},
     {"key": "enrich_uf", "label": "Enrichissement UF (végétation / faune)"},
 ]
 
@@ -154,6 +155,67 @@ def _prefetch_filter_layers(
         except Exception as exc:
             logger.warning("Prefetch couche %s project_id=%s: %s", key, project_id, exc)
             _log(f"PREFETCH_LAYER:{key}:error:{exc}")
+
+
+def _study_type_from_config(config: FilterConfig) -> str:
+    return (
+        "zones_humides_intra"
+        if config.search_mode == "within_foncier"
+        else "faune_buffer"
+    )
+
+
+def _prefetch_profiling_layers(
+    engine,
+    project_id: str,
+    aoi_id: str,
+    config: FilterConfig,
+) -> None:
+    """Charge les couches SIG requises par les profilers de la méthodologie."""
+    if _study_type_from_config(config) != "zones_humides_intra":
+        return
+
+    with engine.connect() as conn:
+        n = conn.execute(
+            text(
+                """
+                SELECT count(*)::int
+                FROM ecocompensation_results.bd_topo_et_cesbio
+                WHERE project_id = CAST(:pid AS uuid)
+                """
+            ),
+            {"pid": project_id},
+        ).scalar_one()
+
+    if n and n > 0:
+        logger.info(
+            "[filter_orchestrator] bd_topo_et_cesbio déjà chargé (%d entités) project_id=%s",
+            n,
+            project_id,
+        )
+        return
+
+    logger.info(
+        "[filter_orchestrator] Prefetch bd_topo_et_cesbio pour profilage ZH project_id=%s",
+        project_id,
+    )
+    try:
+        inserted = _run_bd_topo_et_cesbio(
+            engine,
+            project_id,
+            aoi_id,
+            lambda msg: logger.info("[bd_topo_et_cesbio] project_id=%s %s", project_id, msg),
+        )
+        logger.info(
+            "[filter_orchestrator] bd_topo_et_cesbio OK project_id=%s inserted=%s",
+            project_id,
+            inserted,
+        )
+    except Exception:
+        logger.exception(
+            "[filter_orchestrator] Prefetch bd_topo_et_cesbio échoué project_id=%s",
+            project_id,
+        )
 
 
 def _persist_pipeline_results(
@@ -397,7 +459,7 @@ async def _run_uf_after_filter(
     try:
         await uf_push({
             "event": "progress",
-            "layer_key": "unites_foncieres",
+            "layer_key": "sous_ensembles",
             "message": "PHASE:uf:start",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
@@ -460,7 +522,7 @@ async def _run_uf_after_filter(
         logger.exception("[filter_orchestrator] UF phase FAILED project_id=%s", project_id)
         await uf_push({
             "event": "error",
-            "layer_key": "unites_foncieres",
+            "layer_key": "sous_ensembles",
             "message": "Erreur calcul unités foncières (voir logs serveur)",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
@@ -633,8 +695,12 @@ async def run_filter_orchestration(
                     result.n_after_filter,
                     result.duration_s,
                 )
-                await emit("running", "profiling", "Profilage pool (PM + score éco)…")
+                await emit("running", "profiling", profiling_summary_label(_study_type_from_config(config)) + "…")
                 try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: _prefetch_profiling_layers(engine, project_id, aoi_id, config),
+                    )
                     await loop.run_in_executor(
                         None,
                         lambda: _run_pool_profiling(engine, project_id, run_id),
@@ -642,7 +708,7 @@ async def run_filter_orchestration(
                     await emit(
                         "done",
                         "profiling",
-                        "Profilage pool terminé (personnes morales + score éco)",
+                        profiling_summary_label(_study_type_from_config(config)) + " terminé",
                     )
                     await push({
                         "event": "phase:parcelles_ready",

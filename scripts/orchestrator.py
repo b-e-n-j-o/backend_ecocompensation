@@ -255,17 +255,13 @@ async def run_orchestration(
 
         # ── Exécution avec drain de progression ──────────────────────────────
         try:
-            if key == "unites_foncieres":
+            if key == "sous_ensembles":
                 result = await _run_layer_with_progress(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     min_area_ha=uf_min_area_ha,
-                )
-            elif key == "sous_ensembles":
-                result = await _run_layer_with_progress(
-                    fn, engine, project_id, aoi_id, key, push, loop,
                     max_uf_parcelles=uf_max_parcelles,
                 )
-            elif key in ("fauna", "enrich_candidates"):
+            elif key == "enrich_uf":
                 result = await _run_layer_with_progress(
                     fn, engine, project_id, aoi_id, key, push, loop,
                     species_list=fauna_species,

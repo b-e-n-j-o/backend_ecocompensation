@@ -8,7 +8,7 @@ Enrichit ecocompensation_results.sous_ensembles avec :
   - veg_libelles    text[]  : libellés CESBIO intersectant l'union de parcelles
   - fauna_distances jsonb   : { "nom_vernaculaire": dist_m }
 
-Même pattern que enrich_candidates.py, colonne clé = subset_id, géom = geom_2154.
+Colonne clé = subset_id, géom = geom_2154.
 """
 from __future__ import annotations
 import math
@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_ss_fauna
 """
 
 def ensure_columns(engine) -> None:
-    """Migration one-shot. Appeler au démarrage de l'app avec ensure_columns de enrich_candidates."""
+    """Migration one-shot. Appeler au démarrage de l'app avec filter_pipeline.ensure_columns."""
     with engine.begin() as conn:
         conn.execute(text(_ALTER_DDL))
 

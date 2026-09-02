@@ -25,7 +25,7 @@ def export_uf_classement_csv(results_uf: dict, output_path: Path | io.StringIO) 
     items = build_subset_export_inputs(results_uf)
     if not items:
         return
-    from vrai_filtre import FiltreOptions
+    from filtre_options import FiltreOptions
 
     if isinstance(output_path, Path):
         file_obj = open(output_path, "w", newline="", encoding=QGIS_CSV_ENCODING)

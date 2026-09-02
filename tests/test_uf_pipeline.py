@@ -9,8 +9,7 @@ Peut réutiliser un project_id existant (--project-id) ou en créer un nouveau.
 
 Étapes :
   1. (optionnel) Création AOI + projet de test
-  2. aoi_to_unites_foncieres  → ecocompensation_results.unites_foncieres
-  3. aoi_to_sous_ensembles    → ecocompensation_results.sous_ensembles
+  2. aoi_to_sub_uf            → unites_foncieres + sous_ensembles
   4. Filtre : surface_ha + miller (colonnes) + CESBIO EXISTS + Fauna DWithin
   5. Affichage pool UF parallèle
 
@@ -32,13 +31,12 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from layers.db import get_engine, get_engine_ppm
-from layers.aoi_to_unites_foncieres import run as run_uf
-from layers.aoi_to_sous_ensembles   import run as run_ss
+from db import get_engine, get_engine_ppm
+from layers.common.aoi_to_sub_uf import run as run_sub_uf
 
 GEOM_ZIP        = BACKEND_DIR / "geometrie_test.zip"
 BUFFER_M        = 10_000
-MIN_AREA_HA     = 7.0   # aligné avec aoi_to_sous_ensembles / filtre_uf
+MIN_AREA_HA     = 7.0   # aligné avec aoi_to_sub_uf / filter_v2
 MILLER_THRESH   = 0.39
 CESBIO_LIBELLES = ["Forêts de conifères", "Forêts de feuillus"]
 FAUNA_SPECIES   = "Tarier pâtre"
@@ -82,23 +80,25 @@ def setup_project(engine, buffer_m: int) -> tuple[str, str]:
 # ── Fetch UF + sous-ensembles ─────────────────────────────────────────────────
 
 def fetch_uf(engine, project_id: str, aoi_id: str) -> tuple[int, int]:
-    banner("Fetch Unités Foncières (PPM)")
+    banner("Fetch UF + sous-ensembles (PPM, une passe)")
     engine_ppm = get_engine_ppm()
     def log(m): print(f"  {m}")
     t0 = time.perf_counter()
-    n_uf = run_uf(engine, project_id, aoi_id, log, engine_ppm=engine_ppm,
-                  min_area_ha=MIN_AREA_HA)
-    print(f"  → {n_uf:,} lignes unites_foncieres en {round(time.perf_counter()-t0,1)}s")
-
-    if n_uf == 0:
-        print("  ⚠️  Aucune UF — pas de données PPM dans ce buffer ou filtre surface trop strict.")
-        return 0, 0
-
-    banner("Calcul sous-ensembles contigus (k=2..5)")
-    t0 = time.perf_counter()
-    n_ss = run_ss(engine, project_id, aoi_id, log)
+    n_ss = run_sub_uf(
+        engine, project_id, aoi_id, log,
+        engine_ppm=engine_ppm,
+        min_area_ha=MIN_AREA_HA,
+    )
     print(f"  → {n_ss:,} sous-ensembles en {round(time.perf_counter()-t0,1)}s")
-    return n_uf, n_ss
+    with engine.begin() as conn:
+        n_uf = conn.execute(text("""
+            SELECT COUNT(*) FROM ecocompensation_results.unites_foncieres
+            WHERE project_id = :pid
+        """), {"pid": project_id}).scalar_one()
+    if n_ss == 0:
+        print("  Aucune UF — pas de données PPM dans ce buffer ou filtre surface trop strict.")
+        return int(n_uf or 0), 0
+    return int(n_uf or 0), n_ss
 
 # ── Filtrage sur sous_ensembles ───────────────────────────────────────────────
 

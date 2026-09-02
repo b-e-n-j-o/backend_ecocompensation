@@ -27,7 +27,7 @@ from typing import Callable
 
 from sqlalchemy import text
 
-from layers.aoi_to_parcelles_v2 import run as run_parcelles
+from layers.common.aoi_to_parcelles_v2 import run as run_parcelles
 from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS, national_exclusion_steps
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,12 @@ CREATE INDEX IF NOT EXISTS idx_parcelles_results_fauna
 ALTER TABLE ecocompensation.projects
     ADD COLUMN IF NOT EXISTS filter_config jsonb NOT NULL DEFAULT '{}';
 """
+
+
+def ensure_columns(engine) -> None:
+    """DDL enrichissement parcelles + filter_config. Appelé au démarrage FastAPI."""
+    with engine.begin() as conn:
+        conn.execute(text(_ENSURE_DDL))
 
 _SQL_ENRICH_VEG_BATCH = """
 WITH veg_agg AS (

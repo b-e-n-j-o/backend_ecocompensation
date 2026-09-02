@@ -24,6 +24,7 @@ def _clause_exclude_geomce(geom_alias: str) -> str:
             SELECT 1
             FROM ecocompensation.geomce_surf gcs
             WHERE gcs.geom_2154 IS NOT NULL
+              AND gcs.deleted_at IS NULL
               AND {geom_alias}.geom_2154 && gcs.geom_2154
               AND ST_Intersects({geom_alias}.geom_2154, gcs.geom_2154)
         )
@@ -31,6 +32,7 @@ def _clause_exclude_geomce(geom_alias: str) -> str:
             SELECT 1
             FROM ecocompensation.geomce_lin gcl
             WHERE gcl.geom_2154 IS NOT NULL
+              AND gcl.deleted_at IS NULL
               AND {geom_alias}.geom_2154 && gcl.geom_2154
               AND ST_Intersects({geom_alias}.geom_2154, gcl.geom_2154)
         )
@@ -38,6 +40,7 @@ def _clause_exclude_geomce(geom_alias: str) -> str:
             SELECT 1
             FROM ecocompensation.geomce_pct gcp
             WHERE gcp.geom_2154 IS NOT NULL
+              AND gcp.deleted_at IS NULL
               AND {geom_alias}.geom_2154 && gcp.geom_2154
               AND ST_Intersects({geom_alias}.geom_2154, gcp.geom_2154)
         )
