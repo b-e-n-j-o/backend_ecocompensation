@@ -327,6 +327,9 @@ def export_shp(
                 f = shp_path.with_suffix(ext)
                 if f.exists():
                     zf.write(f, f.name)
+            gpkg = shp_path.with_suffix(".gpkg")
+            if gpkg.exists():
+                zf.write(gpkg, gpkg.name)
         with zipfile.ZipFile(zip_path, "r") as zr:
             if not zr.namelist():
                 raise HTTPException(500, "Export SHP UF : archive vide.")

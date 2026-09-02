@@ -15,7 +15,12 @@ import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from exports.classement_export_attrs import build_parcelle_export_row, mmap_for_parcelle
+from exports.classement_export_attrs import (
+    EXPORT_ATTR_KEYS,
+    build_parcelle_export_row,
+    mmap_for_parcelle,
+)
+from exports.export_classement_pool_text import pool_metrics_json_compact
 from exports.qgis_encoding import QGIS_CSV_ENCODING, normalize_unicode_text
 from filtre_options import FiltreOptions
 
@@ -23,46 +28,7 @@ if TYPE_CHECKING:
     pass
 
 # Ordre stable, aligné sur le contrat SHP (+ métriques brutes en fin)
-CSV_FIELDNAMES: list[str] = [
-    "rang",
-    "idu",
-    "cinsee",
-    "code_insee",
-    "section",
-    "numero",
-    "surf_ha",
-    "miller",
-    "dist_km",
-    "dist_hyd",
-    "score_eco",
-    "eco_max",
-    "score_comp",
-    "score_dur",
-    "rayon_esp",
-    "espece_esp",
-    "occ_sol",
-    "zh",
-    "rem_nappe",
-    "ebc",
-    "znieff",
-    "zdv",
-    "troncon",
-    "surf_hyd",
-    "txt_scor",
-    "txt_comp",
-    "txt_dure",
-    "txt_espe",
-    "txt_vege",
-    "txt_cosi",
-    "txt_carb",
-    "txt_arra",
-    "p_morale",
-    "siren",
-    "pm_denom",
-    "pm_forme",
-    "txt_zhum",
-    "pool_metrics_json",
-]
+CSV_FIELDNAMES: list[str] = [*EXPORT_ATTR_KEYS, "pool_metrics_json"]
 
 
 def _csv_cell(v: Any) -> str:

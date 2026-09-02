@@ -294,6 +294,75 @@ def format_zone_humide_details(val: dict[str, Any]) -> str:
     return json.dumps(v, ensure_ascii=False, indent=2, default=str)
 
 
+def format_filter_enrich_details(val: dict[str, Any]) -> str:
+    """Bloc texte aligné sur RankingLine / FilterEnrichBlock (CESBIO, faune, hydro, ZH)."""
+    v = _as_dict(val)
+    lines: list[str] = []
+    veg = v.get("veg_libelles")
+    if isinstance(veg, list):
+        labels = [str(x).strip() for x in veg if str(x).strip()]
+        if labels:
+            lines.append("CESBIO: " + ", ".join(labels))
+    fauna = v.get("fauna_distances")
+    if isinstance(fauna, dict) and fauna:
+        parts: list[str] = []
+        ranked: list[tuple[str, float]] = []
+        for lab, dist in fauna.items():
+            name = str(lab or "").strip()
+            if not name or not isinstance(dist, (int, float)) or isinstance(dist, bool):
+                continue
+            d = float(dist)
+            if d != d or d < 0:
+                continue
+            ranked.append((name, d))
+        ranked.sort(key=lambda x: (x[1], x[0].lower()))
+        for name, d in ranked:
+            parts.append(f"{name}: {int(round(d))} m" if d > 0 else f"{name}: intersection")
+        if parts:
+            lines.append("Faune: " + " ; ".join(parts))
+    zh = v.get("zone_humide_ha")
+    if isinstance(zh, (int, float)) and not isinstance(zh, bool):
+        lines.append(f"Zone humide: {float(zh):.2f} ha")
+    dist_h = v.get("dist_hydro_m")
+    if isinstance(dist_h, (int, float)) and not isinstance(dist_h, bool):
+        lines.append(f"Cours d'eau: {int(round(float(dist_h)))} m")
+    troncons = v.get("troncons_hydro_info")
+    if isinstance(troncons, list) and troncons:
+        bits: list[str] = []
+        for t in troncons:
+            if not isinstance(t, dict):
+                continue
+            label = str(t.get("nom") or t.get("nature") or t.get("cleabs") or "").strip()
+            if not label:
+                continue
+            dm = t.get("dist_m")
+            extra = f" ({int(round(float(dm)))} m)" if isinstance(dm, (int, float)) else ""
+            bits.append(label + extra)
+        if bits:
+            lines.append("Tronçons: " + " ; ".join(bits[:12]))
+    dist_s = v.get("dist_surface_hydro_m")
+    if isinstance(dist_s, (int, float)) and not isinstance(dist_s, bool):
+        lines.append(f"Distance surface hydro: {int(round(float(dist_s)))} m")
+    surf_h = v.get("surface_hydro_ha")
+    if isinstance(surf_h, (int, float)) and not isinstance(surf_h, bool):
+        lines.append(f"Surface hydro intersectée: {float(surf_h):.2f} ha")
+    surfaces = v.get("surfaces_hydro_info")
+    if isinstance(surfaces, list) and surfaces:
+        bits = []
+        for s in surfaces:
+            if not isinstance(s, dict):
+                continue
+            label = str(s.get("nom") or s.get("nature") or s.get("cleabs") or "").strip()
+            if not label:
+                continue
+            ha = s.get("intersect_ha")
+            extra = f" ({float(ha):.2f} ha)" if isinstance(ha, (int, float)) else ""
+            bits.append(label + extra)
+        if bits:
+            lines.append("Surfaces hydro: " + " ; ".join(bits[:12]))
+    return "\n".join(lines)
+
+
 def extract_table_scalars(mmap: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """Valeurs numériques alignées sur les badges RankingTable."""
     out: dict[str, Any] = {
@@ -344,6 +413,7 @@ def build_detail_columns(mmap: dict[str, dict[str, Any]]) -> dict[str, str]:
             mmap.get("parcelles_personnes_morales") or {}
         ),
         "zone_humide_details": format_zone_humide_details(mmap.get("zone_humide") or {}),
+        "filter_enrich_details": format_filter_enrich_details(mmap.get("filter_enrich") or {}),
     }
 
 

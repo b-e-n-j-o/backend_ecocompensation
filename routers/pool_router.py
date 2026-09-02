@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from db import get_engine
 from pool import add_parcelles, pool_service, profiling_service
+from pool.map_overlay import build_pool_map_overlay
 
 
 router = APIRouter(prefix="/api/projects", tags=["pool"])
@@ -77,6 +78,22 @@ def get_pool_run_snapshot(project_id: str, run_id: str):
     if not snap:
         raise HTTPException(404, f"Run {run_id} introuvable ou non applicable (scope parcelles)")
     return snap
+
+
+@router.get("/{project_id}/pool/runs/{run_id}/map-overlay")
+def get_pool_map_overlay(project_id: str, run_id: str):
+    """Parcelles du pool en GeoJSON WGS84 + attributs enrichis (carte Données internes)."""
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Projet {project_id} introuvable")
+    try:
+        uuid.UUID(str(run_id))
+    except ValueError:
+        raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
+    with engine.begin() as conn:
+        payload = build_pool_map_overlay(conn, project_id, run_id)
+    if not payload.get("ok"):
+        raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+    return payload
 
 
 @router.get("/{project_id}/pool")

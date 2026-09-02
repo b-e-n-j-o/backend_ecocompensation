@@ -6,6 +6,8 @@ export_uf_classement_shp.py
 
 Export des sous-ensembles UF classés (dernier filtre UF) en Shapefile EPSG:2154.
 Géométries : table ecocompensation_results.sous_ensembles (comme le GeoJSON UF).
+Un GeoPackage homonyme (textes non tronqués + zone projet + aire d'étude)
+est écrit à côté du SHP.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import TYPE_CHECKING
 import geopandas as gpd
 from sqlalchemy import text
 from exports.classement_export_attrs import build_parcelle_export_row
+from exports.project_context_layers import load_project_context_layers, write_geopackage_etude
 from exports.qgis_encoding import write_geodataframe_shapefile_qgis
 from exports.uf_export_adapter import build_subset_export_inputs
 
@@ -62,7 +65,8 @@ def export_uf_classement_shp(
     geom_by_subset = {str(row["subset_id"]): row["geom_2154"] for _, row in gdf_geom.iterrows()}
 
     geoms = []
-    rows_attr = []
+    rows_shp = []
+    rows_gpkg = []
     missing: list[str] = []
     for sid in ordered_subset_ids:
         geom = geom_by_subset.get(sid)
@@ -73,12 +77,20 @@ def export_uf_classement_shp(
         if not item:
             continue
         geoms.append(geom)
-        rows_attr.append(
+        rows_shp.append(
             build_parcelle_export_row(
                 item["parcelle"],
                 item["mmap"],
                 options,
                 clip_for_shapefile=True,
+            )
+        )
+        rows_gpkg.append(
+            build_parcelle_export_row(
+                item["parcelle"],
+                item["mmap"],
+                options,
+                clip_for_shapefile=False,
             )
         )
 
@@ -94,10 +106,18 @@ def export_uf_classement_shp(
             "Aucune géométrie sous-ensemble trouvée en base pour ce classement UF."
         )
 
-    gdf = gpd.GeoDataFrame(rows_attr, geometry=geoms, crs="EPSG:2154")
+    gdf_shp = gpd.GeoDataFrame(rows_shp, geometry=geoms, crs="EPSG:2154")
+    gdf_gpkg = gpd.GeoDataFrame(rows_gpkg, geometry=geoms, crs="EPSG:2154")
 
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".shp":
         output_path = output_path.with_suffix(".shp")
 
-    write_geodataframe_shapefile_qgis(gdf, output_path)
+    write_geodataframe_shapefile_qgis(gdf_shp, output_path)
+    context = load_project_context_layers(engine, project_id)
+    write_geopackage_etude(
+        output_path.with_suffix(".gpkg"),
+        gdf_gpkg,
+        "sous_ensembles",
+        context,
+    )

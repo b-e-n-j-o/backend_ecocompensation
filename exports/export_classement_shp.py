@@ -8,9 +8,9 @@ Export des parcelles classées (sortie du vrai filtre + scoring) en une couche
 Shapefile pour visualisation dans QGIS. Attributs alignés sur le classement
 actuel (scores pool) ; les textes longs respectent la limite DBF (254 c.).
 
-Un **GeoPackage** homonyme (``.gpkg``) est écrit à côté du SHP : mêmes géométries
-et champs, avec ``txt_dure`` **non tronqué** (texte long) — à privilégier dans QGIS
-pour la justification dureté complète.
+Un **GeoPackage** (``.gpkg``) est le livrable à ouvrir dans QGIS :
+trois couches (``parcelles``, ``zone_projet``, ``aire_etude``), textes complets.
+Le SHP à côté reste une copie tronquée (limite DBF 254 c.) pour compatibilité.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import geopandas as gpd
 from sqlalchemy import text
 
 from exports.classement_export_attrs import build_parcelle_export_row, mmap_for_parcelle
-
+from exports.project_context_layers import load_project_context_layers, write_geopackage_etude
 from exports.qgis_encoding import write_geodataframe_shapefile_qgis
 
 if TYPE_CHECKING:
@@ -109,5 +109,10 @@ def export_classement_shp(
         output_path = output_path.with_suffix(".shp")
 
     write_geodataframe_shapefile_qgis(gdf_shp, output_path)
-    gpkg_path = output_path.with_suffix(".gpkg")
-    gdf_gpkg.to_file(gpkg_path, driver="GPKG", layer="parcelles")
+    context = load_project_context_layers(engine, project_id)
+    write_geopackage_etude(
+        output_path.with_suffix(".gpkg"),
+        gdf_gpkg,
+        "parcelles",
+        context,
+    )
