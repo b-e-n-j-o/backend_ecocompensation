@@ -431,7 +431,7 @@ def appeler_gemini(prompt: str, model: str, max_retries: int = 3) -> dict:
     except ImportError:
         raise ImportError("pip install google-generativeai requis")
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY non définie")
 
@@ -442,12 +442,20 @@ def appeler_gemini(prompt: str, model: str, max_retries: int = 3) -> dict:
     for attempt in range(1, max_retries + 1):
         try:
             log.info(f"  Gemini tentative {attempt}/{max_retries} ...")
+            try:
+                gen_cfg = genai.GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=2048,
+                    response_mime_type="application/json",
+                )
+            except TypeError:
+                gen_cfg = genai.GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=2048,
+                )
             response = model_client.generate_content(
                 prompt,
-                generation_config=genai.GenerationConfig(
-                    temperature=0.2,
-                    max_output_tokens=1024,
-                ),
+                generation_config=gen_cfg,
             )
             text = response.text.strip()
 
@@ -641,7 +649,7 @@ def run_batch(
     input_path:  str,
     output_path: str,
     avec_rpg:    bool = True,
-    model:       str  = "gemini-2.0-flash",
+    model:       str  = "gemini-3.1-flash-lite",
     workers:     int  = 1,
     resume:      bool = False,
     dry_run:     bool = False,
@@ -765,7 +773,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--input",   required=True,  help="Fichier CSV ou JSON d'entrée")
     parser.add_argument("--output",  required=True,  help="Fichier JSONL de sortie")
-    parser.add_argument("--model",   default="gemini-2.0-flash", help="Modèle Gemini")
+    parser.add_argument("--model",   default="gemini-3.1-flash-lite", help="Modèle Gemini")
     parser.add_argument("--workers", type=int, default=1, help="Nb workers parallèles (défaut=1)")
     parser.add_argument("--no-rpg",  action="store_true", help="Désactiver RPG (plus rapide)")
     parser.add_argument("--resume",  action="store_true", help="Reprendre un batch interrompu")

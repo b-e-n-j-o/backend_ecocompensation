@@ -60,6 +60,7 @@ from db import get_engine
 from layers.enrich_uf import ensure_columns as ensure_uf_columns
 from layers.uf_profiling import build_uf_pool_with_profiling
 from routers.foncier_router import router as foncier_router
+from routers.pool_router import all_runs_router as pool_all_runs_router
 from routers.pool_router import router as pool_router
 from routers.results_geojson_router import router as results_geojson_router
 from routers.durete_router import router as durete_router
@@ -172,6 +173,7 @@ app.add_middleware(
 
 app.include_router(foncier_router, prefix="/api/foncier")
 app.include_router(pool_router)
+app.include_router(pool_all_runs_router)
 app.include_router(results_geojson_router)
 app.include_router(durete_router)
 app.include_router(cadastre_bbox_router)
@@ -252,7 +254,7 @@ class FaunaFilterCriterionDTO(BaseModel):
 class FilterPipelineRequest(BaseModel):
     """POST /api/projects/{id}/filter-pipeline — pipeline filter_v2."""
     min_area_ha: float = Field(default=7.0, ge=0.1, le=500)
-    miller_thresh: float = Field(default=0.39, ge=0.0, le=1.0)
+    miller_thresh: float | None = Field(default=None, ge=0.0, le=1.0)
     cesbio_libelles: list[str] = Field(default_factory=list)
     fauna_criteria: list[FaunaFilterCriterionDTO] = Field(default_factory=list)
     zone_humide_mode: str = Field(default="ignore")

@@ -37,11 +37,22 @@ def _configure_durete_logging(verbose: bool | None) -> None:
         logging.getLogger(name).setLevel(lvl)
 
 
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+
+
+def resolve_durete_gemini_model(model: str | None = None) -> str:
+    """Preview `gemini-3.1-flash-lite-preview` éteint le 25 mai 2026 — GA à la place."""
+    if model and str(model).strip():
+        return str(model).strip()
+    env = str(os.getenv("DURETE_GEMINI_MODEL", "")).strip()
+    return env or DEFAULT_GEMINI_MODEL
+
+
 def run_durete_for_siren(
     siren: str,
     idus: list[str] | None = None,
     avec_rpg: bool = True,
-    model: str = "gemini-3.1-flash-lite-preview",
+    model: str | None = None,
     denomination: str = "",
     forme_juridique: str = "",
     verbose: bool | None = None,
@@ -57,7 +68,7 @@ def run_durete_for_siren(
         siren=siren,
         idus=idus or [],
         avec_rpg=avec_rpg,
-        model=model,
+        model=resolve_durete_gemini_model(model),
         denomination_input=denomination,
         forme_juridique_input=forme_juridique,
     )
@@ -67,7 +78,7 @@ def run_durete_batch_in_memory(
     items: Iterable[dict[str, Any]],
     *,
     avec_rpg: bool = True,
-    model: str = "gemini-3.1-flash-lite",
+    model: str | None = None,
     workers: int = 1,
     verbose: bool | None = None,
 ) -> list[dict]:
@@ -88,7 +99,7 @@ def run_durete_batch_in_memory(
             siren=item.get("siren", ""),
             idus=item.get("idus") or [],
             avec_rpg=avec_rpg,
-            model=model,
+            model=resolve_durete_gemini_model(model),
             denomination_input=item.get("denomination", "") or "",
             forme_juridique_input=item.get("forme_juridique", "") or "",
         )

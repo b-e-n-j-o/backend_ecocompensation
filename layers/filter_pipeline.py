@@ -20,6 +20,7 @@ Le profiling riche CESBIO (surfaces/pct) est dans pool/profilers/profile_cesbio.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -27,7 +28,12 @@ from typing import Callable
 
 from sqlalchemy import text
 
-from layers.common.aoi_to_parcelles_v2 import run as run_parcelles
+from layers.common.aoi_to_parcelles_v2 import (
+    TileEnvelope,
+    plan_aoi_tiles,
+    run as run_parcelles,
+    tile_values_sql,
+)
 from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS, national_exclusion_steps
 
 logger = logging.getLogger(__name__)
@@ -56,7 +62,7 @@ class FaunaCriterion:
 @dataclass
 class FilterConfig:
     min_area_ha: float = 7.0
-    miller_thresh: float = 0.39
+    miller_thresh: float | None = None
     cesbio_libelles: list[str] = field(default_factory=list)
     fauna_criteria: list[FaunaCriterion] = field(default_factory=list)
     """exclude_source_buffer = hors emprise + buffer AOI ; within_foncier = à l'intérieur de l'AOI projet."""
@@ -389,12 +395,13 @@ def _build_filter_clauses(
         labels.append("Hors emprise projet (source)")
         clauses.append(_CLAUSE_EXCLUDE_SOURCE)
 
-    labels.append(f"Miller ≥ {config.miller_thresh}")
-    clauses.append("""
-        (4.0 * PI() * ST_Area(p.geom_2154))
-        / NULLIF(ST_Perimeter(p.geom_2154)^2, 0)::double precision
-        >= :miller_th
-    """)
+    if config.miller_thresh is not None:
+        labels.append(f"Miller ≥ {config.miller_thresh}")
+        clauses.append("""
+            (4.0 * PI() * ST_Area(p.geom_2154))
+            / NULLIF(ST_Perimeter(p.geom_2154)^2, 0)::double precision
+            >= :miller_th
+        """)
 
     for label, clause in national_exclusion_steps(config.excluded_layers, geom_alias="p"):
         labels.append(label)
@@ -524,10 +531,11 @@ def _build_filter_clauses(
 def _filter_params(project_id: str, config: FilterConfig) -> dict:
     params: dict = {
         "project_id": project_id,
-        "miller_th": config.miller_thresh,
         "cesbio_libelles": config.cesbio_libelles,
         "min_zone_humide_m2": config.min_zone_humide_ha * 10_000.0,
     }
+    if config.miller_thresh is not None:
+        params["miller_th"] = config.miller_thresh
     for i, fc in enumerate(config.fauna_criteria):
         params[f"fauna_species_{i}"] = fc.species
         params[f"fauna_dist_m_{i}"] = fc.dist_m
@@ -538,8 +546,61 @@ def _filter_params(project_id: str, config: FilterConfig) -> dict:
     return params
 
 
+def _count_global_and_by_tile(
+    conn,
+    where: str,
+    params: dict,
+    tiles: list[TileEnvelope],
+) -> tuple[int, dict[int, int]]:
+    """COUNT global (entonnoir) + répartition par tuile, en une passe."""
+    values_sql, tile_params = tile_values_sql(tiles)
+    if not values_sql:
+        n = conn.execute(
+            text(f"SELECT COUNT(*) FROM ecocompensation_results.parcelles p WHERE {where}"),
+            params,
+        ).scalar_one()
+        return int(n), {}
+    rows = conn.execute(
+        text(f"""
+            WITH tiles AS (
+                SELECT v.id, ST_MakeEnvelope(v.x0, v.y0, v.x1, v.y1, 2154) AS geom
+                FROM (VALUES {values_sql}) AS v(id, x0, y0, x1, y1)
+            ),
+            survivors AS (
+                SELECT p.idu, ST_PointOnSurface(p.geom_2154) AS c
+                FROM ecocompensation_results.parcelles p
+                WHERE {where}
+            ),
+            assigned AS (
+                SELECT DISTINCT ON (s.idu) s.idu, t.id
+                FROM survivors s
+                JOIN tiles t ON ST_Intersects(s.c, t.geom)
+                ORDER BY s.idu, t.id
+            )
+            SELECT
+                (SELECT COUNT(*) FROM survivors)::int AS total,
+                t.id,
+                COUNT(a.idu)::int AS n
+            FROM tiles t
+            LEFT JOIN assigned a ON a.id = t.id
+            GROUP BY t.id
+            ORDER BY t.id
+        """),
+        {**params, **tile_params},
+    ).mappings().all()
+    if not rows:
+        return 0, {}
+    total = int(rows[0]["total"])
+    counts = {int(row["id"]): int(row["n"]) for row in rows}
+    return total, counts
+
+
 def _spatial_filter(
-    engine, project_id: str, config: FilterConfig, log: Callable[[str], None]
+    engine,
+    project_id: str,
+    aoi_id: str,
+    config: FilterConfig,
+    log: Callable[[str], None],
 ) -> tuple[list[str], list[dict]]:
     has_source = _has_source_geometry(engine, project_id)
     if config.search_mode == "within_foncier":
@@ -558,6 +619,8 @@ def _spatial_filter(
     labels, all_clauses = _build_filter_clauses(config, spatial_mode=spatial_mode)
     params = _filter_params(project_id, config)
     funnel_steps: list[dict] = []
+    plan = plan_aoi_tiles(engine, aoi_id, config.min_area_ha)
+    tiles = plan.tiles if plan else []
 
     with engine.begin() as conn:
         cumulative: list[str] = []
@@ -565,12 +628,34 @@ def _spatial_filter(
             cumulative.append(clause)
             where = " AND ".join(f"({c})" for c in cumulative)
             t0 = time.perf_counter()
-            n = conn.execute(
-                text(f"SELECT COUNT(*) FROM ecocompensation_results.parcelles p WHERE {where}"),
-                params,
-            ).scalar_one()
+            if tiles:
+                try:
+                    count, counts = _count_global_and_by_tile(conn, where, params, tiles)
+                    log(
+                        "FILTER_TILES:"
+                        + json.dumps(
+                            {"step": step_idx, "counts": {str(k): v for k, v in counts.items()}},
+                            separators=(",", ":"),
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "FILTER_TILES count failed project_id=%s step=%s",
+                        project_id,
+                        step_idx,
+                    )
+                    n = conn.execute(
+                        text(f"SELECT COUNT(*) FROM ecocompensation_results.parcelles p WHERE {where}"),
+                        params,
+                    ).scalar_one()
+                    count = int(n)
+            else:
+                n = conn.execute(
+                    text(f"SELECT COUNT(*) FROM ecocompensation_results.parcelles p WHERE {where}"),
+                    params,
+                ).scalar_one()
+                count = int(n)
             dt = round(time.perf_counter() - t0, 2)
-            count = int(n)
             log(f"FILTER_STEP:{label}:{count}:{dt}s")
             funnel_steps.append({"step": step_idx, "label": label, "count": count})
             if count == 0 and len(cumulative) > 1:
@@ -687,8 +772,6 @@ def _enrich_survivors(
 
 
 def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
-    import json
-
     payload = {
         "min_area_ha": config.min_area_ha,
         "miller_thresh": config.miller_thresh,
@@ -729,7 +812,8 @@ def run(
     log = _make_log(project_id, cb)
     t_global = time.perf_counter()
     log(
-        f"PIPELINE:start min_area={config.min_area_ha}ha miller≥{config.miller_thresh} "
+        f"PIPELINE:start min_area={config.min_area_ha}ha "
+        f"miller={'off' if config.miller_thresh is None else f'≥{config.miller_thresh}'} "
         f"cesbio={len(config.cesbio_libelles)} fauna={len(config.fauna_criteria)}"
     )
     result = FilterPipelineResult()
@@ -751,7 +835,7 @@ def run(
 
         # ── 2. Filtrage spatial ─────────────────────────────────────────────
         log("PHASE:filter:start")
-        surviving, filter_funnel = _spatial_filter(engine, project_id, config, log)
+        surviving, filter_funnel = _spatial_filter(engine, project_id, aoi_id, config, log)
         result.surviving_idus = surviving
         result.n_after_filter = len(surviving)
         result.funnel = filter_funnel

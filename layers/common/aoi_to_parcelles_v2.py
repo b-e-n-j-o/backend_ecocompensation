@@ -21,9 +21,11 @@ SOLUTION : Tiling spatial adaptatif en Python.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
@@ -81,8 +83,8 @@ def create_results_table_if_not_exists(conn):
 
 # ── Tiling ────────────────────────────────────────────────────────────────────
 
-def get_aoi_bbox(conn, aoi_id: str) -> tuple[float, float, float, float] | None:
-    """Retourne (xmin, ymin, xmax, ymax) en SRID 2154, ou None si AOI introuvable."""
+def get_aoi_bbox(conn, aoi_id: str) -> tuple[float, float, float, float, float] | None:
+    """Retourne (xmin, ymin, xmax, ymax, area_m2) en SRID 2154, ou None si AOI introuvable."""
     row = conn.execute(
         text("""
             SELECT
@@ -160,6 +162,100 @@ def compute_tile_size(
     return tile_size
 
 
+@dataclass(frozen=True)
+class TileEnvelope:
+    id: int
+    tx0: float
+    ty0: float
+    tx1: float
+    ty1: float
+
+
+@dataclass(frozen=True)
+class TilePlan:
+    tiles: list[TileEnvelope]
+    tile_size_m: float
+    xmin: float
+    ymin: float
+    xmax: float
+    ymax: float
+    area_m2: float
+
+
+def plan_aoi_tiles(engine, aoi_id: str, min_area_ha: float) -> TilePlan | None:
+    """Calcule le carroyage Lambert 93 de l'AOI (même logique que le tiling)."""
+    with engine.connect() as conn:
+        result = get_aoi_bbox(conn, aoi_id)
+    if result is None:
+        return None
+    xmin, ymin, xmax, ymax, area_m2 = result
+    tile_size_m = compute_tile_size(xmin, ymin, xmax, ymax, min_area_ha=min_area_ha)
+    tiles = [
+        TileEnvelope(id=i, tx0=tx0, ty0=ty0, tx1=tx1, ty1=ty1)
+        for i, (tx0, ty0, tx1, ty1) in enumerate(
+            iter_tiles(xmin, ymin, xmax, ymax, tile_size_m), 1
+        )
+    ]
+    return TilePlan(
+        tiles=tiles,
+        tile_size_m=tile_size_m,
+        xmin=xmin,
+        ymin=ymin,
+        xmax=xmax,
+        ymax=ymax,
+        area_m2=area_m2,
+    )
+
+
+def tile_values_sql(tiles: list[TileEnvelope]) -> tuple[str, dict]:
+    """Clause VALUES paramétrée (id, x0, y0, x1, y1) pour ST_MakeEnvelope."""
+    parts: list[str] = []
+    params: dict = {}
+    for t in tiles:
+        parts.append(
+            f"(CAST(:tile_id_{t.id} AS int), "
+            f"CAST(:tile_x0_{t.id} AS double precision), "
+            f"CAST(:tile_y0_{t.id} AS double precision), "
+            f"CAST(:tile_x1_{t.id} AS double precision), "
+            f"CAST(:tile_y1_{t.id} AS double precision))"
+        )
+        params[f"tile_id_{t.id}"] = t.id
+        params[f"tile_x0_{t.id}"] = t.tx0
+        params[f"tile_y0_{t.id}"] = t.ty0
+        params[f"tile_x1_{t.id}"] = t.tx1
+        params[f"tile_y1_{t.id}"] = t.ty1
+    return ", ".join(parts), params
+
+
+def tiles_wgs84_geojson(conn, tiles: list[TileEnvelope]) -> list[dict]:
+    """Transforme les enveloppes 2154 → GeoJSON Polygon 4326."""
+    if not tiles:
+        return []
+    values_sql, params = tile_values_sql(tiles)
+    rows = conn.execute(
+        text(f"""
+            SELECT v.id,
+                   ST_AsGeoJSON(
+                       ST_Transform(
+                           ST_MakeEnvelope(v.x0, v.y0, v.x1, v.y1, 2154),
+                           4326
+                       ),
+                       6
+                   )::json AS geometry
+            FROM (VALUES {values_sql}) AS v(id, x0, y0, x1, y1)
+            ORDER BY v.id
+        """),
+        params,
+    ).mappings().all()
+    out: list[dict] = []
+    for row in rows:
+        geom = row["geometry"]
+        if isinstance(geom, str):
+            geom = json.loads(geom)
+        out.append({"id": int(row["id"]), "geometry": geom})
+    return out
+
+
 # ── Core ──────────────────────────────────────────────────────────────────────
 
 def run(
@@ -185,19 +281,17 @@ def run(
     min_area_m2 = min_area_ha * 10_000
 
     # ── 1. Récupérer le bbox de l'AOI ────────────────────────────────────────
-    with engine.connect() as conn:
-        result = get_aoi_bbox(conn, aoi_id)
-
-    if result is None:
+    plan = plan_aoi_tiles(engine, aoi_id, min_area_ha)
+    if plan is None:
         log(f"⚠️ AOI id={aoi_id} introuvable.")
         return 0
 
-    xmin, ymin, xmax, ymax, area_m2 = result
+    xmin, ymin, xmax, ymax, area_m2 = plan.xmin, plan.ymin, plan.xmax, plan.ymax, plan.area_m2
     area_ha = area_m2 / 10_000
     width_km = (xmax - xmin) / 1000
     height_km = (ymax - ymin) / 1000
-    tile_size_m = compute_tile_size(xmin, ymin, xmax, ymax, min_area_ha=min_area_ha)
-    n_tiles = count_tiles(xmin, ymin, xmax, ymax, tile_size_m)
+    tile_size_m = plan.tile_size_m
+    n_tiles = len(plan.tiles)
     tile_mode = "adaptatif" if min_area_ha > 0 else "fixe 5km"
 
     log(f"🗺️  AOI id={aoi_id} — surface ~{area_ha:,.0f} ha")
@@ -207,6 +301,15 @@ def run(
     )
     if min_area_ha > 0:
         log(f"📏 Filtre surface au tiling : ≥ {min_area_ha} ha")
+
+    with engine.connect() as conn:
+        try:
+            grid = tiles_wgs84_geojson(conn, plan.tiles)
+        except Exception:
+            logger.exception("TILE_GRID transform failed aoi_id=%s", aoi_id)
+            grid = []
+    if grid:
+        log(f"TILE_GRID:{json.dumps({'tiles': grid}, separators=(',', ':'))}")
 
     # ── 2. DDL ────────────────────────────────────────────────────────────────
     with engine.begin() as conn:
@@ -236,10 +339,12 @@ def run(
     tile_errors = 0
     t_global = time.perf_counter()
 
-    tiles = list(iter_tiles(xmin, ymin, xmax, ymax, tile_size_m))
+    tiles = plan.tiles
 
-    for i, (tx0, ty0, tx1, ty1) in enumerate(tiles, 1):
+    for tile in tiles:
+        i, tx0, ty0, tx1, ty1 = tile.id, tile.tx0, tile.ty0, tile.tx1, tile.ty1
         t_tile = time.perf_counter()
+        log(f"TILE_START:{i}/{len(tiles)}")
         try:
             with engine.begin() as conn:
                 # Timeout par requête pour éviter de bloquer Supabase
@@ -300,7 +405,7 @@ def run(
             # suivi du texte lisible en CLI. Le frontend parse ce préfixe pour
             # afficher le compteur croissant en temps réel.
             log(
-                f"TILE_PROGRESS:{i}/{len(tiles)}:{total_inserted} "
+                f"TILE_PROGRESS:{i}/{len(tiles)}:{total_inserted}:{n} "
                 f"🔲 Tuile {i}/{len(tiles)} "
                 f"({(tx1-tx0)/1000:.0f}×{(ty1-ty0)/1000:.0f}km) "
                 f"→ {n:,} parcelles ({elapsed_tile:.1f}s) | total: {total_inserted:,}"

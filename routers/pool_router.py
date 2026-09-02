@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from db import get_engine
-from pool import pool_service, profiling_service
+from pool import add_parcelles, pool_service, profiling_service
 
 
 router = APIRouter(prefix="/api/projects", tags=["pool"])
+all_runs_router = APIRouter(prefix="/api/pool", tags=["pool"])
 engine = get_engine()
 
 
@@ -41,6 +42,18 @@ def list_pool_runs(project_id: str, limit: int = Query(50, ge=1, le=200)):
     with engine.begin() as conn:
         pool_service.ensure_tables(conn)
         runs = pool_service.list_runs(conn, project_id=project_id, limit=limit)
+    return {"runs": runs}
+
+
+@all_runs_router.get("/runs")
+def list_all_pool_runs(
+    limit: int = Query(200, ge=1, le=500),
+    scope: str = Query("parcelles"),
+):
+    """Liste globale des pools (tous projets) — évite N GET /projects/{id}/pool/runs."""
+    with engine.begin() as conn:
+        pool_service.ensure_tables(conn)
+        runs = pool_service.list_all_runs(conn, scope=scope or None, limit=limit)
     return {"runs": runs}
 
 
@@ -90,6 +103,16 @@ def get_pool_metrics_bulk(project_id: str, run_id: str = Query(..., description=
 class IndesirablesAddBody(BaseModel):
     run_id: str = Field(..., min_length=1)
     idus: list[str] = Field(default_factory=list, max_length=500)
+
+
+class DureteRecomputeBody(BaseModel):
+    """Si `idus` est omis ou vide : tout le pool actif. Sinon : seulement ces parcelles."""
+    idus: list[str] | None = Field(default=None, max_length=2000)
+
+
+class AddParcellesBody(BaseModel):
+    """IDU à injecter dans le pool sans rejouer le filtrage (1 à 50)."""
+    idus: list[str] = Field(..., min_length=1, max_length=50)
 
 
 @router.get("/{project_id}/pool/indesirables")
@@ -178,9 +201,14 @@ def recompute_metrics(project_id: str, run_id: str, score_only: bool = Query(Fal
 
 
 @router.post("/{project_id}/pool/runs/{run_id}/recompute-durete")
-def recompute_durete(project_id: str, run_id: str):
+def recompute_durete(
+    project_id: str,
+    run_id: str,
+    body: DureteRecomputeBody | None = Body(default=None),
+):
     """
-    Calcule la dureté foncière (attractivité) pour le pool du run.
+    Calcule la dureté foncière (attractivité) pour le pool du run,
+    ou seulement les IDU fournis dans le body.
 
     Les parcelles marquées indésirables au niveau projet sont exclues du calcul.
     Rafraîchit aussi les métriques PM et le score composite.
@@ -191,6 +219,11 @@ def recompute_durete(project_id: str, run_id: str):
         uuid.UUID(str(run_id))
     except ValueError:
         raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
+    only_idus: set[str] | None = None
+    if body and body.idus:
+        only_idus = {str(x).strip() for x in body.idus if str(x).strip()}
+        if not only_idus:
+            only_idus = None
     with engine.begin() as conn:
         pool_service.ensure_tables(conn)
         if not pool_service.run_belongs_to_project(conn, project_id, run_id):
@@ -200,6 +233,7 @@ def recompute_durete(project_id: str, run_id: str):
             project_id=project_id,
             run_id=run_id,
             exclude_indesirables=True,
+            only_idus=only_idus,
         )
     return {
         "status": "ok",
@@ -207,6 +241,45 @@ def recompute_durete(project_id: str, run_id: str):
         "run_id": run_id,
         "metric_key": "durete_fonciere",
         **stats,
+    }
+
+
+@router.post("/{project_id}/pool/runs/{run_id}/parcelles")
+def add_parcelles_to_run(
+    project_id: str,
+    run_id: str,
+    body: AddParcellesBody,
+):
+    """
+    Ajoute des parcelles au pool d'un run déjà calculé, sans rejouer le filtrage.
+
+    Géométrie : cadastre local puis WFS IGN. Enrichissement + profilage (PM, score éco)
+    comme les parcelles du run. La dureté foncière n'est pas lancée.
+    """
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Projet {project_id} introuvable")
+    try:
+        uuid.UUID(str(run_id))
+    except ValueError:
+        raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
+    idus = [str(x).strip() for x in body.idus if str(x).strip()]
+    if not idus:
+        raise HTTPException(400, "Aucun IDU fourni")
+    result = add_parcelles.add_idus_to_pool_run(
+        engine,
+        project_id=project_id,
+        run_id=run_id,
+        idus=idus,
+    )
+    if not result.get("ok"):
+        if result.get("error") == "run_not_found":
+            raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+        raise HTTPException(400, result.get("error") or "Ajout impossible")
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "run_id": run_id,
+        **{k: v for k, v in result.items() if k != "ok"},
     }
 
 

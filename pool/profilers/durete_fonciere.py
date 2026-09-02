@@ -49,6 +49,82 @@ def _normalize_score_with_vigne_bonus(score: float | None, intersects_vigne: boo
     return score
 
 
+def _normalize_siren(raw: object) -> str | None:
+    s = "" if raw is None else str(raw).strip()
+    if not s:
+        return None
+    if len(s) == 14 and s.isdigit():
+        return s[:9]
+    if len(s) == 9 and s.isdigit():
+        return s
+    return None
+
+
+def _is_public_pm(forme_juridique: object, denomination: object) -> bool:
+    blob = f"{forme_juridique or ''} {denomination or ''}".lower()
+    markers = (
+        "ministère",
+        "ministere",
+        "administration de l'état",
+        "administration de l'etat",
+        "collectivité territoriale",
+        "collectivite territoriale",
+        "établissement public",
+        "etablissement public",
+        "direction de l immobilier",
+        "direction de l'immobilier",
+    )
+    if any(m in blob for m in markers):
+        return True
+    # « ETAT PAR … » cadastral, sans matcher EARL / etc.
+    if "etat par " in blob or "état par " in blob:
+        return True
+    return False
+
+
+def _payload_public_sans_siren(
+    *,
+    siren_cadastre: str | None,
+    denomination: str | None,
+    forme_juridique: str | None,
+    intersects_vigne: bool,
+) -> dict[str, object]:
+    """PM publique sans SIREN INSEE : score déterministe (hors LLM)."""
+    score = 90.0
+    if intersects_vigne:
+        score = min(100.0, score + 15.0)
+    return {
+        "eligible": True,
+        "reason": "public_entity_no_insee_siren",
+        "siren": siren_cadastre,
+        "denomination": denomination,
+        "forme_juridique": forme_juridique,
+        "score_final": score,
+        "score_llm_base": 90.0,
+        "niveau_durete": "Dureté rédhibitoire",
+        "explication": (
+            "Personne morale publique sans SIREN INSEE exploitable "
+            f"({siren_cadastre or 'identifiant cadastral'}). "
+            "Domaine de l'État / ministère : inaliénabilité de principe (CGPPP). "
+            "Score déterministe, hors analyse LLM."
+        ),
+        "detail_axes": {
+            "axe1": 40,
+            "axe1_note": f"{forme_juridique or 'Administration publique'} — inaliénabilité",
+            "axe2": None,
+            "axe3": None,
+            "axe4": None,
+            "surcharges": 0,
+            "surcharges_note": "Pas d'appel LLM : identifiant non-SIREN",
+        },
+        "statut": "ok",
+        "avertissements": ["siren_non_insee"],
+        "intersects_arrachage_vigne": intersects_vigne,
+        "from_cache": False,
+        "from_llm": False,
+    }
+
+
 def _payload_non_eligible(reason: str) -> dict[str, object]:
     return {
         "eligible": False,
@@ -208,13 +284,34 @@ class DureteFonciereProfiler(BasePoolProfiler):
                     logger.info("DURETE IDU | idu=%s status=skipped reason=not_pm", idu)
                 continue
 
-            siren = str(pm.get("siren") or "").strip()
-            if len(siren) != 9 or not siren.isdigit():
+            siren_raw = str(pm.get("siren") or "").strip()
+            siren = _normalize_siren(siren_raw)
+            if not siren:
+                denom = str(pm.get("denomination") or "").strip() or None
+                forme = str(pm.get("forme_juridique") or "").strip() or None
+                if _is_public_pm(forme, denom):
+                    payload[idu] = _payload_public_sans_siren(
+                        siren_cadastre=siren_raw or None,
+                        denomination=denom,
+                        forme_juridique=forme,
+                        intersects_vigne=vigne_by_idu.get(idu, False),
+                    )
+                    eligible_idus += 1
+                    if progress_logs:
+                        logger.info(
+                            "DURETE IDU | idu=%s status=public_no_siren identifiant=%s forme=%s",
+                            idu,
+                            siren_raw or "—",
+                            forme,
+                        )
+                    continue
                 payload[idu] = _payload_non_eligible("missing_or_invalid_siren")
                 skipped_invalid_siren += 1
                 if progress_logs:
                     logger.info(
-                        "DURETE IDU | idu=%s status=skipped reason=missing_or_invalid_siren", idu
+                        "DURETE IDU | idu=%s status=skipped reason=missing_or_invalid_siren identifiant=%s",
+                        idu,
+                        siren_raw or "—",
                     )
                 continue
 
@@ -287,6 +384,9 @@ class DureteFonciereProfiler(BasePoolProfiler):
                         forme_juridique=meta.get("forme_juridique", ""),
                         verbose=verbose_pipeline,
                     )
+                    if not isinstance(res, dict) or res.get("statut") == "erreur":
+                        err = (res or {}).get("erreur") if isinstance(res, dict) else "résultat vide"
+                        raise RuntimeError(f"pipeline statut=erreur : {err}")
                 except Exception:
                     logger.exception(
                         "DURETE GROUP [%d/%d] ERROR | project_id=%s run_id=%s siren=%s",

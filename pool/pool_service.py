@@ -290,6 +290,49 @@ def list_runs(conn, project_id: str, limit: int = 50) -> list[dict[str, Any]]:
     return out
 
 
+def list_all_runs(
+    conn,
+    *,
+    scope: str | None = "parcelles",
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Tous les pools, tous projets — un seul aller-retour pour les sélecteurs UI."""
+    lim = max(1, min(int(limit), 500))
+    scope_sql = ""
+    params: dict[str, Any] = {"limit": lim}
+    if scope:
+        scope_sql = "AND r.scope = :scope"
+        params["scope"] = scope
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT
+                r.id,
+                r.project_id,
+                r.scope,
+                r.options_json,
+                r.total_count,
+                r.created_at
+            FROM ecocompensation_results.parcelles_pool_runs r
+            WHERE 1 = 1
+              {scope_sql}
+            ORDER BY r.created_at DESC
+            LIMIT :limit
+            """
+        ),
+        params,
+    ).mappings().all()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        if d.get("id") is not None:
+            d["id"] = str(d["id"])
+        if d.get("project_id") is not None:
+            d["project_id"] = str(d["project_id"])
+        out.append(d)
+    return out
+
+
 def _parcelles_pool_runs_has_result_summary(conn) -> bool:
     r = conn.execute(
         text(

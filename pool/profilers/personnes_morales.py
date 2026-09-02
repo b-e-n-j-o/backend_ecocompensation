@@ -59,6 +59,33 @@ def _forme_juridique_n3_label(forme_juridique: object) -> str | None:
     return f"Forme juridique inconnue (code {code4})"
 
 
+def _normalize_siren_value(siren: object) -> str | None:
+    s = "" if siren is None else str(siren).strip()
+    if not s:
+        return None
+    if len(s) == 14 and s.isdigit():
+        return s[:9]
+    return s
+
+
+def _siren_rank(siren: object) -> int:
+    """Préfère un SIREN INSEE (9 chiffres) à un identifiant cadastral (ex. U23691569)."""
+    s = _normalize_siren_value(siren) or ""
+    if len(s) == 9 and s.isdigit():
+        return 2
+    if s:
+        return 1
+    return 0
+
+
+def _keep_better_pm_hit(current: dict[str, object] | None, candidate: dict[str, object]) -> dict[str, object]:
+    if current is None:
+        return candidate
+    if _siren_rank(candidate.get("siren")) > _siren_rank(current.get("siren")):
+        return candidate
+    return current
+
+
 def _empty_payload() -> dict[str, object]:
     return {
         "intersects_pm_database": False,
@@ -80,7 +107,7 @@ def _hit_payload(
 ) -> dict[str, object]:
     return {
         "intersects_pm_database": True,
-        "siren": None if siren is None else str(siren).strip() or None,
+        "siren": _normalize_siren_value(siren),
         "denomination": None if denomination is None else str(denomination).strip() or None,
         "forme_juridique": _forme_juridique_n3_label(forme_juridique),
     }
@@ -161,7 +188,11 @@ class PersonnesMoralesProfiler(BasePoolProfiler):
               ON ppm.idu = p.idu
             WHERE pp.project_id = CAST(:project_id AS uuid)
               AND pp.run_id = CAST(:run_id AS uuid)
-            ORDER BY p.idu, ppm.siren NULLS LAST
+            ORDER BY p.idu,
+              CASE WHEN ppm.siren ~ '^[0-9]{9}$' THEN 0
+                   WHEN ppm.siren ~ '^[0-9]{14}$' THEN 1
+                   ELSE 2 END,
+              ppm.siren NULLS LAST
             """
         )
         rows = conn.execute(
@@ -199,7 +230,8 @@ class PersonnesMoralesProfiler(BasePoolProfiler):
                 rows = c2.execute(sql, {"idus": part}).mappings().all()
                 for r in rows:
                     idu = str(r["idu"])
-                    out[idu] = _hit_payload(r.get("siren"), r.get("denomination"), r.get("forme_juridique"))
+                    hit = _hit_payload(r.get("siren"), r.get("denomination"), r.get("forme_juridique"))
+                    out[idu] = _keep_better_pm_hit(out.get(idu), hit)
         return out
 
     def _hits_from_prospects_filtered(

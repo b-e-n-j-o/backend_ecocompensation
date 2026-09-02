@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import queue as queue_module
+import re
 import time
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
@@ -52,6 +53,37 @@ FULL_PIPELINE_PHASES = FILTER_PHASES + UF_FILTER_PHASES
 
 async def _noop_push(data: dict) -> None:
     pass
+
+
+_TILE_PROGRESS_RE = re.compile(r"^TILE_PROGRESS:(\d+)/(\d+):(\d+):(\d+)")
+_TILE_START_RE = re.compile(r"^TILE_START:(\d+)/(\d+)")
+
+
+def _tile_fields_from_log(msg: str) -> dict:
+    """Champs structurés pour l'overlay carte (le `message` texte reste inchangé)."""
+    extra: dict = {}
+    if msg.startswith("TILE_GRID:"):
+        try:
+            extra["tiles_grid"] = json.loads(msg[len("TILE_GRID:"):])
+        except json.JSONDecodeError:
+            logger.warning("TILE_GRID JSON invalide")
+    elif (m := _TILE_START_RE.match(msg)):
+        extra["tile_start"] = {"id": int(m.group(1)), "total": int(m.group(2))}
+    elif (m := _TILE_PROGRESS_RE.match(msg)):
+        extra["tile_progress"] = {
+            "id": int(m.group(1)),
+            "total": int(m.group(2)),
+            "n_inserted": int(m.group(3)),
+            "n_tile": int(m.group(4)),
+        }
+    elif msg.startswith("FILTER_TILES:"):
+        try:
+            extra["filter_tiles"] = json.loads(msg[len("FILTER_TILES:"):])
+        except json.JSONDecodeError:
+            logger.warning("FILTER_TILES JSON invalide")
+    elif msg.startswith("PHASE:purge:"):
+        extra["tiles_fade"] = True
+    return extra
 
 
 def _filter_options_json(config: FilterConfig) -> dict:
@@ -487,7 +519,7 @@ async def _run_uf_after_filter(
             fauna_species=fauna_species[0] if fauna_species else None,
             fauna_dist_m=config.fauna_criteria[0].dist_m if config.fauna_criteria else 1000.0,
             fauna_criteria=fauna_criteria or None,
-            miller_thresh=config.miller_thresh,
+            miller_thresh=config.miller_thresh if config.miller_thresh is not None else 0.0,
             study_type=(
                 "zones_humides_intra"
                 if config.search_mode == "within_foncier"
@@ -545,23 +577,36 @@ async def _run_pipeline_with_progress(
     current_phase = {"key": "parcelles"}
 
     def cb(msg: str) -> None:
-        logger.info("[filter_orchestrator] project_id=%s %s", project_id, msg)
         if msg.startswith("PHASE:"):
             parts = msg.split(":")
             if len(parts) >= 2:
                 current_phase["key"] = parts[1]
-        elif msg.startswith("TILE_PROGRESS:"):
+        elif msg.startswith("TILE_GRID:") or msg.startswith("TILE_START:") or msg.startswith("TILE_PROGRESS:"):
             current_phase["key"] = "parcelles"
-        elif msg.startswith("FILTER_STEP:"):
+        elif msg.startswith("FILTER_STEP:") or msg.startswith("FILTER_TILES:"):
             current_phase["key"] = "filter"
         elif msg.startswith("ENRICH_BATCH:"):
             current_phase["key"] = "enrich"
 
+        display = msg
+        if msg.startswith("TILE_GRID:"):
+            n_grid = 0
+            try:
+                n_grid = len(json.loads(msg[len("TILE_GRID:"):]).get("tiles") or [])
+            except json.JSONDecodeError:
+                pass
+            display = f"TILE_GRID:{n_grid} tuiles"
+        elif msg.startswith("FILTER_TILES:"):
+            display = "FILTER_TILES"
+        logger.info("[filter_orchestrator] project_id=%s %s", project_id, display)
+
+        ws_message = display if msg.startswith("TILE_GRID:") or msg.startswith("FILTER_TILES:") else msg
         msg_queue.put({
             "event": "progress",
             "layer_key": current_phase["key"],
-            "message": msg,
+            "message": ws_message,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            **_tile_fields_from_log(msg),
         })
 
     async def drain_queue() -> None:
@@ -634,11 +679,11 @@ async def run_filter_orchestration(
 
     logger.info(
         "[filter_orchestrator] START project_id=%s aoi_id=%s "
-        "min_area=%.1fha miller≥%.2f cesbio=%d fauna=%d",
+        "min_area=%.1fha miller=%s cesbio=%d fauna=%d",
         project_id,
         aoi_id,
         config.min_area_ha,
-        config.miller_thresh,
+        "off" if config.miller_thresh is None else f"≥{config.miller_thresh:.2f}",
         len(config.cesbio_libelles),
         len(config.fauna_criteria),
     )

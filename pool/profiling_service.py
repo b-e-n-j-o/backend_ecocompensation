@@ -141,13 +141,15 @@ def compute_durete_for_run(
     run_id: str,
     *,
     exclude_indesirables: bool = True,
+    only_idus: set[str] | None = None,
 ) -> dict:
     """
     Calcule la dureté foncière (attractivité) pour les parcelles du run pool.
 
     - Pré-requis PM : rafraîchit `parcelles_personnes_morales` sur tout le run.
-    - Dureté : uniquement sur les IDU actifs (hors pool indésirables projet si demandé).
-    - Met à jour `composite_score_v1` après la dureté.
+    - Dureté : uniquement sur les IDU actifs (hors pool indésirables projet si demandé),
+      éventuellement restreints à `only_idus` (sélection UI).
+    - Met à jour `composite_score_v1` après la dureté (tout le run, pour rester cohérent).
     """
     t0 = time.perf_counter()
     pool_service.ensure_tables(conn)
@@ -169,10 +171,17 @@ def compute_durete_for_run(
     else:
         active_idus = pool_idus
 
+    requested_count = 0
+    if only_idus is not None:
+        requested = {str(x).strip() for x in only_idus if str(x).strip()}
+        requested_count = len(requested)
+        active_idus = active_idus & requested
+
     if not active_idus:
         return {
             "updated_count": 0,
             "active_idus": 0,
+            "requested_idus": requested_count,
             "skipped_indesirables": skipped_indesirables,
             "eligible_pm": 0,
             "composite_updated": 0,
@@ -207,11 +216,12 @@ def compute_durete_for_run(
 
     duration_s = round(time.perf_counter() - t0, 2)
     logger.info(
-        "DURETE POOL DONE | project_id=%s run_id=%s active_idus=%d skipped_indesirables=%d "
-        "durete_upserts=%d eligible_pm=%d composite_upserts=%d duration_s=%.2f",
+        "DURETE POOL DONE | project_id=%s run_id=%s active_idus=%d requested_idus=%d "
+        "skipped_indesirables=%d durete_upserts=%d eligible_pm=%d composite_upserts=%d duration_s=%.2f",
         project_id,
         run_id,
         len(active_idus),
+        requested_count,
         skipped_indesirables,
         durete_upserts,
         eligible_pm,
@@ -221,6 +231,7 @@ def compute_durete_for_run(
     return {
         "updated_count": durete_upserts,
         "active_idus": len(active_idus),
+        "requested_idus": requested_count,
         "skipped_indesirables": skipped_indesirables,
         "eligible_pm": eligible_pm,
         "pm_upserts": pm_upserts,
