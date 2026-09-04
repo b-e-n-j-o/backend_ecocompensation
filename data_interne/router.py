@@ -214,20 +214,23 @@ def _layer_count(conn, layer: InternalLayer) -> int:
 def _layer_bounds_and_count(conn, layer: InternalLayer) -> tuple[list[float] | None, int]:
     fqn = _fqn(layer)
     geom = _ident(layer.geom_2154)
+    extra = _extra_where(layer)
     row = conn.execute(
         text(
             f"""
             SELECT
-                (SELECT count(*)::int FROM {fqn}) AS n,
+                (SELECT count(*)::int FROM {fqn} AS t
+                 WHERE t.{geom} IS NOT NULL {extra}) AS n,
                 ST_XMin(ext) AS w,
                 ST_YMin(ext) AS s,
                 ST_XMax(ext) AS e,
                 ST_YMax(ext) AS north
             FROM (
-                SELECT ST_Transform(ST_SetSRID(ST_Extent({geom})::geometry, 2154), 4326) AS ext
-                FROM {fqn}
-                WHERE {geom} IS NOT NULL
-            ) t
+                SELECT ST_Transform(ST_SetSRID(ST_Extent(t.{geom})::geometry, 2154), 4326) AS ext
+                FROM {fqn} AS t
+                WHERE t.{geom} IS NOT NULL
+                {extra}
+            ) bounds
             """
         )
     ).mappings().one()
