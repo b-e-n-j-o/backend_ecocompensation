@@ -32,7 +32,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from db import get_engine, get_engine_ppm
-from layers.common.aoi_to_sub_uf import run as run_sub_uf
+from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import run as run_sub_uf
 
 GEOM_ZIP        = BACKEND_DIR / "geometrie_test.zip"
 BUFFER_M        = 10_000

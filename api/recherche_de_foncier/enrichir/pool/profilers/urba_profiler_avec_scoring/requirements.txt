@@ -1,0 +1,8 @@
+requests
+shapely>=2.0
+pyproj>=3.4
+numpy
+pydantic>=2.0
+pyyaml>=6
+fastapi
+openpyxl  # optionnel : grille Excel de relecture

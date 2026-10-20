@@ -1,0 +1,254 @@
+{
+  "description": "Couches lues par la recherche de foncier. Fiche de consultation, non branchée au pipeline.",
+  "couches": [
+    {
+      "id": "aoi",
+      "label": "Zone de recherche",
+      "theme": "perimetre",
+      "role": "perimetre",
+      "declencheur": "toujours",
+      "source": { "schema": "ecocompensation", "table": "aoi" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Définit où l'on cherche. Ne filtre pas un thème."
+    },
+    {
+      "id": "foncier",
+      "label": "Foncier déposé",
+      "theme": "perimetre",
+      "role": "perimetre",
+      "declencheur": "toujours",
+      "source": { "schema": "ecocompensation", "table": "foncier" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Emprise du projet. Sert à exclure le site source en recherche hors projet."
+    },
+    {
+      "id": "project_parcelles",
+      "label": "Parcelles initiales",
+      "theme": "perimetre",
+      "role": "perimetre",
+      "declencheur": "toujours",
+      "source": { "schema": "ecocompensation", "table": "project_parcelles" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Parcelle(s) du projet."
+    },
+    {
+      "id": "projects",
+      "label": "Projet",
+      "theme": "perimetre",
+      "role": "perimetre",
+      "declencheur": "toujours",
+      "source": { "schema": "ecocompensation", "table": "projects" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Métadonnées du projet, dont le type d'étude."
+    },
+    {
+      "id": "parcelles",
+      "label": "Parcelles cadastrales candidates",
+      "theme": "cadastre",
+      "role": "candidats",
+      "declencheur": "toujours",
+      "source": { "schema": "ecocompensation", "table": "parcelles" },
+      "resultat": { "schema": "ecocompensation_results", "table": "parcelles" },
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Tuilage dans l'AOI, puis filtre de surface minimale."
+    },
+    {
+      "id": "parcelles_personnes_morales",
+      "label": "Personnes morales",
+      "theme": "proprietaire",
+      "role": "candidats",
+      "declencheur": "toujours",
+      "source": { "schema": "public", "table": "parcelles_personnes_morales" },
+      "resultat": { "schema": "ecocompensation_results", "table": "sous_ensembles" },
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Base PPM. Repli ecocompensation.parcelles_personnes_morales. Écrit aussi ecocompensation_results.unites_foncieres. Relu au profilage."
+    },
+    {
+      "id": "vegetation_sur_cesbio",
+      "label": "Occupation du sol",
+      "theme": "occupation_sol",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "vegetation_sur_cesbio" },
+      "resultat": null,
+      "emprise": {
+        "statut": "notee",
+        "note": "Gironde, d'après BBOX_VEGETATION_CESBIO dans le catalogue carte. À revérifier."
+      },
+      "notes": "Requête directe sur libelle_prio. Relue pour l'enrichissement des parcelles retenues et le profilage, même hors critère d'élimination."
+    },
+    {
+      "id": "fauna",
+      "label": "Espèces",
+      "theme": "faune",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "fauna" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Requête directe, ST_DWithin sur nom_vernaculaire. Relue pour les distances sur les parcelles retenues si des espèces sont choisies."
+    },
+    {
+      "id": "zone_humide",
+      "label": "Zones humides établies",
+      "theme": "zone_humide",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "zone_humide" },
+      "resultat": { "schema": "ecocompensation_results", "table": "zone_humide" },
+      "emprise": {
+        "statut": "notee",
+        "note": "Adour-Garonne, RPDZH, d'après BBOX_ZONE_HUMIDE dans le catalogue carte. À revérifier."
+      },
+      "notes": "Intersection, exclusion, ou surface minimale en ha. Le clip projet n'est écrit que si le critère est actif."
+    },
+    {
+      "id": "bv_spe_masse_d_eau",
+      "label": "Bassins versants (masses d'eau)",
+      "theme": "zone_humide",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "bv_spe_masse_d_eau" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Si le critère est coché, ne garde que les parcelles qui intersectent un bassin versant intersectant aussi le foncier du projet. Appliqué tôt, juste après le hors-emprise. Même table que l'ancienne AOI zones humides dans foncier_router.py. Lecture directe, sans clip projet."
+    },
+    {
+      "id": "arrachage_vignes",
+      "label": "Arrachage de vignes",
+      "theme": "occupation_sol",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "arrachage_vignes" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Filtre optionnel sur l'intersection, affinable par c_div_re_1 (diversification, renaturation (boisements), renaturation (jachères)). Le profilage pool écrit la métrique arrachage_vignes_ratio (part de parcelle et type) pour l'onglet Vignes."
+    },
+    {
+      "id": "zones_humides_probables",
+      "label": "Zones humides probables",
+      "theme": "zone_humide",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "geo", "table": "zones_humides_probables" },
+      "resultat": { "schema": "ecocompensation_results", "table": "zones_humides_probables" },
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Raster de probabilité. Intersection ou exclusion."
+    },
+    {
+      "id": "troncons_hydros",
+      "label": "Cours d'eau",
+      "theme": "hydro",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "troncons_hydros" },
+      "resultat": { "schema": "ecocompensation_results", "table": "troncons_hydros" },
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Intersection ou distance max."
+    },
+    {
+      "id": "surfaces_hydros",
+      "label": "Plans d'eau",
+      "theme": "hydro",
+      "role": "critere",
+      "declencheur": "si_critere",
+      "source": { "schema": "ecocompensation", "table": "surfaces_hydros" },
+      "resultat": { "schema": "ecocompensation_results", "table": "surfaces_hydros" },
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Intersection ou distance max."
+    },
+    {
+      "id": "geomce_surf",
+      "label": "GEOMCE surfaces",
+      "theme": "reglementaire",
+      "role": "exclusion",
+      "declencheur": "exclusion_par_defaut",
+      "source": { "schema": "ecocompensation", "table": "geomce_surf" },
+      "resultat": null,
+      "emprise": {
+        "statut": "notee",
+        "note": "France métropolitaine (hexagone et Corse), d'après le catalogue carte. À revérifier."
+      },
+      "notes": "Lecture nationale directe, sans clip."
+    },
+    {
+      "id": "geomce_lin",
+      "label": "GEOMCE linéaires",
+      "theme": "reglementaire",
+      "role": "exclusion",
+      "declencheur": "exclusion_par_defaut",
+      "source": { "schema": "ecocompensation", "table": "geomce_lin" },
+      "resultat": null,
+      "emprise": {
+        "statut": "notee",
+        "note": "France métropolitaine (hexagone et Corse), d'après le catalogue carte. À revérifier."
+      },
+      "notes": "Lecture nationale directe, sans clip."
+    },
+    {
+      "id": "geomce_pct",
+      "label": "GEOMCE ponctuels",
+      "theme": "reglementaire",
+      "role": "exclusion",
+      "declencheur": "exclusion_par_defaut",
+      "source": { "schema": "ecocompensation", "table": "geomce_pct" },
+      "resultat": null,
+      "emprise": {
+        "statut": "notee",
+        "note": "France métropolitaine (hexagone et Corse), d'après le catalogue carte. À revérifier."
+      },
+      "notes": "Lecture nationale directe, sans clip."
+    },
+    {
+      "id": "preemption_ens",
+      "label": "Préemption ENS",
+      "theme": "reglementaire",
+      "role": "exclusion",
+      "declencheur": "exclusion_par_defaut",
+      "source": { "schema": "ecocompensation", "table": "preemption_espaces_naturels_sensibles" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "L'exclusion lit la table nationale. Un clip ecocompensation_results.preemption_espaces_naturels_sensibles existe pour la carte, seulement sur l'ancienne étude dans le foncier."
+    },
+    {
+      "id": "ens",
+      "label": "Espaces naturels sensibles",
+      "theme": "reglementaire",
+      "role": "exclusion",
+      "declencheur": "exclusion_par_defaut",
+      "source": { "schema": "ecocompensation", "table": "espaces_naturels_sensibles_ens" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "L'exclusion lit la table nationale. Un clip ecocompensation_results.espaces_naturels_sensibles_ens existe pour la carte, seulement sur l'ancienne étude dans le foncier."
+    },
+    {
+      "id": "natura_2000",
+      "label": "Natura 2000",
+      "theme": "reglementaire",
+      "role": "exclusion",
+      "declencheur": "exclusion_par_defaut",
+      "source": { "schema": "ecocompensation", "table": "natura_2000" },
+      "resultat": null,
+      "emprise": { "statut": "a_verifier", "note": "" },
+      "notes": "Lecture nationale directe, sans clip."
+    },
+    {
+      "id": "bd_topo_et_cesbio",
+      "label": "Clip occupation du sol (ancienne étude ZH)",
+      "theme": "occupation_sol",
+      "role": "enrichissement",
+      "declencheur": "ancienne_etude_zh",
+      "source": { "schema": "ecocompensation", "table": "vegetation_sur_cesbio" },
+      "resultat": { "schema": "ecocompensation_results", "table": "bd_topo_et_cesbio" },
+      "emprise": {
+        "statut": "notee",
+        "note": "Même source que l'occupation du sol. Emprise Gironde indiquée dans le catalogue carte. À revérifier."
+      },
+      "notes": "Non utilisé par la recherche actuelle (faune_buffer). Chargé seulement pour l'ancienne étude zones humides."
+    }
+  ]
+}

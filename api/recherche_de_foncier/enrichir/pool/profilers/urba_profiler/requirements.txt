@@ -1,0 +1,6 @@
+requests
+shapely>=2.0
+pyproj>=3.4
+numpy
+pydantic>=2.0
+fastapi

@@ -1,0 +1,42 @@
+{
+  "total_count": 51043433,
+  "results": [
+    {
+      "id": "A2026019755",
+      "publicationavis": "A",
+      "parution": "20260197",
+      "dateparution": "2026-10-14",
+      "numeroannonce": 55,
+      "typeavis": "annonce",
+      "typeavis_lib": "Avis initial",
+      "familleavis": "creation",
+      "familleavis_lib": "Créations",
+      "numerodepartement": "18",
+      "departement_nom_officiel": "Cher",
+      "region_code": 24,
+      "region_nom_officiel": "Centre-Val de Loire",
+      "tribunal": "Greffe du Tribunal de Commerce de Bourges",
+      "commercant": "SOW, MAMADOU, AGUIBOU",
+      "ville": "Bourges",
+      "registre": [
+        "917808487",
+        "917 808 487"
+      ],
+      "cp": "18000",
+      "pdf_parution_subfolder": 0,
+      "ispdf_unitaire": "oui",
+      "listepersonnes": "{\"personne\": {\"typePersonne\": \"pp\", \"numeroImmatriculation\": {\"numeroIdentification\": \"917 808 487\", \"codeRCS\": \"RCS\", \"nomGreffeImmat\": \"Bourges\"}, \"nom\": \"SOW\", \"prenom\": [\"MAMADOU\", \"AGUIBOU\"], \"nomUsage\": \"SOW\"}}",
+      "listeetablissements": "{\"etablissement\": {\"activite\": \"Livraison de repas et de courses à domicile pour le compte de plateformes de livraison (non motorisée.\", \"adresse\": {\"numeroVoie\": \"20\", \"typeVoie\": \"Rue\", \"nomVoie\": \"Louise Michel\", \"codePostal\": \"18000\", \"ville\": \"Bourges\"}}}",
+      "jugement": null,
+      "acte": "{\"dateCommencementActivite\": \"2026-10-06\", \"creation\": {\"categorieCreation\": \"Immatriculation d'une personne physique suite à création d'un établissement principal\"}}",
+      "modificationsgenerales": null,
+      "radiationaurcs": null,
+      "depot": null,
+      "listeprecedentexploitant": null,
+      "listeprecedentproprietaire": null,
+      "divers": null,
+      "parutionavisprecedent": null,
+      "url_complete": "https://www.bodacc.fr/pages/annonces-commerciales-detail/?q.id=id:A2026019755"
+    }
+  ]
+}

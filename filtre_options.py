@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
+from api.recherche_de_foncier.filtrage.layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
 
 HydroMode = Literal["none", "intersect", "within_radius", "ignore"]
 ArrachageVignesMode = Literal["ignore", "intersect", "exclude"]

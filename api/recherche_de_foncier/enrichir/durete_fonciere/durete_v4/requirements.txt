@@ -1,0 +1,10 @@
+requests>=2.31
+python-dotenv>=1.0
+geopandas>=1.0
+shapely>=2.0
+pyproj>=3.6
+sqlalchemy>=2.0        # cache.py / SqlProvider
+# Optionnels
+supabase>=2.0          # SupabaseProvider (sinon SqlProvider)
+google-genai>=1.0      # LLM Gemini (remplace google-generativeai)
+pytest>=8              # tests

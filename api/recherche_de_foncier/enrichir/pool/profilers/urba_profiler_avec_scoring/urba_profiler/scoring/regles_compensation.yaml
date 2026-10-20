@@ -1,0 +1,1804 @@
+# =============================================================================
+# Règles de scoring urbanistique — vocation : COMPENSATION ÉCOLOGIQUE
+# =============================================================================
+# Statut : PROPOSITION v0.1 — à relire, attester ou modifier par un urbaniste.
+# Ce fichier EST la logique métier : le moteur (engine.py) ne contient aucune
+# valeur métier en dur. La documentation REGLES_SCORING.md est générée depuis
+# ce fichier (python -m urba_profiler.scoring.doc).
+#
+# Lecture d'une règle :
+#   id            identifiant stable (ne pas renommer : référencé dans les résultats)
+#   familles      couches concernées : prescription | information | servitude
+#   codes         codes CNIG "TT-SS" (prescription/information). "TT-*" = tous sous-types
+#   suptypes      catégories SUP (servitude), en minuscules ("ac1", "pm1"...)
+#   suptypes_prefixe  repli sur le préfixe de catégorie ("el", "pt"...)
+#   mots_cles     regex "fortes" cherchées dans le libellé saisi (texte normalisé :
+#                 [portée : pour une règle prescription OU information, les mots-clés
+#                  s'appliquent aux deux familles, car le GPU contient des objets
+#                  versés dans la mauvaise couche ; les codes, eux, restent par famille]
+#                 minuscules, sans accents). Servent (1) à interpréter les codes
+#                 99/absents/hors nomenclature, (2) à détecter un code mal saisi.
+#   raffine + mots_cles_raffinement : affine une règle générique (ex. ER "05-00"
+#                 dont le libellé dit "élargissement de voie" -> ER voirie)
+#   generique     true = règle "fourre-tout" (05-00, 18-00, 99-xx) qu'un libellé
+#                 explicite peut remplacer sans que ce soit un conflit
+#   groupe        famille sémantique ; deux règles du même groupe ne sont pas
+#                 en conflit (ex. code TVB + libellé "haies" = cohérent)
+#   effets        points par sous-score pour une couverture totale (facteur 1)
+#                 et une fiabilité haute : perennite | compatibilite | synergie |
+#                 maitrise | confiance
+#   profils       surcharge des effets selon le type de mesure compensatoire
+#   portee        surface (défaut : proportionnel au % couvert) | presence (facteur 1)
+#   veto          [{seuil_pct, niveau: bloquant|majeur, profils?, motif}]
+#   point_a_verifier  message affiché quand la règle est déclenchée
+#   a_confirmer   true = interprétation incertaine, question posée à l'expert
+# =============================================================================
+
+version: "0.1.0"
+statut: "proposition — à valider par un urbaniste"
+
+profils:
+  generique: "Mesure non précisée (lecture prudente)"
+  zones_humides: "Restauration / création de zones humides, mares, reméandrage"
+  boisement: "Boisement, reboisement, plantation de haies, îlots de sénescence"
+  milieux_ouverts: "Pelouses, prairies, landes : réouverture, gestion extensive"
+
+sous_scores:
+  perennite: "Risque qu'un usage concurrent (urbanisation, équipement, énergie, extraction) remette en cause la mesure sur 30 ans et plus"
+  compatibilite: "Compatibilité réglementaire des travaux et de la gestion écologique (défrichement, affouillements, plantations, servitudes techniques)"
+  synergie: "Alignement avec les politiques locales de biodiversité (TVB, renaturation, PAEN...) ; diminuée par les risques d'additionnalité (site déjà protégé)"
+  maitrise: "Contraintes réglementaires sur l'acquisition ou la maîtrise d'usage (préemption, bénéficiaire public, propriété publique)"
+
+ponderation_globale:
+  perennite: 0.45
+  compatibilite: 0.30
+  synergie: 0.15
+  maitrise: 0.10
+
+base:  # valeur de départ des sous-scores hors pérennité (pérennité = base du zonage)
+  compatibilite: 80
+  synergie: 50
+  maitrise: 80
+
+fiabilite:
+  multiplicateur: {haute: 1.0, moyenne: 0.8, basse: 0.6}
+  # Un veto déclenché par un signal de fiabilité basse n'est pas appliqué :
+  # il est rétrogradé en point à vérifier (on ne bloque pas sur une donnée douteuse).
+  veto_si_fiabilite_basse: false
+
+facteurs:
+  surface_min: 0.10          # plancher : un élément surfacique retenu pèse au moins 10 %
+  lineaire_min: 0.20         # facteur linéaire = longueur / racine(surface), borné [min, 1]
+  ponctuel_interieur: 0.30
+  ponctuel_limite: 0.15
+  multiplicateur_limite: 0.5 # linéaires / ponctuels en limite de parcelle
+
+plafonds_veto:
+  bloquant: 15
+  majeur: 40
+
+classes:
+  - {min: 75, code: A, libelle: "Très favorable"}
+  - {min: 60, code: B, libelle: "Favorable"}
+  - {min: 45, code: C, libelle: "Mitigé — à étudier"}
+  - {min: 30, code: D, libelle: "Défavorable"}
+  - {min: 0,  code: E, libelle: "Très défavorable / bloquant"}
+
+confiance:
+  depart: 100
+  penalites:
+    aucun_zonage_gpu: 30
+    zonage_couverture_anormale: 10     # somme des % de zonage hors [90 ; 110]
+    zonage_conflit_type: 8             # typezone incohérent avec le libellé
+    couche_en_erreur: 10
+    couche_en_erreur_max: 30
+    element_conflit: 4
+    element_conflit_max: 20
+    element_fiabilite_basse: 3
+    element_fiabilite_basse_max: 15
+    element_non_interprete: 2
+    element_non_interprete_max: 10
+    document_pos: 25
+    document_ancien_15ans: 10
+  niveaux: {haute: 75, moyenne: 50}
+
+# -----------------------------------------------------------------------------
+# ZONAGE
+# -----------------------------------------------------------------------------
+zonage:
+  # Base de PÉRENNITÉ par type de zone, pondérée par le % de parcelle couvert.
+  # Le reste non couvert (trous de données) prend la valeur "inconnu".
+  base_perennite:
+    N:
+      valeur: 85
+      justification: "Zone naturelle et forestière : inconstructible par principe (R151-24/25), exceptions encadrées (L151-11 à 13). Vocation la plus cohérente avec une mesure pérenne ; le risque résiduel est un reclassement lors d'une révision."
+    A:
+      valeur: 72
+      justification: "Zone agricole : inconstructible sauf constructions et installations agricoles, extensions/annexes, STECAL, équipements collectifs, et désormais agrivoltaïsme (loi APER 2023). Pérennité bonne mais concurrence d'usages agricoles et énergétiques."
+    Nh:
+      valeur: 50
+      justification: "Ancien secteur naturel de constructibilité limitée (habitat diffus) : constructions déjà admises."
+    Ah:
+      valeur: 45
+      justification: "Ancien secteur agricole de constructibilité limitée (habitat diffus)."
+    AUs:
+      valeur: 25
+      justification: "Urbanisation future, ouverture par modification/révision. Incompatible avec un engagement de 30 ans, sauf zone 2AU ancienne : depuis la loi Climat et résilience, une zone AU non ouverte dans les 6 ans ne peut l'être que par révision (L153-31), ce qui la rend moins menaçante."
+      point_a_verifier: "Zone AU stricte : vérifier sa date de création (une 2AU ancienne de plus de 6 ans exige une révision pour être ouverte) et la volonté communale."
+    AUc:
+      valeur: 8
+      justification: "Zone à urbaniser ouverte : urbanisation à court terme."
+    U:
+      valeur: 5
+      justification: "Zone urbaine constructible. Seule exception : désartificialisation / renaturation de friches (non couverte par ce profil)."
+    CC_01:
+      valeur: 10
+      justification: "Carte communale — secteur ouvert à la construction."
+    CC_02:
+      valeur: 10
+      justification: "Carte communale — secteur réservé aux activités."
+    CC_03:
+      valeur: 75
+      justification: "Carte communale — secteur non ouvert à la construction (sauf exceptions de L161-4) : équivalent A/N."
+    CC_99:
+      valeur: 50
+      justification: "Carte communale — secteur 'autre' non qualifié."
+    RNU:
+      valeur: 60
+      justification: "Aucun zonage au GPU : commune au RNU (constructibilité limitée hors parties actuellement urbanisées, L111-3) ou document non versé. Pérennité moyenne, fiabilité faible."
+      point_a_verifier: "Aucun zonage GPU : vérifier si la commune est au RNU ou si son document n'est pas versé au GPU (consulter la mairie)."
+    inconnu:
+      valeur: 50
+      justification: "Type de zone non déterminable."
+
+  veto:
+    - {types: [U], seuil_pct: 50, niveau: bloquant, motif: "Parcelle majoritairement en zone urbaine constructible."}
+    - {types: [AUc], seuil_pct: 30, niveau: bloquant, motif: "Zone à urbaniser ouverte sur une part significative de la parcelle."}
+    - {types: [AUs], seuil_pct: 50, niveau: majeur, motif: "Parcelle majoritairement en zone d'urbanisation future."}
+    - {types: [CC_01, CC_02], seuil_pct: 50, niveau: bloquant, motif: "Secteur constructible de carte communale."}
+
+  # Destinations v2024 (DESTOUI) : en zone A/N, une destination habitat ou
+  # activité autorisée affaiblit la pérennité.
+  destinations:
+    habitat: {prefixes: ["2"], perennite: -5, types: [A, N]}
+    activites: {prefixes: ["3", "5"], perennite: -8, types: [A, N]}
+
+  # Sous-secteurs : déclenchés par le libellé court (regex sur le libellé brut,
+  # insensible à la casse) ET/OU des mots-clés du libellé long. Les conventions de
+  # suffixes varient d'une commune à l'autre : un libellé court seul donne une
+  # fiabilité "moyenne", confirmé par le libellé long une fiabilité "haute".
+  secteurs:
+    - id: sect_zone_humide
+      label: "Sous-secteur zone humide"
+      types: [A, N]
+      libelle_regex: '^[AN][a-z0-9]*zh'
+      mots_cles: ['zones? humides?', 'milieux? humides?', 'marais', 'tourbiere']
+      effets: {perennite: 8, synergie: 10}
+      profils: {zones_humides: {perennite: 8, synergie: 15}}
+      point_a_verifier: "Secteur zone humide : si la ZH est déjà fonctionnelle et protégée, la préserver n'apporte pas de gain écologique (additionnalité). Intérêt si elle est dégradée et restaurable."
+      justification: "Zonage dédié aux zones humides : protection renforcée (pérennité) et cohérence directe avec une compensation ZH."
+    - id: sect_naturel_protege
+      label: "Sous-secteur naturel protégé / remarquable"
+      types: [N]
+      libelle_regex: '^N(p|pr|r|rem|s|sp)\d*$'
+      mots_cles: ['protection (stricte|renforcee)', 'natura ?2000', '\bznieff\b', 'reservoirs? de biodiversite', 'espaces? naturels? sensibles?']
+      effets: {perennite: 8, synergie: 3}
+      point_a_verifier: "Secteur naturel protégé : vérifier l'additionnalité (milieu déjà protégé et peut-être déjà en bon état)."
+      justification: "Protection renforcée du milieu naturel. Bonne pérennité, synergie limitée par le risque d'additionnalité."
+      a_confirmer: true
+      question_expert: "Les suffixes Np/Nr/Ns sont-ils suffisamment homogènes pour être interprétés sans le libellé long ?"
+    - id: sect_corridor
+      label: "Sous-secteur corridor / continuité écologique"
+      types: [A, N]
+      libelle_regex: '^[AN](co|tvb|ce|eco)\d*$'
+      mots_cles: ['corridor', 'continuite', 'trame (verte|bleue)', '\btvb\b']
+      effets: {perennite: 5, synergie: 15}
+      justification: "Le document identifie le secteur comme continuité écologique : forte cohérence avec une mesure compensatoire (argument pour l'instructeur)."
+    - id: sect_forestier
+      label: "Sous-secteur forestier"
+      types: [N]
+      libelle_regex: '^Nf\d*$'
+      mots_cles: ['secteur forestier', 'exploitation forestiere', 'sylvicole', 'vocation forestiere', 'massifs? boises?']
+      effets: {perennite: 5}
+      profils:
+        boisement: {perennite: 5, synergie: 5}
+        zones_humides: {perennite: 5, compatibilite: -5}
+        milieux_ouverts: {perennite: 5, compatibilite: -8}
+      point_a_verifier: "Secteur forestier : une réouverture de milieu suppose une autorisation de défrichement (code forestier L341-3), indépendante du PLU."
+      justification: "Vocation forestière confirmée. Favorable au boisement, défavorable à la réouverture."
+    - id: sect_loisirs
+      label: "Sous-secteur loisirs / tourisme / sport"
+      types: [A, N]
+      libelle_regex: '^N(l|t|tl|lt|s?l|g|golf|camp|c?amp)\d*$'
+      mots_cles: ['loisirs?', 'touristiques?', 'camping', '\bgolf\b', 'sporti', 'hebergements? touristiques?', 'parc de loisirs', 'equestre', 'aire de jeux']
+      effets: {perennite: -20}
+      justification: "Aménagements de loisirs et d'hébergement admis : concurrence d'usage et fréquentation."
+    - id: sect_equipements
+      label: "Sous-secteur équipements / services publics"
+      types: [A, N]
+      libelle_regex: '^[AN](e|eq|sp|step|ep|gv)\d*$'
+      mots_cles: ['equipements? (publics?|collectifs?|d.interet)', "station d.epuration", 'services? publics?', 'gens du voyage', "aire d.accueil", 'cimetiere']
+      effets: {perennite: -20}
+      justification: "Secteur destiné à recevoir des équipements : usage concurrent probable."
+      a_confirmer: true
+      question_expert: "Le suffixe 'e' est aussi parfois 'espace' ou 'écologique' selon les communes : garder la regex ou ne se fier qu'au libellé long ?"
+    - id: sect_activites
+      label: "Sous-secteur d'activités économiques"
+      types: [A, N]
+      libelle_regex: '^[AN](x|y|act|ae|ia)\d*$'
+      mots_cles: ['activites? (economiques?|artisanales?|industrielles?|commerciales?)', 'artisanat', 'industriel', "zone d.activites?"]
+      effets: {perennite: -25}
+      justification: "Activités économiques admises en zone A/N (STECAL de fait)."
+    - id: sect_carriere
+      label: "Sous-secteur carrière / extraction"
+      types: [A, N]
+      libelle_regex: '^N(ca|car|carr|k)\d*$'
+      mots_cles: ['carriere', 'extraction', 'gravier', 'granulat', 'exploitation du sous-sol', 'sabliere']
+      effets: {perennite: -30}
+      point_a_verifier: "Carrière : vérifier l'échéance de l'autorisation (ICPE) et l'arrêté de remise en état — une carrière en fin d'exploitation peut devenir une opportunité de création de milieux."
+      justification: "Exploitation du sous-sol en cours ou autorisable : incompatibilité à court terme, opportunité à terme."
+    - id: sect_energie
+      label: "Sous-secteur énergies renouvelables (photovoltaïque, éolien)"
+      types: [A, N]
+      libelle_regex: '(pv|enr|phv|solaire|eol)'
+      mots_cles: ['photovolta', 'solaire', 'energies? renouvelables?', 'eolien', 'agrivolta', 'methanis']
+      effets: {perennite: -35}
+      veto: [{seuil_pct: 50, niveau: majeur, motif: "Secteur dédié aux énergies renouvelables : concurrence foncière directe."}]
+      justification: "Concurrence directe des développeurs ENR sur le foncier, à loyers sans commune mesure avec l'agricole."
+    - id: sect_habitat_diffus
+      label: "Sous-secteur habitat diffus / STECAL"
+      types: [A, N]
+      libelle_regex: '^[AN](h|d|hd|ha)\d*[a-z]?$'
+      mots_cles: ['habitat (diffus|existant)', 'hameaux?', '\bstecal\b', 'taille et (de )?capacite', 'bati existant']
+      effets: {perennite: -20}
+      justification: "Constructions admises (habitat diffus, extensions)."
+    - id: sect_jardins
+      label: "Sous-secteur jardins"
+      types: [N, U]
+      libelle_regex: '^Nj\d*$'
+      mots_cles: ['jardins?']
+      effets: {perennite: -5}
+      justification: "Usage jardiné, fragmentation foncière, abris de jardin admis."
+    - id: sect_agricole_protege
+      label: "Sous-secteur agricole protégé / inconstructible"
+      types: [A]
+      libelle_regex: '^A(p|pr|inc|0|s)\d*$'
+      mots_cles: ['agricoles? protegee?s?', 'agricole inconstructible', 'interet paysager', 'protection paysagere', 'agricole stricte?']
+      effets: {perennite: 10}
+      justification: "Même les bâtiments agricoles y sont interdits ou très limités : pérennité renforcée."
+    - id: sect_risque
+      label: "Sous-secteur soumis à un risque (inondation...)"
+      types: [A, N]
+      libelle_regex: '^[AN][a-z]*(i|ri|inond)\d*$'
+      mots_cles: ['inondable', 'inondation', 'submersion', '\bppri\b', '\bcrues?\b']
+      effets: {perennite: 8}
+      profils: {zones_humides: {perennite: 8, synergie: 8}}
+      point_a_verifier: "Secteur à risque : remblais et exhaussements généralement interdits ; le creusement (mares, reprofilage) et la plantation peuvent être réglementés dans les zones d'écoulement — lire le règlement du PPR."
+      justification: "Inconstructibilité de fait (pérennité). Une zone inondable est cohérente avec une restauration de zone humide ou de champ d'expansion de crue."
+      a_confirmer: true
+      question_expert: "Suffixe 'i' (Ai, Ni) : assez fiable pour 'inondable' ?"
+    - id: sect_infrastructures
+      label: "Sous-secteur infrastructures (aéroport, militaire, ferroviaire, autoroute)"
+      types: [A, N]
+      libelle_regex: '^[AN](aer|aero|mil|fer|ferro)\d*$'
+      mots_cles: ['aeroport', 'aerodrome', 'militaire', 'defense nationale', 'ferroviaire', 'autoroute']
+      effets: {perennite: -15}
+      profils: {zones_humides: {perennite: -15, synergie: -8}}
+      point_a_verifier: "Proximité d'infrastructure : près d'un aérodrome, la création de plans d'eau attractifs pour l'avifaune est encadrée (péril animalier)."
+      justification: "Emprise ou abords d'infrastructure : usage concurrent, nuisances."
+    - id: sect_littoral_remarquable
+      label: "Sous-secteur espace remarquable (littoral / montagne)"
+      types: [N, A]
+      libelle_regex: '^N(rl|lr)\d*$'
+      mots_cles: ['espaces? remarquables?', 'l\.? ?121-23', 'l\.? ?146-6']
+      effets: {perennite: 12, synergie: -5, compatibilite: -5}
+      point_a_verifier: "Espace remarquable : seuls des aménagements légers sont admis (R121-5) ; additionnalité à démontrer."
+      justification: "Protection maximale au titre de la loi Littoral : très pérenne, mais travaux limités et additionnalité discutable."
+      a_confirmer: true
+      question_expert: "Le suffixe 'Nl' désigne tantôt le littoral, tantôt les loisirs : faut-il exiger le libellé long ?"
+    - id: sect_agricole_constructible
+      label: "Sous-secteur agricole constructible / élevage"
+      types: [A]
+      libelle_regex: '^A(c|b|e?l?v|elev)\d*$'
+      mots_cles: ['agricole constructible', 'secteur constructible', "batiments? d.elevage"]
+      effets: {perennite: -8}
+      justification: "Secteur où les bâtiments agricoles sont spécifiquement admis."
+      a_confirmer: true
+      question_expert: "'Ac' est parfois 'agricole constructible', parfois 'agricole carrière' : à confirmer."
+    - id: sect_dechets
+      label: "Sous-secteur déchets / stockage"
+      types: [A, N]
+      libelle_regex: '^N(isdi|dec|dech)\d*$'
+      mots_cles: ['dechets?', '\bisdi\b', 'decharge', 'enfouissement']
+      effets: {perennite: -25}
+      justification: "Activité de stockage ou traitement de déchets."
+    - id: sect_renaturation
+      label: "Secteur de renaturation / friche"
+      types: [U, A, N, AUc, AUs]
+      mots_cles: ['renaturation', 'desartificialis', 'friche', 'desimpermeabilis']
+      effets: {synergie: 15}
+      point_a_verifier: "Secteur de renaturation / friche : candidat à une compensation par désartificialisation (vérifier l'additionnalité vis-à-vis des engagements ZAN de la collectivité)."
+      justification: "La collectivité identifie un besoin de renaturation : synergie forte."
+
+# -----------------------------------------------------------------------------
+# VOISINAGE (anneau autour de la cible, cf. synthese.anneau_zonage)
+# -----------------------------------------------------------------------------
+voisinage:
+  pression_urbaine:
+    # pression = %U + %AUc + %CC constructible + 0.6 x %AUs (dans l'anneau)
+    coef_AUs: 0.6
+    points_par_pct: -0.25
+    plafond: -20
+    justification: "Un front d'urbanisation proche augmente le risque de pression foncière, de fragmentation et de conflits d'usage sur 30 ans."
+  continuite_naturelle:
+    # continuité = %N + 0.5 x %A (dans l'anneau)
+    coef_A: 0.5
+    points_par_pct: 0.15
+    plafond: 10
+    justification: "Une parcelle entourée de zones naturelles s'insère dans une continuité : meilleure fonctionnalité écologique de la mesure."
+
+# -----------------------------------------------------------------------------
+# RÈGLES : prescriptions, informations, servitudes, mots-clés
+# L'ordre compte pour la détection par mots-clés : du plus spécifique au plus général.
+# -----------------------------------------------------------------------------
+regles:
+
+  # ============================ PRESCRIPTIONS ===============================
+
+  - id: psc_ebc_creer
+    label: "EBC à créer"
+    familles: [prescription]
+    codes: ["01-02"]
+    groupe: boisement_protege
+    mots_cles: ['(ebc|espaces? boises? classes?) a creer', 'boisements? a creer']
+    effets: {perennite: 12, compatibilite: -5}
+    profils:
+      boisement: {perennite: 12, synergie: 15, compatibilite: 5}
+      zones_humides: {perennite: 12, compatibilite: -40}
+      milieux_ouverts: {perennite: 12, compatibilite: -40}
+    veto: [{seuil_pct: 50, niveau: bloquant, profils: [zones_humides, milieux_ouverts], motif: "EBC à créer : obligation de boisement contradictoire avec une mesure de milieux ouverts ou humides."}]
+    justification: "L113-1 : obligation de créer un boisement. Synergie directe pour un boisement compensatoire, contradiction pour les autres mesures."
+    references: ["L113-1", "R151-31 1°"]
+
+  - id: psc_ebc_littoral
+    label: "EBC significatif loi Littoral"
+    familles: [prescription]
+    codes: ["01-03"]
+    groupe: boisement_protege
+    mots_cles: ['boises? significatifs?', 'l\.? ?121-27']
+    effets: {perennite: 20, compatibilite: -10, synergie: -5}
+    profils:
+      zones_humides: {perennite: 20, compatibilite: -45, synergie: -5}
+      milieux_ouverts: {perennite: 20, compatibilite: -45, synergie: -5}
+      boisement: {perennite: 20, synergie: -10}
+    veto: [{seuil_pct: 50, niveau: bloquant, profils: [zones_humides, milieux_ouverts], motif: "EBC significatif : défrichement irrecevable."}]
+    justification: "Régime EBC renforcé par la loi Littoral. Boisement existant déjà protégé : additionnalité faible pour un boisement."
+    references: ["L121-27", "L113-1"]
+
+  - id: psc_ebc
+    label: "Espace boisé classé"
+    familles: [prescription]
+    codes: ["01-00", "01-01"]
+    groupe: boisement_protege
+    mots_cles: ['espaces? boises? classes?', '\bebc\b', 'l\.? ?113-1\b', 'l\.? ?130-1']
+    effets: {perennite: 15, compatibilite: -15}
+    profils:
+      zones_humides: {perennite: 15, compatibilite: -45}
+      milieux_ouverts: {perennite: 15, compatibilite: -45}
+      boisement: {perennite: 15, compatibilite: 0, synergie: -8}
+    veto:
+      - {seuil_pct: 50, niveau: bloquant, profils: [zones_humides, milieux_ouverts], motif: "EBC : défrichement irrecevable et changement d'occupation compromettant les boisements interdit (L113-2)."}
+      - {seuil_pct: 15, niveau: majeur, profils: [zones_humides, milieux_ouverts], motif: "EBC sur une part notable de la parcelle : travaux de réouverture ou de creusement impossibles sur cette part."}
+    point_a_verifier: "EBC : tout changement d'affectation compromettant les boisements est interdit et le défrichement irrecevable (L113-2). Vérifier que la mesure n'implique ni réouverture ni creusement sur l'emprise. Les EBC sont aussi parfois mal codés au GPU : contrôler sur le plan de zonage."
+    justification: "Très protecteur (pérennité), mais bloque toute mesure impliquant un défrichement. Pour un boisement, l'EBC protège déjà l'existant : peu d'additionnalité."
+    references: ["L113-1", "L113-2", "R151-31 1°"]
+
+  - id: psc_inconstructible
+    label: "Secteur inconstructible (environnement, risques, intérêt général)"
+    familles: [prescription]
+    codes: ["02-01"]
+    groupe: protection_reglementaire
+    mots_cles: ['inconstructible', 'non aedificandi', 'interdiction de (toute )?construction', 'interdite? a la construction']
+    effets: {perennite: 18}
+    point_a_verifier: "Lire le motif de l'inconstructibilité (environnemental, risque, nuisance) dans le règlement."
+    justification: "Inconstructibilité explicite : pérennité forte."
+    references: ["R151-31 2°"]
+
+  - id: psc_constructibilite_limitee
+    label: "Constructibilité limitée ou sous conditions (environnement, risques)"
+    familles: [prescription]
+    codes: ["02-00", "02-02"]
+    groupe: protection_reglementaire
+    mots_cles: ['constructibilite limitee', 'conditions speciales']
+    effets: {perennite: 8}
+    justification: "Constructibilité restreinte pour motif environnemental ou de risque."
+    references: ["R151-31 2°", "R151-34 1°"]
+
+  - id: psc_reconstruction
+    label: "Dispositions de reconstruction / démolition"
+    familles: [prescription]
+    codes: ["03-*"]
+    groupe: neutre
+    effets: {}
+    justification: "Règle sur le bâti existant, sans effet sur une mesure compensatoire."
+
+  - id: psc_er_hydraulique
+    label: "Emplacement réservé — ouvrage hydraulique / eaux pluviales"
+    familles: [prescription]
+    groupe: projet_hydraulique
+    raffine: [psc_er_generique, psc_er_ouvrage, psc_er_interet_general]
+    mots_cles_raffinement: ['bassin', 'retention', "d.orage", 'eaux pluviales', 'expansion de crue', 'noue', 'fosse', 'recalibrage', 'zone tampon', 'hydraul']
+    effets: {perennite: -10, maitrise: -15, synergie: 3}
+    profils: {zones_humides: {perennite: -5, maitrise: -15, synergie: 10}}
+    point_a_verifier: "ER pour ouvrage hydraulique : un bassin n'est pas une zone humide fonctionnelle, mais une mutualisation avec la collectivité (zone d'expansion de crue renaturée) est envisageable."
+    justification: "Projet public d'ouvrage hydraulique : concurrence d'usage modérée, synergie possible avec une mesure ZH."
+    a_confirmer: true
+    question_expert: "Une mesure ZH sur l'emprise d'un ER hydraulique est-elle recevable si la collectivité bénéficiaire y consent ?"
+
+  - id: psc_er_espaces_verts
+    label: "Emplacement réservé — espaces verts / continuités écologiques"
+    familles: [prescription]
+    codes: ["05-04"]
+    groupe: ecologique
+    raffine: [psc_er_generique]
+    mots_cles_raffinement: ['espaces? verts?', 'continuite', 'corridor', 'trame', 'zones? humides?', 'coulee verte', 'renaturation', 'plantation', 'boisement', 'ecolog', 'biodiversite']
+    effets: {perennite: 10, synergie: 20, maitrise: -10}
+    point_a_verifier: "ER espaces verts / continuités : la collectivité bénéficiaire porte un projet compatible — partenaire potentiel. Vérifier l'additionnalité (ne pas financer un projet déjà programmé) et l'accord du bénéficiaire."
+    justification: "Seul ER aligné avec une compensation : la destination du terrain est déjà écologique."
+    references: ["L151-41 3°", "R151-43 3°"]
+
+  - id: psc_er_logement
+    label: "Emplacement réservé — logement social / mixité"
+    familles: [prescription]
+    codes: ["05-05"]
+    groupe: projet_urbain
+    raffine: [psc_er_generique]
+    mots_cles_raffinement: ['logement', 'habitat', 'mixite sociale']
+    effets: {perennite: -35, maitrise: -20}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Terrain réservé à un programme de logements."}]
+    justification: "Terrain voué à l'urbanisation."
+    references: ["L151-41 4°"]
+
+  - id: psc_er_voirie
+    label: "Emplacement réservé — voirie"
+    familles: [prescription]
+    codes: ["05-01"]
+    groupe: projet_public
+    raffine: [psc_er_generique]
+    mots_cles_raffinement: ['voie', 'voirie', 'elargissement', 'chemin', 'piste cyclable', 'carrefour', 'giratoire', 'rond-point', 'liaison', 'desserte', 'stationnement', 'parking', 'acces', 'amenagement routier', 'route', 'rue']
+    effets: {perennite: -30, maitrise: -20}
+    veto:
+      - {seuil_pct: 50, niveau: bloquant, motif: "Emplacement réservé de voirie sur la majorité de la parcelle."}
+      - {seuil_pct: 30, niveau: majeur, motif: "Emplacement réservé de voirie sur une part notable : emprise et fragmentation."}
+    point_a_verifier: "ER voirie : l'emprise sera acquise par la collectivité. Vérifier l'emprise exacte et l'état d'avancement du projet."
+    justification: "Projet public d'infrastructure : incompatible avec une mesure sur l'emprise, et facteur de fragmentation."
+    references: ["L151-41 1°", "R151-48 2°"]
+
+  - id: psc_er_ouvrage
+    label: "Emplacement réservé — ouvrage public"
+    familles: [prescription]
+    codes: ["05-02"]
+    groupe: projet_public
+    raffine: [psc_er_generique]
+    mots_cles_raffinement: ["station d.epuration", '\bstep\b', 'reservoir', "chateau d.eau", 'ouvrage', 'ecole', 'groupe scolaire', 'salle', 'cimetiere', 'stade', 'gymnase', 'dechet', 'equipement']
+    effets: {perennite: -30, maitrise: -20}
+    veto: [{seuil_pct: 50, niveau: bloquant, motif: "Emplacement réservé pour un ouvrage public."}]
+    justification: "Projet d'équipement public sur l'emprise."
+    references: ["L151-41 1°", "R151-50 1°"]
+
+  - id: psc_er_interet_general
+    label: "Emplacement réservé — installation d'intérêt général"
+    familles: [prescription]
+    codes: ["05-03"]
+    groupe: projet_public
+    effets: {perennite: -25, maitrise: -15}
+    veto: [{seuil_pct: 50, niveau: bloquant, motif: "Emplacement réservé pour une installation d'intérêt général."}]
+    justification: "Projet d'intérêt général sur l'emprise."
+    references: ["L151-41 2°"]
+
+  - id: psc_er_generique
+    label: "Emplacement réservé (objet non précisé par le code)"
+    familles: [prescription]
+    codes: ["05-00"]
+    groupe: projet_public
+    generique: true
+    mots_cles: ['emplacements? reserves?', '^er ?n?[°o]? ?\d', '\ber ?n[°o] ?\d', '^e\.?r\.? ?\d']
+    effets: {perennite: -22, maitrise: -15}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "Emplacement réservé (objet à préciser) sur la majorité de la parcelle."}]
+    point_a_verifier: "Emplacement réservé dont l'objet n'est pas codé : lire la liste des ER du PLU (bénéficiaire, objet, surface)."
+    justification: "Réserve foncière au profit d'une collectivité pour un projet public : en général incompatible avec une mesure, sauf ER espaces verts."
+    references: ["L151-41"]
+
+  - id: psc_servitude_localisation
+    label: "Servitude de localisation (voies, ouvrages, espaces verts en U/AU)"
+    familles: [prescription]
+    codes: ["05-06"]
+    groupe: projet_public
+    effets: {perennite: -25, maitrise: -10}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "Servitude de localisation d'un projet public."}]
+    justification: "Projet public localisé (en zone U/AU)."
+    references: ["L151-41 dernier alinéa"]
+
+  - id: psc_perimetre_attente
+    label: "Périmètre d'attente de projet d'aménagement global"
+    familles: [prescription]
+    codes: ["05-07"]
+    groupe: projet_urbain
+    mots_cles: ["perimetre d.attente", "projet d.amenagement global", '\bpapag\b']
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Périmètre gelé dans l'attente d'un projet d'aménagement."}]
+    justification: "Gel en attente d'un projet urbain : incompatible."
+    references: ["L151-41 5°"]
+
+  - id: psc_er_trait_cote
+    label: "ER relocalisation (recul du trait de côte)"
+    familles: [prescription]
+    codes: ["05-08"]
+    groupe: projet_public
+    effets: {perennite: -20, maitrise: -15}
+    justification: "Terrain destiné à accueillir des équipements relocalisés."
+    references: ["L151-41 6°"]
+
+  - id: psc_paysage_ecologique_boise
+    label: "Élément de paysage boisé à préserver (motif écologique, L151-23)"
+    familles: [prescription]
+    codes: ["07-05"]
+    groupe: ecologique
+    effets: {perennite: 10, synergie: 12, compatibilite: -5}
+    profils:
+      zones_humides: {perennite: 10, synergie: 8, compatibilite: -15}
+      milieux_ouverts: {perennite: 10, synergie: 5, compatibilite: -15}
+      boisement: {perennite: 10, synergie: 8}
+    point_a_verifier: "Boisement protégé au titre de L151-23 : coupes et abattages soumis à déclaration préalable ; prescriptions du règlement à lire."
+    justification: "Protection écologique d'un boisement, moins stricte qu'un EBC (pas d'interdiction de défrichement de plein droit)."
+    references: ["L151-23", "R151-43 5°"]
+
+  - id: psc_paysage_ecologique
+    label: "Élément de paysage à préserver pour motif écologique (L151-23)"
+    familles: [prescription]
+    codes: ["07-04"]
+    groupe: ecologique
+    mots_cles: ['l\.? ?151-23', "motifs? d.ordre ecologique", 'interet ecologique']
+    effets: {perennite: 10, synergie: 15, compatibilite: -3}
+    point_a_verifier: "Élément L151-23 : les travaux qui le modifient sont soumis à déclaration préalable ; lire les prescriptions associées."
+    justification: "Le PLU reconnaît une valeur écologique au site : cohérence et argument d'instruction."
+    references: ["L151-23", "R151-43 5°"]
+
+  - id: psc_patrimoine_paysager_boise
+    label: "Patrimoine paysager boisé (motif culturel / paysager, L151-19)"
+    familles: [prescription]
+    codes: ["07-03"]
+    groupe: boisement_protege
+    effets: {perennite: 8, compatibilite: -5}
+    profils:
+      zones_humides: {perennite: 8, compatibilite: -15}
+      milieux_ouverts: {perennite: 8, compatibilite: -15}
+    justification: "Boisement protégé pour motif paysager : réouverture contrainte."
+    references: ["L151-19"]
+
+  - id: psc_patrimoine_paysager
+    label: "Patrimoine paysager / éléments de paysage (L151-19, L151-23)"
+    familles: [prescription]
+    codes: ["07-00", "07-02"]
+    groupe: patrimoine
+    generique: true
+    mots_cles: ['elements? de paysage', 'patrimoine paysager', 'paysage a proteger', 'cones? de vue', 'l\.? ?123-1-5', 'l\.? ?123-1-7', 'l\.? ?151-19']
+    effets: {perennite: 8, compatibilite: -5, synergie: 3}
+    justification: "Protection paysagère : pérennité accrue, modifications soumises à déclaration."
+    references: ["L151-19", "L151-23", "R151-41 3°"]
+
+  - id: psc_patrimoine_bati
+    label: "Patrimoine bâti à protéger"
+    familles: [prescription]
+    codes: ["07-01"]
+    groupe: patrimoine
+    mots_cles: ['bati remarquable', 'patrimoine bati', 'batiments? remarquables?', 'petit patrimoine']
+    effets: {perennite: 2}
+    justification: "Protection d'un bâti : sans effet notable sur la mesure, hors gestion des abords."
+    references: ["L151-19"]
+
+  - id: psc_terrain_cultive_urbain
+    label: "Terrain cultivé ou non bâti protégé en zone urbaine"
+    familles: [prescription]
+    codes: ["08-00"]
+    groupe: ecologique
+    mots_cles: ['terrains? cultives?', 'jardins? (familiaux|partages|ouvriers)', 'maraich']
+    effets: {perennite: 8, synergie: 3}
+    justification: "Terrain non bâti protégé en milieu urbain : pérennité en contexte défavorable."
+    references: ["L151-23 al. 2"]
+
+  - id: psc_ski
+    label: "Zone d'aménagement pour le ski"
+    familles: [prescription]
+    codes: ["13-00"]
+    groupe: projet_amenagement
+    effets: {perennite: -20}
+    justification: "Aménagements de domaine skiable."
+    references: ["L151-38 al. 2"]
+
+  - id: psc_regles_construction
+    label: "Règles de construction (implantation, hauteur, aspect, réseaux...)"
+    familles: [prescription]
+    codes: ["04-00", "15-*", "26-*", "27-00", "28-*", "37-00", "37-01", "38-*", "39-*", "40-*", "41-*", "42-00", "43-*", "47-*", "97-*"]
+    groupe: neutre
+    effets: {}
+    justification: "Règles relatives aux constructions : sans effet sur une mesure compensatoire."
+
+  - id: psc_signal_urbain
+    label: "Règles propres aux secteurs urbains (densité, mixité, stationnement...)"
+    familles: [prescription]
+    codes: ["14-00", "17-00", "22-*", "23-00", "29-*", "30-*", "36-00", "37-02", "44-*", "45-00"]
+    groupe: urbain
+    effets: {perennite: -8}
+    justification: "Leur présence confirme une vocation constructible ou urbaine du secteur, au-delà du seul zonage."
+
+  - id: psc_equipements_AN
+    label: "Équipements collectifs admis en zone A/N"
+    familles: [prescription]
+    codes: ["16-00"]
+    groupe: constructibilite_AN
+    effets: {perennite: -10}
+    justification: "Possibilité d'implanter des équipements collectifs."
+    references: ["L151-11 I 1°"]
+
+  - id: psc_changement_destination
+    label: "Bâtiment pouvant changer de destination (A/N)"
+    familles: [prescription]
+    codes: ["16-01"]
+    groupe: constructibilite_AN
+    mots_cles: ['changement de destination']
+    effets: {perennite: -5}
+    point_a_verifier: "Bâtiment pouvant changer de destination : présence d'un bâti, futur usage (habitat, hébergement) possiblement concurrent."
+    justification: "Signal de bâti existant et d'un usage résidentiel futur."
+    references: ["L151-11 I 2°"]
+
+  - id: psc_extension_habitat
+    label: "Extensions / annexes des habitations existantes (A/N)"
+    familles: [prescription]
+    codes: ["16-02"]
+    groupe: constructibilite_AN
+    effets: {perennite: -5}
+    justification: "Constructibilité résiduelle autour de l'habitat existant."
+    references: ["L151-12"]
+
+  - id: psc_stecal
+    label: "STECAL"
+    familles: [prescription]
+    codes: ["16-03"]
+    groupe: constructibilite_AN
+    mots_cles: ['\bstecal\b', 'taille et (de )?capacite d.accueil limitees?']
+    effets: {perennite: -25}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "STECAL : secteur constructible au sein de la zone A/N."}]
+    justification: "Secteur de taille et capacité d'accueil limitées : constructions admises."
+    references: ["L151-13"]
+
+  - id: psc_constructions_agricoles
+    label: "Constructions agricoles admises (A/N)"
+    familles: [prescription]
+    codes: ["16-04"]
+    groupe: constructibilite_AN
+    effets: {perennite: -8}
+    justification: "Bâtiments agricoles admis sur le secteur."
+
+  - id: psc_diversification_agricole
+    label: "Diversification de l'activité agricole"
+    familles: [prescription]
+    codes: ["16-05"]
+    groupe: constructibilite_AN
+    effets: {perennite: -8}
+    justification: "Constructions de transformation et de vente admises."
+    references: ["L151-11 II"]
+
+  - id: psc_oap_renaturation
+    label: "OAP secteur de renaturation"
+    familles: [prescription]
+    codes: ["18-12"]
+    groupe: ecologique
+    mots_cles: ['renaturation', 'desartificialis', 'desimpermeabilis']
+    effets: {perennite: 10, synergie: 25}
+    point_a_verifier: "Secteur identifié pour la renaturation : candidat naturel à une compensation. Vérifier l'articulation avec la trajectoire ZAN de la collectivité (additionnalité)."
+    justification: "La collectivité programme la renaturation du secteur : alignement maximal."
+    references: ["L151-7 I 4°"]
+
+  - id: psc_oap_tvb
+    label: "OAP trame verte et bleue"
+    familles: [prescription]
+    codes: ["18-15"]
+    groupe: ecologique
+    mots_cles: ['oap (thematique )?(trame|tvb|continuites?)']
+    effets: {perennite: 10, synergie: 25}
+    justification: "OAP opposable en compatibilité dédiée aux continuités écologiques."
+    references: ["L151-6-2"]
+
+  - id: psc_oap_zaer
+    label: "OAP zone d'accélération des énergies renouvelables"
+    familles: [prescription]
+    codes: ["18-16"]
+    groupe: energie
+    mots_cles: ['\bzaer\b', "zones? d.acceleration"]
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: majeur, motif: "Zone d'accélération ENR : concurrence directe des projets énergétiques."}]
+    justification: "Foncier ciblé pour les projets ENR."
+    references: ["L151-7 I 8°"]
+
+  - id: psc_oap_franges
+    label: "OAP franges urbaines et rurales"
+    familles: [prescription]
+    codes: ["18-13"]
+    groupe: ecologique
+    mots_cles: ['franges? (urbaines?|rurales?)', 'lisieres? urbaines?']
+    effets: {perennite: 3, synergie: 8}
+    point_a_verifier: "OAP de frange : la parcelle est en lisière d'urbanisation (pression à surveiller), mais une mesure de transition y est valorisée."
+    justification: "Traitement des transitions ville / campagne : cohérent avec haies et lisières."
+    references: ["L151-7 I 7°"]
+
+  - id: psc_oap_patrimoniale_eco
+    label: "OAP patrimoniale, architecturale et écologique"
+    familles: [prescription]
+    codes: ["18-05"]
+    groupe: ecologique
+    raffine: [psc_oap_generique]
+    mots_cles_raffinement: ['ecolog', 'biodiversite', 'nature', 'paysag', 'patrimoin', 'environnement']
+    effets: {perennite: 5, synergie: 10}
+    justification: "OAP thématique incluant des objectifs écologiques."
+
+  - id: psc_oap_projet
+    label: "OAP de projet urbain (habitat, économie, ZAC...)"
+    familles: [prescription]
+    codes: ["18-01", "18-06", "18-07", "18-09", "18-10", "18-11"]
+    groupe: projet_urbain
+    raffine: [psc_oap_generique]
+    mots_cles_raffinement: ['habitat', 'logement', 'activite', 'economique', '\bzac\b', 'commerc', 'quartier', 'urbanisation', 'extension', 'lotissement', 'zone d.activite']
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Secteur d'OAP de projet urbain."}]
+    justification: "Projet d'aménagement programmé : incompatible."
+    references: ["L151-6", "L151-7"]
+
+  - id: psc_oap_amenagement
+    label: "OAP d'aménagement (entrée de ville, réhabilitation, transports)"
+    familles: [prescription]
+    codes: ["18-02", "18-03", "18-04", "18-08"]
+    groupe: projet_amenagement
+    effets: {perennite: -20}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "Secteur d'OAP d'aménagement."}]
+    justification: "Aménagements programmés."
+
+  - id: psc_oap_trait_cote
+    label: "OAP recul du trait de côte"
+    familles: [prescription]
+    codes: ["18-14"]
+    groupe: risque
+    effets: {perennite: -15}
+    point_a_verifier: "OAP trait de côte : secteur exposé à l'érosion, pérennité physique de la mesure à vérifier."
+    justification: "Terrain menacé par le recul du trait de côte."
+    references: ["L151-7 III"]
+
+  - id: psc_oap_generique
+    label: "OAP (type non précisé)"
+    familles: [prescription]
+    codes: ["18-00"]
+    groupe: projet_amenagement
+    generique: true
+    mots_cles: ['\boap\b', "orientations? d.amenagement"]
+    effets: {perennite: -20}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "OAP dont l'objet n'est pas codé sur la majorité de la parcelle."}]
+    point_a_verifier: "OAP non qualifiée : lire la pièce OAP pour connaître son objet (projet urbain ou OAP thématique écologique)."
+    justification: "Une OAP sectorielle signale le plus souvent un projet d'aménagement."
+
+  - id: psc_richesse_sol
+    label: "Secteur protégé pour la richesse du sol ou du sous-sol (carrières)"
+    familles: [prescription]
+    codes: ["19-00"]
+    groupe: extraction
+    effets: {perennite: -25}
+    point_a_verifier: "Exploitation du sous-sol autorisée : vérifier l'existence d'une carrière en cours ou en projet."
+    justification: "Les carrières y sont autorisées."
+    references: ["R151-34 2°"]
+
+  - id: psc_transfert_constructibilite
+    label: "Transfert de constructibilité en zone N"
+    familles: [prescription]
+    codes: ["20-00"]
+    groupe: protection_reglementaire
+    effets: {perennite: 5}
+    point_a_verifier: "Transfert de constructibilité : vérifier si la parcelle est émettrice (droits transférés, devenue inconstructible) ou réceptrice."
+    justification: "Mécanisme qui, côté émetteur, rend le terrain inconstructible."
+    references: ["L151-25"]
+    a_confirmer: true
+    question_expert: "Peut-on considérer par défaut le secteur comme émetteur ?"
+
+  - id: psc_voies_creer
+    label: "Voies à créer ou à modifier"
+    familles: [prescription]
+    codes: ["24-00", "24-01", "24-03"]
+    groupe: projet_public
+    mots_cles: ['voies? a creer', 'projet de voie', 'barreau', 'contournement', 'deviation', 'voie nouvelle']
+    effets: {perennite: -20}
+    veto: [{seuil_pct: 40, niveau: majeur, motif: "Tracé de voie à créer."}]
+    justification: "Infrastructure future : fragmentation et emprise."
+    references: ["L151-38"]
+
+  - id: psc_voies_modifier
+    label: "Voies à modifier"
+    familles: [prescription]
+    codes: ["24-02"]
+    groupe: projet_public
+    effets: {perennite: -8}
+    justification: "Modification de voirie existante en bordure."
+
+  - id: psc_chemins_conserver
+    label: "Voies et chemins à conserver"
+    familles: [prescription]
+    codes: ["24-04"]
+    groupe: neutre
+    mots_cles: ['chemins? (ruraux|de randonnee)? ?a conserver', 'sentiers? a conserver']
+    effets: {synergie: 2}
+    justification: "Maintien d'un chemin : sans effet notable (fréquentation éventuelle)."
+
+  - id: psc_tvb
+    label: "Éléments de continuité écologique / trame verte et bleue"
+    familles: [prescription]
+    codes: ["25-00"]
+    groupe: ecologique
+    mots_cles: ['trame verte', 'trame bleue', '\btvb\b', 'continuites? ecologiques?', 'corridors? (ecologiques?|biologiques?)', 'reservoirs? de biodiversite']
+    effets: {perennite: 10, synergie: 25}
+    justification: "Le document identifie la parcelle comme élément de TVB : forte cohérence et argument d'instruction."
+    references: ["L151-23 al. 2", "R151-43 4°"]
+
+  - id: psc_littoral_zh
+    label: "Espace remarquable du littoral — zones humides, marais"
+    familles: [prescription]
+    codes: ["31-05"]
+    groupe: protection_forte
+    effets: {perennite: 25, compatibilite: -5, synergie: -5}
+    profils: {zones_humides: {perennite: 25, compatibilite: -5, synergie: 5}}
+    point_a_verifier: "Espace remarquable (L121-23) : seuls les aménagements légers de R121-5 sont admis ; additionnalité à démontrer (milieu déjà protégé)."
+    justification: "Protection maximale. Une restauration de ZH dégradée reste possible si elle relève des aménagements légers."
+    references: ["L121-23", "R121-4 5°", "R121-5"]
+
+  - id: psc_littoral_remarquable
+    label: "Espaces remarquables du littoral"
+    familles: [prescription]
+    codes: ["31-*"]
+    groupe: protection_forte
+    mots_cles: ['espaces? remarquables?', 'l\.? ?121-23', 'l\.? ?146-6']
+    effets: {perennite: 25, compatibilite: -10, synergie: -10}
+    point_a_verifier: "Espace remarquable (L121-23) : aménagements légers uniquement (R121-5) ; additionnalité à démontrer."
+    justification: "Protection maximale : très pérenne, mais travaux limités et additionnalité faible."
+    references: ["L121-23", "R121-4", "R121-5"]
+
+  - id: psc_plans_eau_exclusion
+    label: "Exclusion de la protection de plans d'eau de faible importance"
+    familles: [prescription]
+    codes: ["32-00"]
+    groupe: neutre
+    effets: {}
+    justification: "Règle montagne sans effet direct."
+
+  - id: psc_rives_derogation
+    label: "Dérogation à la protection des rives (montagne)"
+    familles: [prescription]
+    codes: ["33-00"]
+    groupe: constructibilite_AN
+    effets: {perennite: -10}
+    justification: "Ouvre des possibilités de construction près des rives."
+
+  - id: psc_patrimoine_montagnard
+    label: "Espaces et milieux caractéristiques du patrimoine montagnard"
+    familles: [prescription]
+    codes: ["34-00"]
+    groupe: protection_forte
+    effets: {perennite: 15, synergie: 5}
+    justification: "Protection loi Montagne."
+    references: ["L122-9"]
+
+  - id: psc_terres_agricoles_montagne
+    label: "Terres agricoles, pastorales et forestières à préserver (montagne)"
+    familles: [prescription]
+    codes: ["35-00"]
+    groupe: protection_agricole
+    effets: {perennite: 15}
+    profils:
+      boisement: {perennite: 15, compatibilite: -15}
+      zones_humides: {perennite: 15, compatibilite: -8}
+    point_a_verifier: "Terres agricoles à préserver : un changement de vocation (boisement) peut être contraire à l'objectif du document."
+    justification: "Protection de la vocation agricole et pastorale."
+    references: ["L122-10"]
+
+  - id: psc_boise_ancien
+    label: "Constructibilité des espaces boisés antérieurs au XXe siècle"
+    familles: [prescription]
+    codes: ["46-00"]
+    groupe: boisement_protege
+    effets: {perennite: 3}
+    profils: {boisement: {perennite: 3, synergie: -3}}
+    justification: "Boisement ancien identifié : forte valeur écologique, faible additionnalité pour un boisement."
+    references: ["L151-20"]
+    a_confirmer: true
+    question_expert: "Portée exacte de ce code (référence L151-20 citée par le standard) ?"
+
+  - id: psc_impermeabilisation
+    label: "Limitation de l'imperméabilisation"
+    familles: [prescription]
+    codes: ["48-00"]
+    groupe: neutre
+    effets: {synergie: 2}
+    justification: "Règle de gestion des sols, favorable mais sans effet notable."
+
+  - id: psc_eaux_pluviales
+    label: "Installations de gestion des eaux pluviales"
+    familles: [prescription]
+    codes: ["48-01"]
+    groupe: projet_hydraulique
+    effets: {perennite: -5, synergie: 2}
+    profils: {zones_humides: {perennite: -3, synergie: 6}}
+    justification: "Ouvrages de gestion des eaux pluviales prévus : usage hydraulique concurrent ou mutualisable."
+
+  - id: psc_operation_ensemble_AU
+    label: "Opération d'ensemble imposée en zone AU"
+    familles: [prescription]
+    codes: ["49-*"]
+    groupe: projet_urbain
+    effets: {perennite: -30}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Secteur d'urbanisation par opération d'ensemble."}]
+    justification: "Signal d'une zone AU destinée à l'urbanisation."
+    references: ["R151-20"]
+
+  - id: psc_interdiction_destinations
+    label: "Interdiction de certaines destinations / activités"
+    familles: [prescription]
+    codes: ["50-00"]
+    groupe: protection_reglementaire
+    effets: {perennite: 3}
+    point_a_verifier: "Lire quelles destinations ou activités sont interdites."
+    justification: "Restreint les usages, effet dépendant du contenu."
+
+  - id: psc_autorisation_conditions
+    label: "Destinations autorisées sous conditions"
+    familles: [prescription]
+    codes: ["51-00"]
+    groupe: neutre
+    effets: {}
+    justification: "Effet dépendant du contenu, non interprétable sans le règlement."
+
+  - id: psc_logistique
+    label: "Infrastructures et équipements logistiques"
+    familles: [prescription]
+    codes: ["52-00"]
+    groupe: projet_urbain
+    mots_cles: ['logistique', 'entrepots?']
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Secteur logistique à préserver ou développer."}]
+    justification: "Vocation logistique."
+    references: ["L151-16-2"]
+
+  - id: psc_derogation_axes
+    label: "Dérogation à l'inconstructibilité le long des grands axes (L111-6)"
+    familles: [prescription]
+    codes: ["53-00"]
+    groupe: projet_urbain
+    effets: {perennite: -20}
+    justification: "Lève l'inconstructibilité de la bande de recul : projet de construction probable."
+    references: ["L111-6", "L111-8"]
+
+  - id: psc_autre
+    label: "Prescription 'Autre' (99)"
+    familles: [prescription]
+    codes: ["99-*"]
+    groupe: neutre
+    generique: true
+    effets: {}
+    justification: "Code générique : seul le libellé renseigne (voir règles par mots-clés)."
+
+  # ============================ INFORMATIONS ================================
+
+  - id: inf_zac
+    label: "Zone d'aménagement concerté"
+    familles: [information]
+    codes: ["02-00"]
+    groupe: projet_urbain
+    mots_cles: ["zone d.amenagement concerte", '\bzac\b']
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Périmètre de ZAC."}]
+    justification: "Opération d'aménagement publique."
+    references: ["L311-1"]
+
+  - id: inf_zpens
+    label: "Zone de préemption des espaces naturels sensibles (ZPENS)"
+    familles: [information]
+    codes: ["03-00"]
+    groupe: preemption_naturelle
+    mots_cles: ['espaces? naturels? sensibles?', '\bzpens\b', '\bens\b', 'preemption (au titre )?des espaces naturels']
+    effets: {synergie: 10, maitrise: -20, perennite: 5}
+    portee: presence
+    point_a_verifier: "ZPENS : toute vente déclenche une DIA au Département, qui peut préempter. Le Département est aussi un partenaire potentiel (politique ENS)."
+    justification: "Droit de préemption du Département (L215-1) : contrainte d'acquisition, mais politique publique alignée."
+    references: ["L215-1 et s."]
+
+  - id: inf_dpu_renforce
+    label: "Droit de préemption urbain renforcé"
+    familles: [information]
+    codes: ["04-01"]
+    groupe: preemption
+    mots_cles: ['preemption urbain renforce', '\bdpur\b']
+    effets: {maitrise: -15}
+    portee: presence
+    justification: "Préemption communale élargie."
+    references: ["L211-4"]
+
+  - id: inf_dpu
+    label: "Droit de préemption urbain"
+    familles: [information]
+    codes: ["04-00"]
+    groupe: preemption
+    mots_cles: ['droit de preemption urbain', '\bdpu\b']
+    effets: {maitrise: -10}
+    portee: presence
+    point_a_verifier: "DPU : la commune peut préempter lors de la vente (DIA)."
+    justification: "Risque d'éviction lors de l'acquisition."
+    references: ["L211-1"]
+
+  - id: inf_zad
+    label: "Zone d'aménagement différé"
+    familles: [information]
+    codes: ["05-00"]
+    groupe: projet_urbain
+    mots_cles: ["zone d.amenagement differe", '\bzad\b']
+    effets: {perennite: -25, maitrise: -25}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "ZAD : projet d'aménagement public et préemption."}]
+    justification: "Projet d'aménagement futur et préemption."
+    references: ["L212-1"]
+
+  - id: inf_reglementation_boisements
+    label: "Périmètre de réglementation des boisements (code rural)"
+    familles: [information]
+    codes: ["08-00"]
+    groupe: protection_agricole
+    mots_cles: ['reglementation des (plantations|boisements)', 'boisements? (interdits?|reglementes?)', "perimetre (d.interdiction|de reglementation) des boisements"]
+    effets: {perennite: 3, compatibilite: -5}
+    profils: {boisement: {perennite: 3, compatibilite: -35}}
+    veto: [{seuil_pct: 50, niveau: majeur, profils: [boisement], motif: "Boisement interdit ou réglementé (L126-1 CRPM)."}]
+    point_a_verifier: "Réglementation des boisements (L126-1 CRPM) : plantations interdites ou soumises à déclaration selon le périmètre."
+    justification: "Peut interdire purement et simplement un boisement compensatoire."
+    references: ["L126-1 CRPM"]
+
+  - id: inf_minier
+    label: "Périmètre minier"
+    familles: [information]
+    codes: ["09-00"]
+    groupe: extraction
+    effets: {perennite: -25}
+    justification: "Concession minière ou stockage souterrain."
+
+  - id: inf_carriere
+    label: "Zone de recherche et d'exploitation de carrière"
+    familles: [information]
+    codes: ["10-00"]
+    groupe: extraction
+    mots_cles: ['carrieres?', 'gravieres?', 'extraction', 'granulats?', 'sablieres?']
+    effets: {perennite: -25}
+    point_a_verifier: "Carrière : vérifier l'échéance de l'autorisation et l'arrêté de remise en état (opportunité de création de milieux en fin d'exploitation)."
+    justification: "Exploitation actuelle ou future."
+
+  - id: inf_divisions_foncieres
+    label: "Divisions foncières soumises à déclaration préalable"
+    familles: [information]
+    codes: ["11-00"]
+    groupe: protection_reglementaire
+    effets: {perennite: 3}
+    justification: "Outil anti-mitage dans les espaces naturels : légèrement favorable."
+    references: ["L115-3"]
+
+  - id: inf_sursis
+    label: "Périmètre de sursis à statuer"
+    familles: [information]
+    codes: ["12-00"]
+    groupe: procedure
+    mots_cles: ['sursis a statuer']
+    effets: {perennite: -15, confiance: -10}
+    portee: presence
+    point_a_verifier: "Sursis à statuer : un projet ou une évolution du document est en cours — le zonage actuel peut changer."
+    justification: "Signal d'un projet public ou d'une révision en cours."
+    references: ["L424-1"]
+
+  - id: inf_pae
+    label: "Programme d'aménagement d'ensemble"
+    familles: [information]
+    codes: ["13-00"]
+    groupe: projet_urbain
+    effets: {perennite: -25}
+    justification: "Secteur d'aménagement programmé."
+
+  - id: inf_bruit
+    label: "Secteur affecté par le bruit des infrastructures"
+    familles: [information]
+    codes: ["14-00"]
+    groupe: nuisance
+    mots_cles: ['classement sonore', 'nuisances? sonores?', 'affecte par le bruit']
+    effets: {synergie: -2}
+    justification: "Nuisance pour la faune sensible, effet faible."
+
+  - id: inf_archeo
+    label: "Site archéologique"
+    familles: [information]
+    codes: ["16-00"]
+    groupe: archeologie
+    mots_cles: ['archeolog', 'vestiges']
+    effets: {compatibilite: -5}
+    profils: {zones_humides: {compatibilite: -10}}
+    point_a_verifier: "Zone archéologique : les affouillements (mares, reprofilage) peuvent être soumis à diagnostic d'archéologie préventive."
+    justification: "Contrainte sur les travaux de terrassement."
+
+  - id: inf_neutre
+    label: "Informations sans effet (plomb, assainissement, publicité, taxes, massif...)"
+    familles: [information]
+    codes: ["07-00", "17-00", "19-01", "20-00", "23-00", "32-00", "33-00", "42-*", "97-00"]
+    groupe: neutre
+    effets: {}
+    justification: "Sans effet sur une mesure compensatoire."
+
+  - id: inf_traitement_eaux_dechets
+    label: "Emplacements de traitement des eaux et des déchets"
+    familles: [information]
+    codes: ["19-02"]
+    groupe: projet_public
+    effets: {perennite: -20}
+    justification: "Équipement de traitement existant ou prévu."
+
+  - id: inf_projet_ppr
+    label: "Projet de plan de prévention des risques"
+    familles: [information]
+    codes: ["21-00"]
+    groupe: risque
+    effets: {perennite: 5}
+    point_a_verifier: "Projet de PPR : le zonage réglementaire risques n'est pas encore opposable — vérifier l'aléa."
+    justification: "Futur encadrement de la constructibilité."
+
+  - id: inf_rives_montagne
+    label: "Protection des rives des plans d'eau (montagne)"
+    familles: [information]
+    codes: ["22-00"]
+    groupe: protection_reglementaire
+    effets: {perennite: 10}
+    justification: "Inconstructibilité des rives."
+    references: ["L122-12"]
+
+  - id: inf_paen
+    label: "Périmètre de protection des espaces agricoles et naturels périurbains (PAEN)"
+    familles: [information]
+    codes: ["25-00"]
+    groupe: protection_agricole
+    mots_cles: ['\bpaen\b', 'protection des espaces agricoles et naturels']
+    effets: {perennite: 25, synergie: 5}
+    profils: {boisement: {perennite: 25, synergie: 5, compatibilite: -5}}
+    point_a_verifier: "PAEN : périmètre ne pouvant être réduit que par décret ; consulter le programme d'action (vocation agricole et naturelle)."
+    justification: "Protection foncière parmi les plus robustes (réduction par décret)."
+    references: ["L113-16"]
+
+  - id: inf_peb
+    label: "Plan d'exposition au bruit des aérodromes"
+    familles: [information]
+    codes: ["27-00"]
+    groupe: nuisance
+    mots_cles: ["plan d.exposition au bruit", '\bpeb\b']
+    effets: {perennite: 5}
+    profils: {zones_humides: {perennite: 5, synergie: -10}}
+    point_a_verifier: "Proximité d'aérodrome : créer des plans d'eau attractifs pour l'avifaune est encadré (péril animalier)."
+    justification: "Constructibilité limitée (favorable) ; contrainte avifaune pour les ZH."
+
+  - id: inf_pup
+    label: "Périmètre de projet urbain partenarial"
+    familles: [information]
+    codes: ["30-00"]
+    groupe: projet_urbain
+    effets: {perennite: -30}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Périmètre de PUP : opération d'aménagement prévue."}]
+    justification: "Opération d'aménagement financée par convention."
+
+  - id: inf_exclusion_enr
+    label: "Périmètre d'exclusion des matériaux / ENR (patrimoine)"
+    familles: [information]
+    codes: ["31-00"]
+    groupe: protection_reglementaire
+    effets: {perennite: 3}
+    justification: "Limite la concurrence des projets ENR."
+
+  - id: inf_oin
+    label: "Périmètre d'opération d'intérêt national"
+    familles: [information]
+    codes: ["34-00"]
+    groupe: projet_urbain
+    mots_cles: ["operation d.interet national", '\boin\b']
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: bloquant, motif: "Opération d'intérêt national."}]
+    justification: "Grande opération d'aménagement de l'État."
+
+  - id: inf_densite
+    label: "Seuil minimal de densité"
+    familles: [information]
+    codes: ["35-00"]
+    groupe: urbain
+    effets: {perennite: -10}
+    justification: "Secteur à densifier."
+
+  - id: inf_plage
+    label: "Schéma d'aménagement de plage"
+    familles: [information]
+    codes: ["36-00"]
+    groupe: projet_amenagement
+    effets: {perennite: -5}
+    justification: "Aménagements de plage."
+
+  - id: inf_regime_forestier
+    label: "Bois et forêts relevant du régime forestier"
+    familles: [information]
+    codes: ["37-00"]
+    groupe: propriete_publique
+    mots_cles: ['regime forestier', 'forets? (domaniales?|communales?)', '\bonf\b']
+    effets: {perennite: 10, maitrise: -25}
+    profils:
+      zones_humides: {perennite: 10, maitrise: -25, compatibilite: -10}
+      milieux_ouverts: {perennite: 10, maitrise: -25, compatibilite: -10}
+    point_a_verifier: "Régime forestier : propriété publique gérée par l'ONF — acquisition improbable, convention de gestion envisageable."
+    justification: "Forêt publique : pérenne mais non acquérable."
+    references: ["L211-1 C. forestier"]
+
+  - id: inf_sis
+    label: "Secteur d'information sur les sols (pollution)"
+    familles: [information]
+    codes: ["38-00"]
+    groupe: pollution
+    mots_cles: ["secteurs? d.information sur les sols", '\bsis\b', 'sols? pollues?']
+    effets: {compatibilite: -10}
+    point_a_verifier: "Sol pollué identifié : étude de sol nécessaire avant travaux. Peut aussi être une opportunité de renaturation."
+    justification: "Contraintes sanitaires et de travaux."
+    references: ["L125-6 C. env."]
+
+  - id: inf_afup
+    label: "Périmètre de projet AFUP"
+    familles: [information]
+    codes: ["39-00"]
+    groupe: projet_urbain
+    effets: {perennite: -10}
+    justification: "Projet de remembrement urbain."
+
+  - id: inf_patrimoine_mondial
+    label: "Bien inscrit au patrimoine mondial / zone tampon"
+    familles: [information]
+    codes: ["40-*"]
+    groupe: patrimoine
+    effets: {perennite: 5, compatibilite: -3}
+    justification: "Protection patrimoniale et paysagère."
+
+  - id: inf_recul_axes
+    label: "Bande de recul le long des axes à grande circulation"
+    familles: [information]
+    codes: ["41-00"]
+    groupe: nuisance
+    mots_cles: ['marge de recul', 'bande inconstructible', 'l\.? ?111-6', 'l\.? ?111-1-4', 'amendement dupont', 'loi barnier']
+    effets: {perennite: 3, synergie: -2}
+    justification: "Inconstructibilité (favorable), nuisances et collisions faune (défavorable)."
+
+  - id: inf_annulation_partielle
+    label: "Périmètre d'annulation partielle du document"
+    familles: [information]
+    codes: ["98-00"]
+    groupe: procedure
+    mots_cles: ['annulation partielle', 'annule par']
+    effets: {confiance: -25}
+    portee: presence
+    point_a_verifier: "Annulation partielle du document : le zonage affiché peut ne plus être applicable (document antérieur remis en vigueur)."
+    justification: "Fiabilité de la donnée remise en cause."
+
+  - id: inf_autre
+    label: "Information 'Autre' (99)"
+    familles: [information]
+    codes: ["99-*"]
+    groupe: neutre
+    generique: true
+    effets: {}
+    justification: "Code générique : seul le libellé renseigne."
+
+  # =================== MOTS-CLÉS (prescriptions / informations) =============
+  # Servent pour les codes 99, absents ou hors nomenclature, et pour repérer les
+  # codes mal saisis. Placés après les règles codées.
+
+  - id: kw_energie
+    label: "Projet ou secteur énergies renouvelables (libellé)"
+    familles: [prescription, information]
+    groupe: energie
+    mots_cles: ['photovolta', 'centrale solaire', 'parc solaire', 'agrivolta', 'energies? renouvelables?', '\benr\b', 'eolien', 'methanis']
+    effets: {perennite: -35}
+    veto: [{seuil_pct: 30, niveau: majeur, motif: "Secteur dédié aux énergies renouvelables."}]
+    justification: "Concurrence foncière directe."
+
+  - id: kw_zone_humide
+    label: "Zone humide identifiée (libellé)"
+    familles: [prescription, information]
+    groupe: ecologique
+    mots_cles: ['zones? humides?', '\bzh\b', 'milieux? humides?', 'tourbieres?', 'roselieres?', 'prairies? humides?', 'marais']
+    effets: {perennite: 10, synergie: 10}
+    profils: {zones_humides: {perennite: 10, synergie: 20}}
+    point_a_verifier: "Zone humide identifiée au document : si elle est fonctionnelle, la préserver n'apporte pas de gain (additionnalité) ; intérêt si dégradée."
+    justification: "Reconnaissance d'un enjeu ZH par le document."
+
+  - id: kw_mare
+    label: "Mares, plans d'eau (libellé)"
+    familles: [prescription, information]
+    groupe: ecologique
+    mots_cles: ['\bmares?\b', "plans? d.eau", 'etangs?']
+    effets: {synergie: 8}
+    profils: {zones_humides: {synergie: 12}}
+    justification: "Milieux aquatiques protégés ou identifiés."
+
+  - id: kw_haie
+    label: "Haies, ripisylves, alignements, arbres (libellé)"
+    familles: [prescription, information]
+    groupe: ecologique
+    mots_cles: ['\bhaies?\b', "alignements? d.arbres", 'ripisylves?', 'arbres? remarquables?', 'bosquets?', 'bocag']
+    effets: {perennite: 3, synergie: 10, compatibilite: -3}
+    profils:
+      boisement: {perennite: 3, synergie: 15}
+      milieux_ouverts: {perennite: 3, synergie: 5, compatibilite: -5}
+    justification: "Trame arborée protégée : cohérente avec une mesure de haies, à préserver dans les autres cas."
+
+  - id: kw_cours_eau
+    label: "Cours d'eau, berges, bandes tampon (libellé)"
+    familles: [prescription, information]
+    groupe: ecologique
+    mots_cles: ["cours d.eau", 'berges?', 'bandes? (enherbees?|tampon)', 'abords? des ruisseaux']
+    effets: {synergie: 5, perennite: 3}
+    profils: {zones_humides: {synergie: 10, perennite: 3}}
+    justification: "Proximité ou protection d'un cours d'eau."
+
+  - id: kw_protection_nature
+    label: "Espace naturel protégé ou inventorié (libellé)"
+    familles: [prescription, information]
+    groupe: protection_forte
+    mots_cles: ['natura ?2000', '\bznieff\b', 'arrete (prefectoral )?de (protection de )?biotope', '\bappb\b', 'reserve naturelle', 'conservatoire', 'site classe']
+    effets: {perennite: 10, synergie: -5}
+    point_a_verifier: "Site protégé ou inventorié : la compensation y est possible mais l'additionnalité doit être démontrée (et les mesures compatibles avec le DOCOB / plan de gestion)."
+    justification: "Pérennité élevée, additionnalité discutable."
+
+  - id: kw_loisirs
+    label: "Loisirs, camping, golf (libellé)"
+    familles: [prescription, information]
+    groupe: projet_amenagement
+    mots_cles: ['camping', '\bgolf\b', 'parc de loisirs', "parc d.attraction", 'equipements? sportifs?', 'aire de jeux', 'base de loisirs']
+    effets: {perennite: -15}
+    justification: "Usage récréatif concurrent."
+
+  - id: kw_risque_inondation
+    label: "Risque inondation (libellé)"
+    familles: [prescription, information]
+    groupe: risque
+    mots_cles: ['inondable', 'inondation', '\bppri\b', 'submersion', 'expansion des crues', 'aleas? (fort|moyen|faible)', 'crues?']
+    effets: {perennite: 10, compatibilite: -3}
+    profils: {zones_humides: {perennite: 10, synergie: 8, compatibilite: -3}}
+    point_a_verifier: "Zone inondable : remblais interdits ; affouillements et plantations à vérifier selon le règlement du PPR."
+    justification: "Inconstructibilité de fait, cohérence avec les ZH."
+
+  - id: kw_risque_feu
+    label: "Risque feu de forêt / débroussaillement (libellé)"
+    familles: [prescription, information]
+    groupe: risque
+    mots_cles: ['feux? de foret', 'incendie', '\bpprif\b', 'debroussaillement', 'obligations? legales? de debroussaillement', '\bdfci\b']
+    effets: {perennite: 3, compatibilite: -3}
+    profils: {boisement: {perennite: 3, compatibilite: -10}}
+    point_a_verifier: "Risque incendie : obligations de débroussaillement possibles, peu compatibles avec un boisement dense ou des haies épaisses."
+    justification: "Contrainte de gestion de la végétation."
+
+  - id: kw_risque_mouvement
+    label: "Mouvements de terrain, cavités (libellé)"
+    familles: [prescription, information]
+    groupe: risque
+    mots_cles: ['mouvements? de terrain', 'glissements?', 'eboulements?', 'cavites?', 'effondrements?', 'retrait.gonflement']
+    effets: {perennite: 5, compatibilite: -3}
+    profils: {zones_humides: {perennite: 5, compatibilite: -8}}
+    point_a_verifier: "Risque de mouvement de terrain : terrassements et mise en eau à étudier."
+    justification: "Inconstructibilité partielle, prudence sur les travaux."
+
+  - id: kw_captage
+    label: "Captage d'eau potable (libellé)"
+    familles: [prescription, information]
+    groupe: ressource_eau
+    mots_cles: ['captages?', 'eau potable', '\baep\b', 'forages?']
+    effets: {compatibilite: -5, synergie: 5}
+    point_a_verifier: "Captage : lire l'arrêté de DUP (restrictions de travaux et d'intrants). Une conversion en prairie ou boisement est en général favorable à la ressource."
+    justification: "Restrictions d'usage, mais intérêt convergent pour la qualité de l'eau."
+
+  - id: kw_dechets
+    label: "Déchets, décharge (libellé)"
+    familles: [prescription, information]
+    groupe: projet_public
+    mots_cles: ['dechets?', 'decharge', '\bisdi\b', '\bisdnd\b', 'decheterie', 'dechetterie']
+    effets: {perennite: -20}
+    justification: "Usage concurrent, sols potentiellement dégradés."
+
+  - id: kw_lisiere
+    label: "Lisière, transition paysagère (libellé)"
+    familles: [prescription, information]
+    groupe: ecologique
+    mots_cles: ['lisieres?', 'transitions? paysageres?', 'espaces? tampons?']
+    effets: {synergie: 5}
+    justification: "Traitement des transitions : cohérent avec des haies ou lisières."
+
+  # ============================== SERVITUDES =================================
+  # Les catégories marquées a_confirmer reposent sur ma connaissance de la
+  # nomenclature des SUP, à vérifier contre le standard CNIG SUP en vigueur.
+
+  - id: sup_a7_foret_protection
+    label: "A7 — Forêts de protection"
+    familles: [servitude]
+    suptypes: [a7]
+    groupe: protection_forte
+    mots_cles: ['forets? de protection']
+    effets: {perennite: 25, compatibilite: -10}
+    profils:
+      zones_humides: {perennite: 25, compatibilite: -40}
+      milieux_ouverts: {perennite: 25, compatibilite: -40}
+      boisement: {perennite: 25, synergie: -10}
+    veto: [{seuil_pct: 50, niveau: bloquant, profils: [zones_humides, milieux_ouverts], motif: "Forêt de protection : défrichement interdit."}]
+    point_a_verifier: "Forêt de protection : régime forestier spécial, défrichement interdit, travaux très encadrés."
+    justification: "Protection forestière la plus forte du code forestier."
+    references: ["L141-1 C. forestier"]
+
+  - id: sup_a9_zap
+    label: "A9 — Zone agricole protégée"
+    familles: [servitude]
+    suptypes: [a9]
+    groupe: protection_agricole
+    mots_cles: ['zones? agricoles? protegees?', '\bzap\b']
+    effets: {perennite: 20}
+    profils:
+      boisement: {perennite: 20, compatibilite: -10}
+      zones_humides: {perennite: 20, compatibilite: -5}
+    point_a_verifier: "ZAP : tout changement d'affectation altérant durablement la vocation agricole est soumis à avis de la chambre d'agriculture et de la CDOA."
+    justification: "Protection pérenne de la vocation agricole : favorable à la pérennité, frein à une conversion en boisement."
+    references: ["L112-2 CRPM"]
+    a_confirmer: true
+
+  - id: sup_a1_regime_forestier
+    label: "A1 — Bois et forêts soumis au régime forestier"
+    familles: [servitude]
+    suptypes: [a1]
+    groupe: propriete_publique
+    effets: {perennite: 10, maitrise: -20}
+    justification: "Forêt publique."
+    a_confirmer: true
+
+  - id: sup_a4_cours_eau
+    label: "A4 — Terrains riverains des cours d'eau non domaniaux"
+    familles: [servitude]
+    suptypes: [a4]
+    groupe: ressource_eau
+    mots_cles: ['riverains? des cours d.eau', 'cours d.eau non domaniaux']
+    effets: {compatibilite: -3, synergie: 5}
+    profils:
+      zones_humides: {compatibilite: -3, synergie: 10}
+      boisement: {compatibilite: -8, synergie: 3}
+    point_a_verifier: "Servitude de passage des engins d'entretien des cours d'eau : plantations en berge à concerter avec le gestionnaire."
+    justification: "Signal de proximité d'un cours d'eau ; servitude de passage."
+    a_confirmer: true
+
+  - id: sup_canalisations_eau
+    label: "A2, A3, A5 — Canalisations d'irrigation, d'eau, d'assainissement"
+    familles: [servitude]
+    suptypes: [a2, a3, a5]
+    groupe: reseau
+    effets: {compatibilite: -8}
+    profils: {boisement: {compatibilite: -15}}
+    point_a_verifier: "Canalisation enterrée : bande de servitude (accès, interdiction de plantations profondes) à localiser."
+    justification: "Servitude technique contraignante pour les plantations et les terrassements."
+    a_confirmer: true
+
+  - id: sup_a8_montagne
+    label: "A8 — Protection / restauration des sols en montagne"
+    familles: [servitude]
+    suptypes: [a8]
+    groupe: protection_forte
+    effets: {perennite: 10}
+    justification: "Périmètre de restauration des terrains en montagne."
+    a_confirmer: true
+
+  - id: sup_ac3_reserve
+    label: "AC3 — Réserves naturelles"
+    familles: [servitude]
+    suptypes: [ac3]
+    groupe: protection_forte
+    mots_cles: ['reserves? naturelles?']
+    effets: {perennite: 30, synergie: -15, compatibilite: -10}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "Réserve naturelle : additionnalité de la mesure très difficile à démontrer (site déjà protégé et géré)."}]
+    point_a_verifier: "Réserve naturelle : compensation possible seulement si additionnelle au plan de gestion ; travaux soumis à l'autorisation du gestionnaire et de l'État."
+    justification: "Site déjà protégé et géré : additionnalité faible."
+    references: ["L332-1 C. env."]
+
+  - id: sup_ac2_sites
+    label: "AC2 — Sites inscrits et classés"
+    familles: [servitude]
+    suptypes: [ac2]
+    groupe: patrimoine
+    mots_cles: ['sites? (inscrits?|classes?)']
+    effets: {perennite: 10, compatibilite: -8}
+    point_a_verifier: "Site classé : modification de l'état des lieux soumise à autorisation spéciale ; site inscrit : déclaration préalable 4 mois avant travaux."
+    justification: "Protection paysagère forte, procédure supplémentaire pour les travaux."
+    references: ["L341-1 et s. C. env."]
+
+  - id: sup_ac1_mh
+    label: "AC1 — Monuments historiques (abords)"
+    familles: [servitude]
+    suptypes: [ac1]
+    groupe: patrimoine
+    mots_cles: ['monuments? historiques?', 'abords? de monument']
+    effets: {perennite: 3, compatibilite: -5}
+    point_a_verifier: "Abords de MH : travaux modifiant l'aspect extérieur soumis à l'avis de l'ABF."
+    justification: "Contrainte procédurale légère."
+
+  - id: sup_ac4_spr
+    label: "AC4 — Site patrimonial remarquable (ex-ZPPAUP/AVAP)"
+    familles: [servitude]
+    suptypes: [ac4]
+    groupe: patrimoine
+    effets: {perennite: 3, compatibilite: -5}
+    justification: "Règles patrimoniales, souvent en contexte urbain."
+    a_confirmer: true
+
+  - id: sup_as1_immediat
+    label: "AS1 — Périmètre de protection immédiate de captage"
+    familles: [servitude]
+    groupe: ressource_eau
+    raffine: [sup_as1_captage]
+    mots_cles_raffinement: ['immediat']
+    effets: {maitrise: -40, compatibilite: -20}
+    veto: [{seuil_pct: 20, niveau: bloquant, motif: "Périmètre de protection immédiate : propriété de la collectivité, clôturé."}]
+    justification: "Terrain acquis et clôturé par la collectivité."
+
+  - id: sup_as1_captage
+    label: "AS1 — Protection des captages d'eau potable"
+    familles: [servitude]
+    suptypes: [as1]
+    groupe: ressource_eau
+    mots_cles: ['captages?', 'eau potable', 'eaux destinees a la consommation']
+    effets: {compatibilite: -5, synergie: 5}
+    point_a_verifier: "Captage : lire l'arrêté de DUP (périmètre rapproché : restrictions d'affouillements et d'intrants)."
+    justification: "Restrictions, mais intérêt convergent pour la ressource."
+    references: ["L1321-2 CSP"]
+
+  - id: sup_ar_defense
+    label: "AR — Servitudes de défense nationale"
+    familles: [servitude]
+    suptypes_prefixe: [ar]
+    groupe: projet_public
+    effets: {perennite: -5, maitrise: -10}
+    point_a_verifier: "Servitude militaire : contraintes d'accès et d'usage à vérifier."
+    justification: "Usage militaire à proximité."
+    a_confirmer: true
+
+  - id: sup_el7_alignement
+    label: "EL7 — Plan d'alignement des voies"
+    familles: [servitude]
+    suptypes: [el7]
+    groupe: projet_public
+    mots_cles: ["plans? d.alignement"]
+    effets: {perennite: -10, maitrise: -5}
+    justification: "Élargissement futur de voie en bordure."
+
+  - id: sup_el10_parc_national
+    label: "EL10 — Cœur de parc national"
+    familles: [servitude]
+    suptypes: [el10]
+    groupe: protection_forte
+    mots_cles: ['parc national']
+    effets: {perennite: 30, synergie: -10, compatibilite: -10}
+    veto: [{seuil_pct: 50, niveau: majeur, motif: "Cœur de parc national : additionnalité très difficile à démontrer."}]
+    point_a_verifier: "Cœur de parc national : réglementation spéciale des travaux, additionnalité à démontrer."
+    justification: "Protection maximale."
+    a_confirmer: true
+
+  - id: sup_el_littoral_halage
+    label: "EL3, EL9 — Halage / marchepied, passage piétons littoral"
+    familles: [servitude]
+    suptypes: [el3, el9]
+    groupe: reseau
+    mots_cles: ['halage', 'marchepied', 'sentier du littoral', 'passage des pietons']
+    effets: {compatibilite: -3}
+    justification: "Passage public à maintenir le long des berges ou du rivage."
+
+  - id: sup_el_autres
+    label: "EL — Autres servitudes de communication / équipement"
+    familles: [servitude]
+    suptypes_prefixe: [el]
+    groupe: neutre
+    effets: {}
+    justification: "Sans effet notable identifié."
+    a_confirmer: true
+
+  - id: sup_canalisations_energie
+    label: "I1, I3, I5, I7 — Canalisations hydrocarbures, gaz, produits chimiques, stockages"
+    familles: [servitude]
+    suptypes: [i1, i1bis, i3, i5, i7]
+    groupe: reseau
+    mots_cles: ['gaz', 'hydrocarbures?', 'pipe.?line', 'produits chimiques', 'canalisations? de transport']
+    effets: {compatibilite: -10}
+    profils:
+      boisement: {compatibilite: -25}
+      zones_humides: {compatibilite: -15}
+    point_a_verifier: "Canalisation de transport : bande non plantable et non aedificandi, terrassements soumis à l'accord de l'exploitant (DT-DICT)."
+    justification: "Servitude technique incompatible avec des plantations ligneuses et contraignante pour les terrassements."
+
+  - id: sup_i4_electricite
+    label: "I4 — Lignes électriques"
+    familles: [servitude]
+    suptypes: [i4]
+    groupe: reseau
+    mots_cles: ['electri', 'lignes? (haute|tres haute) tension', '\bht[ab]?\b', 'rte']
+    effets: {compatibilite: -5}
+    profils: {boisement: {compatibilite: -15}}
+    point_a_verifier: "Ligne électrique : élagage et hauteur de végétation limités sous les conducteurs."
+    justification: "Contrainte forte sur le boisement, faible pour les milieux ouverts et humides."
+
+  - id: sup_i6_mines
+    label: "I6 — Mines et carrières"
+    familles: [servitude]
+    suptypes: [i6]
+    groupe: extraction
+    effets: {perennite: -20}
+    justification: "Exploitation du sous-sol."
+    a_confirmer: true
+
+  - id: sup_i_autres
+    label: "I — Autres servitudes énergie"
+    familles: [servitude]
+    suptypes_prefixe: [i]
+    groupe: neutre
+    effets: {}
+    justification: "Sans effet notable identifié."
+    a_confirmer: true
+
+  - id: sup_int1_cimetiere
+    label: "INT1 — Voisinage des cimetières"
+    familles: [servitude]
+    suptypes: [int1]
+    groupe: projet_public
+    mots_cles: ['cimetieres?']
+    effets: {perennite: -5}
+    justification: "Voisinage d'équipement, extension possible."
+
+  - id: sup_js1
+    label: "JS1 — Installations sportives"
+    familles: [servitude]
+    suptypes: [js1]
+    groupe: projet_amenagement
+    effets: {perennite: -5}
+    justification: "Équipement sportif protégé."
+    a_confirmer: true
+
+  - id: sup_pm1_ppr
+    label: "PM1 — Plan de prévention des risques naturels"
+    familles: [servitude]
+    suptypes: [pm1]
+    groupe: risque
+    mots_cles: ['prevention des risques naturels', '\bppr[nim]?\b', 'inondation']
+    effets: {perennite: 12, compatibilite: -3}
+    profils: {zones_humides: {perennite: 12, synergie: 5, compatibilite: -3}}
+    point_a_verifier: "PPR : identifier la zone réglementaire (rouge/bleue). Remblais en général interdits ; plantations et clôtures parfois réglementées dans les zones d'écoulement."
+    justification: "Inconstructibilité en zone d'aléa fort : pérennité. Cohérence ZH en zone inondable."
+    references: ["L562-1 C. env."]
+
+  - id: sup_pm3_pprt
+    label: "PM3 — Plan de prévention des risques technologiques"
+    familles: [servitude]
+    suptypes: [pm3]
+    groupe: risque
+    mots_cles: ['risques technologiques', '\bpprt\b']
+    effets: {perennite: 8, compatibilite: -5, synergie: -3}
+    point_a_verifier: "PPRT : proximité d'un site industriel à risque ; usages et fréquentation encadrés."
+    justification: "Urbanisation contrainte, contexte industriel peu favorable."
+
+  - id: sup_pm2_icpe
+    label: "PM2 — Servitudes autour des installations classées"
+    familles: [servitude]
+    suptypes: [pm2]
+    groupe: risque
+    effets: {perennite: -5, compatibilite: -5}
+    justification: "Proximité d'une installation classée."
+    a_confirmer: true
+
+  - id: sup_pm8_dfci
+    label: "PM8 — Défense des forêts contre l'incendie"
+    familles: [servitude]
+    suptypes: [pm8]
+    groupe: risque
+    mots_cles: ['\bdfci\b', 'defense des forets contre']
+    effets: {compatibilite: -3}
+    profils: {boisement: {compatibilite: -8}}
+    point_a_verifier: "Servitude DFCI : passage et débroussaillement le long des pistes."
+    justification: "Contrainte de gestion de la végétation."
+
+  - id: sup_pm_autres
+    label: "PM — Autres servitudes de sécurité publique"
+    familles: [servitude]
+    suptypes_prefixe: [pm]
+    groupe: risque
+    effets: {perennite: 5}
+    point_a_verifier: "Servitude de sécurité publique non détaillée : lire l'acte."
+    justification: "Les servitudes PM restreignent généralement l'urbanisation."
+    a_confirmer: true
+    question_expert: "PM4 (zones de rétention de crues, mobilité des cours d'eau, ZSGE ?) mériterait un bonus spécifique ZH : à confirmer."
+
+  - id: sup_pt
+    label: "PT — Télécommunications"
+    familles: [servitude]
+    suptypes_prefixe: [pt]
+    groupe: neutre
+    effets: {}
+    profils: {boisement: {compatibilite: -3}}
+    justification: "PT2 (obstacles) peut limiter la hauteur de la végétation, effet marginal."
+    a_confirmer: true
+
+  - id: sup_t1_ferroviaire
+    label: "T1 — Voies ferrées"
+    familles: [servitude]
+    suptypes: [t1]
+    groupe: reseau
+    mots_cles: ['chemins? de fer', 'ferroviaire', 'sncf']
+    effets: {perennite: -3, compatibilite: -3}
+    point_a_verifier: "Riverain d'une voie ferrée : distances de plantation et de dépôt réglementées."
+    justification: "Contraintes de riveraineté."
+
+  - id: sup_t_aero
+    label: "T4, T5, T7 — Servitudes aéronautiques"
+    familles: [servitude]
+    suptypes: [t4, t5, t7]
+    groupe: nuisance
+    mots_cles: ['aeronauti', 'aerodrome', 'degagement']
+    effets: {}
+    profils:
+      boisement: {compatibilite: -5}
+      zones_humides: {synergie: -8}
+    point_a_verifier: "Servitude aéronautique : hauteur des arbres limitée ; plans d'eau attractifs pour l'avifaune encadrés (péril animalier)."
+    justification: "Contrainte pour le boisement (hauteur) et les ZH (avifaune)."
+
+  - id: sup_t_autres
+    label: "T — Autres servitudes transport"
+    familles: [servitude]
+    suptypes_prefixe: [t]
+    groupe: neutre
+    effets: {}
+    justification: "Sans effet notable identifié."
+    a_confirmer: true
+
+  - id: sup_neutres
+    label: "Autres servitudes sans effet identifié"
+    familles: [servitude]
+    suptypes_prefixe: [a, ac, as, js, int]
+    groupe: neutre
+    effets: {}
+    justification: "Catégorie non spécifiquement interprétée."
+    a_confirmer: true
+
+# -----------------------------------------------------------------------------
+# GROUPES SÉMANTIQUES COMPATIBLES
+# Si le code CNIG et le libellé saisi relèvent de groupes compatibles, ce n'est
+# pas un conflit : on garde l'interprétation du code (fiabilité haute).
+# Ex. code 02-01 (inconstructible pour risques) + libellé "zone inondable".
+# -----------------------------------------------------------------------------
+groupes_compatibles:
+  - [protection_reglementaire, risque]
+  - [protection_reglementaire, ecologique]
+  - [protection_reglementaire, protection_forte]
+  - [protection_reglementaire, protection_agricole]
+  - [protection_forte, ecologique]
+  - [boisement_protege, ecologique]
+  - [boisement_protege, protection_forte]
+  - [patrimoine, ecologique]
+  - [patrimoine, boisement_protege]
+  - [projet_public, projet_hydraulique]
+  - [projet_public, projet_urbain]
+  - [projet_public, projet_amenagement]
+  - [projet_urbain, projet_amenagement]
+  - [projet_urbain, urbain]
+  - [preemption, preemption_naturelle]
+  - [risque, nuisance]
+  - [ressource_eau, ecologique]
+  - [constructibilite_AN, urbain]

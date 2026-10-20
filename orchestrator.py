@@ -34,7 +34,7 @@ from typing import Callable, Awaitable
 
 from sqlalchemy import text
 
-from layers.layer_runner import LAYER_REGISTRY, LayerResult
+from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY, LayerResult
 
 logger = logging.getLogger(__name__)
 

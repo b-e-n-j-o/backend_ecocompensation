@@ -1,0 +1,51 @@
+=== Exploration SIREN 433365079 — 2026-10-14T13:37:45.725507 ===
+[siren_full] 200 228ms https://recherche-entreprises.api.gouv.fr/search?q=433365079&per_page=5  rate-limit-headers={}
+[siren_minimal] 200 141ms https://recherche-entreprises.api.gouv.fr/search?q=433365079&minimal=true&include=siege%2Cdirigeants%2Cfinances%2Ccomplements%2Cmatching_etablissements%2Cscore&limite_matching_etablissements=100  rate-limit-headers={}
+[by_name] 200 103ms https://recherche-entreprises.api.gouv.fr/search?q=GROUPEMENT+FORESTIER+D%27ORVIGNACQ&per_page=25  rate-limit-headers={}
+   recherche par nom 'GROUPEMENT FORESTIER D'ORVIGNACQ' : total=1 rang_du_siren=1
+[near_point] 200 153ms https://recherche-entreprises.api.gouv.fr/near_point?lat=44.064020436&long=-1.223231566&radius=0.5&per_page=25  rate-limit-headers={}
+   near_point 500m : total=289
+[population_filter] 200 87ms https://recherche-entreprises.api.gouv.fr/search?code_commune=40266&nature_juridique=6599&etat_administratif=A&per_page=1  rate-limit-headers={}
+   nature_juridique=6599 actives dans 40266 : total=11
+[bodacc_siren] 200 365ms https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/annonces-commerciales/records?where=%22433365079%22&order_by=dateparution+desc&limit=20  rate-limit-headers={'X-RateLimit-Remaining': '3498359', 'X-RateLimit-Limit': '5000000', 'X-RateLimit-Reset': '2026-10-15 00:00:00+00:00'}
+   BODACC annonces pour 433365079 : total=1
+     2012-11-16 | Modifications diverses | Avis initial | GREFFE DU TRIBUNAL DE COMMERCE DE DAX
+[bodacc_latest] 200 409ms https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/annonces-commerciales/records?order_by=dateparution+desc&limit=1  rate-limit-headers={'X-RateLimit-Remaining': '3498345', 'X-RateLimit-Limit': '5000000', 'X-RateLimit-Reset': '2026-10-15 00:00:00+00:00'}
+   BODACC dernière parution indexée : 2026-10-14 (aujourd'hui 2026-10-14)
+
+=== Résumé ===
+  siren                            433365079
+  nom_complet                      GROUPEMENT FORESTIER D'ORVIGNACQ
+  nature_juridique                 6599
+  activite_principale              02.40Z
+  section_activite_principale      A
+  etat_administratif               A
+  date_creation                    2000-09-20
+  date_fermeture                   None
+  categorie_entreprise             None
+  tranche_effectif_salarie         NN
+  nombre_etablissements_ouverts    1
+  siege_code_commune               40266
+  siege_code_postal                40170
+  siege_lat                        44.064020436
+  siege_lon                        -1.223231566
+  nb_dirigeants_pp                 3
+  nb_dirigeants_pm                 0
+  sirens_dirigeants_pm             []
+  annee_naissance_dirigeant_min    1936
+  finances_annee                   None
+  ca                               None
+  resultat_net                     None
+  est_association                  False
+  est_service_public               None
+  collectivite_territoriale        False
+  est_ess                          False
+  date_mise_a_jour                 2026-10-14T08:22:34
+  date_mise_a_jour_insee           2025-12-06T10:21:42
+  date_mise_a_jour_rne             2026-09-23T09:06:30
+  statut_diffusion                 O
+
+  nb champs distincts dans la fiche : 113
+  diff clés mode complet vs minimal : ['score', 'tva']
+
+Sorties : /Volumes/T7/Travaux_Freelance/KERELIA/CUAs/COMPENSATION_PARCELLE/COMPENSATION_ECO/KERFONCIER/backend/api/recherche_de_foncier/enrichir/durete_fonciere/durete_v4/explore_out/433365079_20261014_133745

@@ -1,0 +1,42 @@
+{
+  "total_count": 1,
+  "results": [
+    {
+      "id": "B20120222647",
+      "publicationavis": "B",
+      "parution": "20120222",
+      "dateparution": "2012-11-16",
+      "numeroannonce": 647,
+      "typeavis": "annonce",
+      "typeavis_lib": "Avis initial",
+      "familleavis": "modification",
+      "familleavis_lib": "Modifications diverses",
+      "numerodepartement": "40",
+      "departement_nom_officiel": "Landes",
+      "region_code": 75,
+      "region_nom_officiel": "Nouvelle-Aquitaine",
+      "tribunal": "GREFFE DU TRIBUNAL DE COMMERCE DE DAX",
+      "commercant": "GROUPEMENT FORESTIER D'ORVIGNACQ",
+      "ville": null,
+      "registre": [
+        "433 365 079",
+        "433365079"
+      ],
+      "cp": null,
+      "pdf_parution_subfolder": 0,
+      "ispdf_unitaire": "non",
+      "listepersonnes": "{\"personne\": {\"numeroImmatriculation\": {\"numeroIdentification\": \"433 365 079\", \"codeRCS\": \"RCS\", \"nomGreffeImmat\": \"Dax\"}, \"typePersonne\": \"pm\", \"denomination\": \"GROUPEMENT FORESTIER D'ORVIGNACQ\", \"formeJuridique\": \"Groupement forestier\", \"capital\": {\"montantCapital\": \"3020000\", \"devise\": \"EUR\"}}}",
+      "listeetablissements": null,
+      "jugement": null,
+      "acte": null,
+      "modificationsgenerales": "{\"descriptif\": \"Modification survenue sur le capital\"}",
+      "radiationaurcs": null,
+      "depot": null,
+      "listeprecedentexploitant": null,
+      "listeprecedentproprietaire": null,
+      "divers": null,
+      "parutionavisprecedent": null,
+      "url_complete": "https://www.bodacc.fr/pages/annonces-commerciales-detail/?q.id=id:B20120222647"
+    }
+  ]
+}

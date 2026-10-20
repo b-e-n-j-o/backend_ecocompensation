@@ -1,0 +1,903 @@
+{
+ "id": "P1",
+ "type": "parcelle",
+ "surface_m2": 10000.0,
+ "parcelle_ids": [],
+ "meta": {
+  "commune": "Latresne"
+ },
+ "documents": [
+  {
+   "idurba": "33234_PLU_20190702",
+   "partition": "DU_33234",
+   "typedoc": "PLU",
+   "date": "2019-07-02",
+   "datappro": "20190702",
+   "insee": "33234",
+   "urls_reglement": [
+    "https://ex/reg.pdf#page=40"
+   ]
+  }
+ ],
+ "synthese": {
+  "zonages": [
+   {
+    "layer_key": "zonage_plu",
+    "libelle": "A",
+    "type": "A",
+    "pct_cible": 80.0,
+    "surface_m2": 8000.0
+   },
+   {
+    "layer_key": "zonage_plu",
+    "libelle": "Nzh",
+    "type": "N",
+    "pct_cible": 20.0,
+    "surface_m2": 2000.0
+   }
+  ],
+  "nb_elements_par_famille": {
+   "zonage": 2,
+   "prescription": 4,
+   "information": 2,
+   "servitude": 1
+  },
+  "couches_intersectees": [
+   "zonage_plu",
+   "prescriptions_surf",
+   "prescriptions_lin",
+   "infos_surf",
+   "infos_pct",
+   "sup_assiette_s"
+  ],
+  "couches_en_erreur": [],
+  "anneau_zonage": {
+   "rayon_m": 200.0,
+   "surface_m2": 205461.9,
+   "pct": {
+    "N": 20.3,
+    "U": 9.7,
+    "A": 8.8,
+    "non_couvert": 61.2
+   }
+  }
+ },
+ "couches": [
+  {
+   "layer_key": "zonage_plu",
+   "display_name": "Zonage PLU / PLUi",
+   "famille": "zonage",
+   "geom_kind": "surf",
+   "typename": "wfs_du:zone_urba",
+   "status": "intersected",
+   "elements_count": 2,
+   "elements": [
+    {
+     "element_id": "zonage_plu:1",
+     "source_ids": [
+      "z_a"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "A",
+      "libelong": null,
+      "typezone": "A",
+      "destdomi": null,
+      "formdomi": null,
+      "destoui": null,
+      "destcdt": null,
+      "destnon": null,
+      "nomfic": null,
+      "urlfic": "https://ex/reg.pdf#page=40",
+      "datappro": "20190702",
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "A",
+     "libelle_cnig": "Zone agricole",
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 8000.0,
+      "pct_cible": 80.0
+     },
+     "liens": [
+      {
+       "type": "reglement",
+       "url": "https://ex/reg.pdf#page=40"
+      }
+     ],
+     "flags": []
+    },
+    {
+     "element_id": "zonage_plu:2",
+     "source_ids": [
+      "z_n1",
+      "z_n2"
+     ],
+     "nb_entites": 2,
+     "attributs": {
+      "libelle": "Nzh",
+      "libelong": null,
+      "typezone": "N",
+      "destdomi": null,
+      "formdomi": null,
+      "destoui": null,
+      "destcdt": null,
+      "destnon": null,
+      "nomfic": null,
+      "urlfic": null,
+      "datappro": "20190702",
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "N",
+     "libelle_cnig": "Zone naturelle et forestière",
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 2000.0,
+      "pct_cible": 20.0
+     },
+     "liens": [],
+     "flags": []
+    }
+   ],
+   "ecartes": [
+    {
+     "element_id": "zonage_plu:ecarte:1",
+     "source_ids": [
+      "z_u"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "UB",
+      "libelong": null,
+      "typezone": "U",
+      "destdomi": null,
+      "formdomi": null,
+      "destoui": null,
+      "destcdt": null,
+      "destnon": null,
+      "nomfic": null,
+      "urlfic": null,
+      "datappro": "20190702",
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "U",
+     "libelle_cnig": "Zone urbaine",
+     "mesure": {
+      "position": "limite",
+      "surface_m2": 30.0,
+      "pct_cible": 0.3,
+      "distance_m": 0.0
+     },
+     "liens": [],
+     "flags": [],
+     "raison_ecart": "contact_limite"
+    }
+   ],
+   "voisinage": []
+  },
+  {
+   "layer_key": "secteur_cc",
+   "display_name": "Secteurs de carte communale",
+   "famille": "zonage",
+   "geom_kind": "surf",
+   "typename": "wfs_du:secteur_cc",
+   "status": "not_intersected",
+   "elements_count": 0,
+   "elements": [],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "prescriptions_surf",
+   "display_name": "Prescriptions surfaciques",
+   "famille": "prescription",
+   "geom_kind": "surf",
+   "typename": "wfs_du:prescription_surf",
+   "status": "intersected",
+   "elements_count": 2,
+   "elements": [
+    {
+     "element_id": "prescriptions_surf:1",
+     "source_ids": [
+      "p_bad"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": null,
+      "txt": null,
+      "typepsc": "77",
+      "stypepsc": "00",
+      "nature": null,
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "77-00",
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 1600.0,
+      "pct_cible": 16.0
+     },
+     "liens": [],
+     "flags": [
+      "code_hors_nomenclature",
+      "libelle_vide"
+     ]
+    },
+    {
+     "element_id": "prescriptions_surf:2",
+     "source_ids": [
+      "p_er"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "ER n°3 élargissement voie",
+      "txt": "ER3",
+      "typepsc": "05",
+      "stypepsc": "01",
+      "nature": null,
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "05-01",
+     "libelle_cnig": "Emplacement réservé aux voies publiques",
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 1000.0,
+      "pct_cible": 10.0
+     },
+     "liens": [],
+     "flags": []
+    }
+   ],
+   "ecartes": [
+    {
+     "element_id": "prescriptions_surf:ecarte:1",
+     "source_ids": [
+      "p_ebc"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "EBC",
+      "txt": null,
+      "typepsc": "01",
+      "stypepsc": "00",
+      "nature": null,
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "01-00",
+     "libelle_cnig": "Espace boisé classé",
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 20.0,
+      "pct_cible": 0.2
+     },
+     "liens": [],
+     "flags": [],
+     "raison_ecart": "sous_seuil_0.5pct"
+    }
+   ],
+   "voisinage": []
+  },
+  {
+   "layer_key": "prescriptions_lin",
+   "display_name": "Prescriptions linéaires",
+   "famille": "prescription",
+   "geom_kind": "lin",
+   "typename": "wfs_du:prescription_lin",
+   "status": "intersected",
+   "elements_count": 2,
+   "elements": [
+    {
+     "element_id": "prescriptions_lin:1",
+     "source_ids": [
+      "l_tvb"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "Corridor",
+      "txt": null,
+      "typepsc": "25",
+      "stypepsc": "00",
+      "nature": null,
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "25-00",
+     "libelle_cnig": "Eléments de continuité écologique et trame verte et bleue",
+     "mesure": {
+      "position": "interieur",
+      "longueur_m": 100.0
+     },
+     "liens": [],
+     "flags": []
+    },
+    {
+     "element_id": "prescriptions_lin:2",
+     "source_ids": [
+      "l_haie"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "Haie à préserver",
+      "txt": null,
+      "typepsc": "07",
+      "stypepsc": "04",
+      "nature": null,
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "07-04",
+     "libelle_cnig": "Éléments de paysage, (sites et secteurs) à préserver pour des motifs d'ordre écologique",
+     "mesure": {
+      "position": "limite",
+      "longueur_m": 0.0,
+      "distance_m": 0.2
+     },
+     "liens": [],
+     "flags": []
+    }
+   ],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "prescriptions_pct",
+   "display_name": "Prescriptions ponctuelles",
+   "famille": "prescription",
+   "geom_kind": "pct",
+   "typename": "wfs_du:prescription_pct",
+   "status": "not_intersected",
+   "elements_count": 0,
+   "elements": [],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "infos_surf",
+   "display_name": "Informations surfaciques",
+   "famille": "information",
+   "geom_kind": "surf",
+   "typename": "wfs_du:info_surf",
+   "status": "intersected",
+   "elements_count": 1,
+   "elements": [
+    {
+     "element_id": "infos_surf:1",
+     "source_ids": [
+      "i_dpu"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "DPU",
+      "txt": null,
+      "typeinf": "04",
+      "stypeinf": "00",
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "04-00",
+     "libelle_cnig": "Périmètre de droit de préemption urbain",
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 10000.0,
+      "pct_cible": 100.0
+     },
+     "liens": [],
+     "flags": []
+    }
+   ],
+   "ecartes": [],
+   "voisinage": [
+    {
+     "element_id": "infos_surf:voisinage:1",
+     "source_ids": [
+      "i_zad"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "ZAD",
+      "txt": null,
+      "typeinf": "05",
+      "stypeinf": "00",
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "05-00",
+     "libelle_cnig": "Zone d'aménagement différé",
+     "mesure": {
+      "position": "voisinage",
+      "distance_m": 30.0
+     },
+     "liens": [],
+     "flags": []
+    }
+   ]
+  },
+  {
+   "layer_key": "infos_lin",
+   "display_name": "Informations linéaires",
+   "famille": "information",
+   "geom_kind": "lin",
+   "typename": "wfs_du:info_lin",
+   "status": "not_intersected",
+   "elements_count": 0,
+   "elements": [],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "infos_pct",
+   "display_name": "Informations ponctuelles",
+   "famille": "information",
+   "geom_kind": "pct",
+   "typename": "wfs_du:info_pct",
+   "status": "intersected",
+   "elements_count": 1,
+   "elements": [
+    {
+     "element_id": "infos_pct:1",
+     "source_ids": [
+      "i_archeo"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "libelle": "Site",
+      "txt": null,
+      "typeinf": "99",
+      "stypeinf": "00",
+      "nomfic": null,
+      "urlfic": null,
+      "idurba": "33234_PLU_20190702",
+      "partition": "DU_33234",
+      "datvalid": null,
+      "insee": "33234"
+     },
+     "code": "99-00",
+     "libelle_cnig": "Autre périmètre, secteur, plan, document, site, projet, espace.",
+     "mesure": {
+      "position": "interieur",
+      "nb_points": 1
+     },
+     "liens": [],
+     "flags": [
+      "code_generique_99"
+     ]
+    }
+   ],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "sup_assiette_s",
+   "display_name": "Servitudes (assiettes surfaciques)",
+   "famille": "servitude",
+   "geom_kind": "surf",
+   "typename": "wfs_sup:assiette_sup_s",
+   "status": "intersected",
+   "elements_count": 1,
+   "elements": [
+    {
+     "element_id": "sup_assiette_s:1",
+     "source_ids": [
+      "s_ac1"
+     ],
+     "nb_entites": 1,
+     "attributs": {
+      "suptype": "ac1",
+      "nomsuplitt": "Monuments historiques",
+      "nomass": "Périmètre église",
+      "typeass": null,
+      "idass": "A1",
+      "idgen": null,
+      "nomreg": null,
+      "urlreg": "https://ex/arrete.pdf",
+      "fichier": null,
+      "partition": null
+     },
+     "mesure": {
+      "position": "interieur",
+      "surface_m2": 10000.0,
+      "pct_cible": 100.0
+     },
+     "liens": [
+      {
+       "type": "acte_sup",
+       "url": "https://ex/arrete.pdf"
+      }
+     ],
+     "flags": []
+    }
+   ],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "sup_assiette_l",
+   "display_name": "Servitudes (assiettes linéaires)",
+   "famille": "servitude",
+   "geom_kind": "lin",
+   "typename": "wfs_sup:assiette_sup_l",
+   "status": "not_intersected",
+   "elements_count": 0,
+   "elements": [],
+   "ecartes": [],
+   "voisinage": []
+  },
+  {
+   "layer_key": "sup_assiette_p",
+   "display_name": "Servitudes (assiettes ponctuelles)",
+   "famille": "servitude",
+   "geom_kind": "pct",
+   "typename": "wfs_sup:assiette_sup_p",
+   "status": "not_intersected",
+   "elements_count": 0,
+   "elements": [],
+   "ecartes": [],
+   "voisinage": []
+  }
+ ],
+ "flags": [
+  "zonage_multiple"
+ ],
+ "score": {
+  "profil": "zones_humides",
+  "version_regles": "0.1.0",
+  "score_global": 79.6,
+  "score_avant_veto": 79.6,
+  "classe": "A",
+  "libelle_classe": "Très favorable",
+  "sous_scores": {
+   "perennite": {
+    "valeur": 84.5,
+    "base": 74.6,
+    "delta": 9.9,
+    "definition": "Risque qu'un usage concurrent (urbanisation, équipement, énergie, extraction) remette en cause la mesure sur 30 ans et plus"
+   },
+   "compatibilite": {
+    "valeur": 74.7,
+    "base": 80.0,
+    "delta": -5.3,
+    "definition": "Compatibilité réglementaire des travaux et de la gestion écologique (défrichement, affouillements, plantations, servitudes techniques)"
+   },
+   "synergie": {
+    "valeur": 82.6,
+    "base": 50.0,
+    "delta": 32.6,
+    "definition": "Alignement avec les politiques locales de biodiversité (TVB, renaturation, PAEN...) ; diminuée par les risques d'additionnalité (site déjà protégé)"
+   },
+   "maitrise": {
+    "valeur": 68.0,
+    "base": 80.0,
+    "delta": -12.0,
+    "definition": "Contraintes réglementaires sur l'acquisition ou la maîtrise d'usage (préemption, bénéficiaire public, propriété publique)"
+   }
+  },
+  "confiance": {
+   "valeur": 98.0,
+   "niveau": "haute",
+   "motifs": [
+    "1 élément(s) non interprété(s)"
+   ]
+  },
+  "vetos": [],
+  "contributions": [
+   {
+    "rule_id": "zonage_base",
+    "label": "Base de pérennité du zonage",
+    "source": "zonage",
+    "points": {
+     "perennite": 74.6
+    },
+    "facteur": 1.0,
+    "couverture_pct": 100.0,
+    "element_ids": [
+     "zonage_plu:1",
+     "zonage_plu:2"
+    ],
+    "fiabilite": "haute",
+    "conflits": [],
+    "detail": "A A 80 % + N Nzh 20 %",
+    "justification": "Moyenne des bases par type de zone, pondérée par la surface.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "psc_tvb",
+    "label": "Éléments de continuité écologique / trame verte et bleue",
+    "source": "element",
+    "points": {
+     "perennite": 10.0,
+     "synergie": 25.0
+    },
+    "facteur": 1.0,
+    "element_ids": [
+     "prescriptions_lin:1"
+    ],
+    "fiabilite": "haute",
+    "conflits": [],
+    "justification": "Le document identifie la parcelle comme élément de TVB : forte cohérence et argument d'instruction.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "inf_dpu",
+    "label": "Droit de préemption urbain",
+    "source": "element",
+    "points": {
+     "maitrise": -10.0
+    },
+    "facteur": 1.0,
+    "couverture_pct": 100.0,
+    "element_ids": [
+     "infos_surf:1"
+    ],
+    "fiabilite": "haute",
+    "conflits": [],
+    "justification": "Risque d'éviction lors de l'acquisition.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "psc_er_voirie",
+    "label": "Emplacement réservé — voirie",
+    "source": "element",
+    "points": {
+     "perennite": -3.0,
+     "maitrise": -2.0
+    },
+    "facteur": 0.1,
+    "couverture_pct": 10.0,
+    "element_ids": [
+     "prescriptions_surf:2"
+    ],
+    "fiabilite": "haute",
+    "conflits": [],
+    "justification": "Projet public d'infrastructure : incompatible avec une mesure sur l'emprise, et facteur de fragmentation.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "voisinage_continuite_naturelle",
+    "label": "Continuité naturelle dans un rayon de 200 m",
+    "source": "voisinage",
+    "points": {
+     "synergie": 3.7
+    },
+    "facteur": 1.0,
+    "element_ids": [],
+    "fiabilite": "haute",
+    "conflits": [],
+    "detail": "N 20.3 %, A 8.8 %",
+    "justification": "Une parcelle entourée de zones naturelles s'insère dans une continuité : meilleure fonctionnalité écologique de la mesure.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "sect_zone_humide",
+    "label": "Sous-secteur zone humide",
+    "source": "secteur",
+    "points": {
+     "perennite": 1.28,
+     "synergie": 2.4
+    },
+    "facteur": 0.16,
+    "couverture_pct": 20.0,
+    "element_ids": [
+     "zonage_plu:2"
+    ],
+    "fiabilite": "moyenne",
+    "conflits": [],
+    "detail": "Nzh (suffixe)",
+    "justification": "Zonage dédié aux zones humides : protection renforcée (pérennité) et cohérence directe avec une compensation ZH.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "voisinage_pression_urbaine",
+    "label": "Pression urbaine dans un rayon de 200 m",
+    "source": "voisinage",
+    "points": {
+     "perennite": -2.4
+    },
+    "facteur": 1.0,
+    "element_ids": [],
+    "fiabilite": "haute",
+    "conflits": [],
+    "detail": "U 9.7 %, AUc 0 %, AUs 0 %",
+    "justification": "Un front d'urbanisation proche augmente le risque de pression foncière, de fragmentation et de conflits d'usage sur 30 ans.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "psc_paysage_ecologique",
+    "label": "Élément de paysage à préserver pour motif écologique (L151-23)",
+    "source": "element",
+    "points": {
+     "perennite": 1.0,
+     "synergie": 1.5,
+     "compatibilite": -0.3
+    },
+    "facteur": 0.1,
+    "element_ids": [
+     "prescriptions_lin:2"
+    ],
+    "fiabilite": "haute",
+    "conflits": [],
+    "justification": "Le PLU reconnaît une valeur écologique au site : cohérence et argument d'instruction.",
+    "a_confirmer": false
+   },
+   {
+    "rule_id": "sup_ac1_mh",
+    "label": "AC1 — Monuments historiques (abords)",
+    "source": "element",
+    "points": {
+     "perennite": 3.0,
+     "compatibilite": -5.0
+    },
+    "facteur": 1.0,
+    "couverture_pct": 100.0,
+    "element_ids": [
+     "sup_assiette_s:1"
+    ],
+    "fiabilite": "haute",
+    "conflits": [],
+    "justification": "Contrainte procédurale légère.",
+    "a_confirmer": false
+   }
+  ],
+  "points_a_verifier": [
+   {
+    "rule_id": "sect_zone_humide",
+    "texte": "Secteur zone humide : si la ZH est déjà fonctionnelle et protégée, la préserver n'apporte pas de gain écologique (additionnalité). Intérêt si elle est dégradée et restaurable.",
+    "element_ids": [
+     "zonage_plu:2"
+    ]
+   },
+   {
+    "rule_id": "psc_er_voirie",
+    "texte": "ER voirie : l'emprise sera acquise par la collectivité. Vérifier l'emprise exacte et l'état d'avancement du projet.",
+    "element_ids": [
+     "prescriptions_surf:2"
+    ]
+   },
+   {
+    "rule_id": "psc_paysage_ecologique",
+    "texte": "Élément L151-23 : les travaux qui le modifient sont soumis à déclaration préalable ; lire les prescriptions associées.",
+    "element_ids": [
+     "prescriptions_lin:2"
+    ]
+   },
+   {
+    "rule_id": "inf_dpu",
+    "texte": "DPU : la commune peut préempter lors de la vente (DIA).",
+    "element_ids": [
+     "infos_surf:1"
+    ]
+   },
+   {
+    "rule_id": "sup_ac1_mh",
+    "texte": "Abords de MH : travaux modifiant l'aspect extérieur soumis à l'avis de l'ABF.",
+    "element_ids": [
+     "sup_assiette_s:1"
+    ]
+   }
+  ],
+  "interpretations": [
+   {
+    "element_id": "zonage_plu:1",
+    "layer_key": "zonage_plu",
+    "code": "A",
+    "libelle": "A",
+    "rule_id": "zonage:A",
+    "fiabilite": "haute",
+    "source": "code"
+   },
+   {
+    "element_id": "zonage_plu:2",
+    "layer_key": "zonage_plu",
+    "code": "N",
+    "libelle": "Nzh",
+    "rule_id": "zonage:N",
+    "fiabilite": "haute",
+    "source": "code"
+   },
+   {
+    "element_id": "prescriptions_surf:1",
+    "layer_key": "prescriptions_surf",
+    "code": "77-00",
+    "source": "aucun"
+   },
+   {
+    "element_id": "prescriptions_surf:2",
+    "layer_key": "prescriptions_surf",
+    "code": "05-01",
+    "libelle": "ER n°3 élargissement voie",
+    "rule_id": "psc_er_voirie",
+    "fiabilite": "haute",
+    "source": "code"
+   },
+   {
+    "element_id": "prescriptions_lin:1",
+    "layer_key": "prescriptions_lin",
+    "code": "25-00",
+    "libelle": "Corridor",
+    "rule_id": "psc_tvb",
+    "fiabilite": "haute",
+    "source": "code"
+   },
+   {
+    "element_id": "prescriptions_lin:2",
+    "layer_key": "prescriptions_lin",
+    "code": "07-04",
+    "libelle": "Haie à préserver",
+    "rule_id": "psc_paysage_ecologique",
+    "fiabilite": "haute",
+    "source": "code"
+   },
+   {
+    "element_id": "infos_surf:1",
+    "layer_key": "infos_surf",
+    "code": "04-00",
+    "libelle": "DPU",
+    "rule_id": "inf_dpu",
+    "fiabilite": "haute",
+    "source": "code"
+   },
+   {
+    "element_id": "infos_pct:1",
+    "layer_key": "infos_pct",
+    "code": "99-00",
+    "libelle": "Site",
+    "rule_id": "inf_autre",
+    "fiabilite": "moyenne",
+    "source": "code"
+   },
+   {
+    "element_id": "sup_assiette_s:1",
+    "layer_key": "sup_assiette_s",
+    "code": "ac1",
+    "libelle": "Monuments historiques",
+    "rule_id": "sup_ac1_mh",
+    "fiabilite": "haute",
+    "source": "code"
+   }
+  ],
+  "resume": [
+   "Zonage : A (A, 80 %), Nzh (N, 20 %)",
+   "Points défavorables : Droit de préemption urbain (-10) ; Emplacement réservé — voirie (-5) ; Pression urbaine dans un rayon de 200 m (-2)",
+   "Points favorables : Éléments de continuité écologique / trame verte et bleue (+35) ; Continuité naturelle dans un rayon de 200 m (+4) ; Sous-secteur zone humide (+4)",
+   "Score 80/100 (A — Très favorable), confiance haute (98/100)"
+  ]
+ }
+}

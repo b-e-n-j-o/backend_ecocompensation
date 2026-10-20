@@ -21,15 +21,15 @@ from typing import Awaitable, Callable
 
 from sqlalchemy import text
 
-from layers.compensation_zone_humide.aoi_to_bd_topo_et_cesbio import run as _run_bd_topo_et_cesbio
-from layers.filter_pipeline import FilterConfig, FilterPipelineResult, run as run_filter_pipeline
-from layers.layer_runner import LAYER_REGISTRY
+from api.recherche_de_foncier.filtrage.layers.compensation_zone_humide.aoi_to_bd_topo_et_cesbio import run as _run_bd_topo_et_cesbio
+from api.recherche_de_foncier.filtrage.layers.filter_pipeline import FilterConfig, FilterPipelineResult, run as run_filter_pipeline
+from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
 from orchestrator import UF_PHASE_KEYS, run_orchestration
-from layers.uf_profiling import build_uf_pool_with_profiling
-from pool import pool_service
-from pool.pool_service import persist_parcelles_pool_run
-from pool.profiler_registry import profiling_summary_label
-from pool.profiling_service import compute_metrics_for_run
+from api.recherche_de_foncier.filtrage.layers.uf_profiling import build_uf_pool_with_profiling
+from api.recherche_de_foncier.enrichir.pool import pool_service
+from api.recherche_de_foncier.enrichir.pool.pool_service import persist_parcelles_pool_run
+from api.recherche_de_foncier.enrichir.pool.profiler_registry import profiling_summary_label
+from api.recherche_de_foncier.enrichir.pool.profiling_service import compute_metrics_for_run
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,10 @@ def _filter_options_json(config: FilterConfig) -> dict:
         "excluded_layers": list(config.excluded_layers),
         "troncons_hydros_max_dist_m": config.troncons_hydros_max_dist_m,
         "surfaces_hydros_max_dist_m": config.surfaces_hydros_max_dist_m,
+        "same_bassin_versant": config.same_bassin_versant,
+        "arrachage_vignes": config.arrachage_vignes,
+        "arrachage_vignes_types": list(config.arrachage_vignes_types),
+        "include_unites_foncieres": config.include_unites_foncieres,
         "natura2000_mode": (
             "exclude" if "natura_2000" in config.excluded_layers else "ignore"
         ),
@@ -122,17 +126,19 @@ def _prefetch_map_display_layers(
     config: FilterConfig,
     log: Callable[[str], None] | None = None,
 ) -> None:
-    """Charge les couches SIG pour affichage carte (ZH, ENS, préemption…)."""
-    if config.search_mode != "within_foncier":
-        return
+    """Charge les couches SIG pour affichage carte, seulement si le critère est actif."""
     index = {cfg["key"]: cfg for cfg in LAYER_REGISTRY}
-    keys = ["zone_humide", "espaces_naturels_sensibles_ens", "preemption_ens"]
+    keys: list[str] = []
+    if config.zone_humide_mode in ("intersect", "exclude"):
+        keys.append("zone_humide")
     if config.zones_humides_probables_mode in ("intersect", "exclude"):
         keys.append("zones_humides_probables")
     if config.troncons_hydros_max_dist_m is not None:
         keys.append("troncons_hydros")
     if config.surfaces_hydros_max_dist_m is not None:
         keys.append("surfaces_hydros")
+    if config.search_mode == "within_foncier":
+        keys.extend(["espaces_naturels_sensibles_ens", "preemption_ens"])
 
     def _log(msg: str) -> None:
         if log:
@@ -388,8 +394,14 @@ def _persist_pipeline_results(
                 enrich["veg_libelles"] = p["veg_libelles"]
             if p.get("fauna_distances"):
                 enrich["fauna_distances"] = p["fauna_distances"]
-            if p.get("zone_humide_ha") is not None:
-                enrich["zone_humide_ha"] = p["zone_humide_ha"]
+            if config.zone_humide_mode in ("intersect", "exclude") and p.get("zone_humide_ha") is not None:
+                zh_ha = float(p["zone_humide_ha"] or 0)
+                enrich["zone_humide_ha"] = zh_ha
+                enrich["zone_humide_m2"] = round(zh_ha * 10_000.0, 1)
+                enrich["zone_humide_intersects"] = zh_ha > 0
+                surf = float(p.get("surface_ha") or 0)
+                if surf > 0:
+                    enrich["zone_humide_pct"] = round(min(100.0, zh_ha / surf * 100.0), 2)
             if p.get("dist_hydro_m") is not None:
                 enrich["dist_hydro_m"] = p["dist_hydro_m"]
             if p.get("troncons_hydro_info"):
@@ -814,8 +826,9 @@ async def run_filter_orchestration(
             total_s,
         )
         # UF personnes morales en arrière-plan (peut durer plusieurs minutes)
-        asyncio.create_task(
-            _run_uf_after_filter(engine, project_id, aoi_id, config, push)
-        )
+        if config.include_unites_foncieres:
+            asyncio.create_task(
+                _run_uf_after_filter(engine, project_id, aoi_id, config, push)
+            )
 
     return result

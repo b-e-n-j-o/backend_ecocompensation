@@ -52,24 +52,26 @@ from sqlalchemy import text
 
 # ── Modules métier ────────────────────────────────────────────────────────────
 from orchestrator import run_orchestration, fetch_project_two_phases
-from filter_orchestrator import FULL_PIPELINE_PHASES, run_filter_orchestration
-from layers.filter_pipeline import FaunaCriterion, FilterConfig, ensure_columns
-from layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
-from layers.layer_runner import LAYER_REGISTRY
+from filter_orchestrator import FULL_PIPELINE_PHASES, _run_uf_after_filter, run_filter_orchestration
+from api.recherche_de_foncier.filtrage.layers.filter_pipeline import FaunaCriterion, FilterConfig, ensure_columns
+from api.recherche_de_foncier.filtrage.layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
+from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
-from layers.enrich_uf import ensure_columns as ensure_uf_columns
-from layers.uf_profiling import build_uf_pool_with_profiling
-from routers.foncier_router import router as foncier_router
-from routers.pool_router import all_runs_router as pool_all_runs_router
-from routers.pool_router import router as pool_router
-from routers.results_geojson_router import router as results_geojson_router
-from routers.durete_router import router as durete_router
-from routers.cadastre_bbox_router import router as cadastre_bbox_router
-from exports.router_exports import router as exports_router
-from routers.rapport_router import router as rapport_router
-from routers.fauna_router import router as fauna_router
-from data_interne.router import router as data_interne_router
-from pool import pool_service
+from api.recherche_de_foncier.filtrage.layers.enrich_uf import ensure_columns as ensure_uf_columns
+from api.recherche_de_foncier.filtrage.layers.uf_profiling import build_uf_pool_with_profiling
+from api.recherche_de_foncier.routers.foncier_router import router as foncier_router
+from api.recherche_de_foncier.routers.pool_router import all_runs_router as pool_all_runs_router
+from api.recherche_de_foncier.routers.pool_router import router as pool_router
+from api.recherche_de_foncier.routers.results_geojson_router import router as results_geojson_router
+from api.recherche_de_foncier.routers.durete_router import router as durete_router
+from api.recherche_de_foncier.routers.autorisations_urba_router import router as autorisations_urba_router
+from api.recherche_de_foncier.routers.cadastre_bbox_router import router as cadastre_bbox_router
+from api.recherche_de_foncier.enrichir.pool.exports.router_exports import router as exports_router
+from api.recherche_de_foncier.routers.rapport_router import router as rapport_router
+from api.recherche_de_foncier.routers.fauna_router import router as fauna_router
+from api.reserve_fonciere.router import router as data_interne_router
+from api.reserve_fonciere.ajout_de_foncier.ajout_de_foncier_router import router as ajout_foncier_router
+from api.recherche_de_foncier.enrichir.pool import pool_service
 
 # ─────────────────────────────────────────────
 # Config
@@ -176,11 +178,13 @@ app.include_router(pool_router)
 app.include_router(pool_all_runs_router)
 app.include_router(results_geojson_router)
 app.include_router(durete_router)
+app.include_router(autorisations_urba_router)
 app.include_router(cadastre_bbox_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
 app.include_router(fauna_router, prefix="/api/fauna", tags=["fauna"])
 app.include_router(data_interne_router, prefix="/api/data-interne", tags=["data-interne"])
+app.include_router(ajout_foncier_router, prefix="/api/reserve-fonciere", tags=["ajout-foncier"])
 
 # Monte le backend Identité Foncière depuis le package local backend/identite_fonciere.
 # Le préfixe dédié évite de surcharger ce main.py avec ses routes métiers.
@@ -267,7 +271,7 @@ class FilterPipelineRequest(BaseModel):
     )
     excluded_layers: list[str] = Field(
         default_factory=lambda: list(DEFAULT_EXCLUDED_LAYERS),
-        description="Couches nationales dont l'intersection exclut la parcelle (geomce, preemption_ens, ens).",
+        description="Couches nationales à exclure (geomce, preemption_ens, ens, natura_2000, znieff_1, znieff_2, ebc). znieff_1 est dans le défaut. ebc = couverture totale.",
     )
     troncons_hydros_max_dist_m: float | None = Field(
         default=None,
@@ -280,6 +284,22 @@ class FilterPipelineRequest(BaseModel):
         ge=0,
         le=5000,
         description="Distance max (m) à une surface hydro ; null = critère ignoré.",
+    )
+    same_bassin_versant: bool = Field(
+        default=False,
+        description="Ne garder que les parcelles des bassins versants qui intersectent le foncier du projet.",
+    )
+    arrachage_vignes: bool = Field(
+        default=False,
+        description="Ne garder que les parcelles qui intersectent ecocompensation.arrachage_vignes.",
+    )
+    arrachage_vignes_types: list[str] = Field(
+        default_factory=list,
+        description="Valeurs de c_div_re_1. Liste vide = tous les types.",
+    )
+    include_unites_foncieres: bool = Field(
+        default=True,
+        description="Calcule aussi les unités foncières après le filtre parcelles.",
     )
 
 
@@ -796,6 +816,9 @@ def delete_project(project_id: str):
         "ecocompensation_results.sous_ensembles",     # ← nouveau
         "ecocompensation_results.parcelles_pool_indesirables",
         "ecocompensation_results.parcelles_project_indesirables",
+        "ecocompensation_results.parcelles_pool_metrics",
+        "ecocompensation_results.parcelles_pool",
+        "ecocompensation_results.parcelles_pool_runs",
     ]
     for t in RESULT_TABLES:
         try:
@@ -850,21 +873,6 @@ async def start_filter_pipeline(
         else "ignore"
     )
 
-    if study_type == "zones_humides_intra":
-        if (
-            zh_mode == "ignore"
-            and zhp_mode == "ignore"
-            and not body.fauna_criteria
-            and body.troncons_hydros_max_dist_m is None
-            and body.surfaces_hydros_max_dist_m is None
-        ):
-            raise HTTPException(
-                400,
-                "Sélectionnez au moins un critère zones humides, hydrographique ou faunistique.",
-            )
-    elif not body.cesbio_libelles and not body.fauna_criteria:
-        raise HTTPException(400, "Sélectionnez au moins un critère CESBIO ou Faune")
-
     aoi_id = str(proj["aoi_id"])
     config = FilterConfig(
         min_area_ha=body.min_area_ha,
@@ -886,6 +894,10 @@ async def start_filter_pipeline(
         ] or list(DEFAULT_EXCLUDED_LAYERS),
         troncons_hydros_max_dist_m=body.troncons_hydros_max_dist_m,
         surfaces_hydros_max_dist_m=body.surfaces_hydros_max_dist_m,
+        same_bassin_versant=body.same_bassin_versant,
+        arrachage_vignes=body.arrachage_vignes,
+        arrachage_vignes_types=[x.strip() for x in body.arrachage_vignes_types if x and str(x).strip()],
+        include_unites_foncieres=body.include_unites_foncieres,
     )
     _running_filters.add(project_id)
 
@@ -902,6 +914,69 @@ async def start_filter_pipeline(
             _running_filters.discard(project_id)
 
     background_tasks.add_task(_run)
+    return {"status": "started", "project_id": project_id}
+
+
+@app.post("/api/projects/{project_id}/filter-uf")
+async def start_uf_only(project_id: str):
+    """Relance uniquement les unités foncières avec les paramètres du dernier filtre."""
+    proj = _get_project(project_id)
+    if proj["status"] in ("fetching", "filtering") or project_id in _running_filters:
+        raise HTTPException(409, "Un calcul est déjà en cours pour ce projet")
+    raw = proj.get("last_filter") or proj.get("filter_config") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    if not isinstance(raw, dict) or not raw:
+        raise HTTPException(400, "Aucun paramètre de filtre enregistré pour ce projet")
+
+    fauna = []
+    for fc in raw.get("fauna_criteria") or []:
+        if not isinstance(fc, dict):
+            continue
+        species = str(fc.get("species") or "").strip()
+        if not species:
+            continue
+        dist = fc.get("dist_m")
+        fauna.append(FaunaCriterion(species=species, dist_m=float(dist) if dist is not None else 1000.0))
+
+    miller = raw.get("miller_thresh")
+    config = FilterConfig(
+        min_area_ha=float(raw.get("min_area_ha") or 7),
+        miller_thresh=None if miller is None else float(miller),
+        cesbio_libelles=[str(x).strip() for x in (raw.get("cesbio_libelles") or []) if str(x).strip()],
+        fauna_criteria=fauna,
+        search_mode=str(raw.get("search_mode") or "exclude_source_buffer"),
+        zone_humide_mode=str(raw.get("zone_humide_mode") or "ignore"),
+        zones_humides_probables_mode=str(raw.get("zones_humides_probables_mode") or "ignore"),
+        min_zone_humide_ha=float(raw.get("min_zone_humide_ha") or 0),
+        excluded_layers=[str(x).strip() for x in (raw.get("excluded_layers") or []) if str(x).strip()]
+        or list(DEFAULT_EXCLUDED_LAYERS),
+        troncons_hydros_max_dist_m=raw.get("troncons_hydros_max_dist_m"),
+        surfaces_hydros_max_dist_m=raw.get("surfaces_hydros_max_dist_m"),
+        same_bassin_versant=bool(raw.get("same_bassin_versant")),
+        arrachage_vignes=bool(raw.get("arrachage_vignes")),
+        arrachage_vignes_types=[str(x).strip() for x in (raw.get("arrachage_vignes_types") or []) if str(x).strip()],
+        include_unites_foncieres=True,
+    )
+    aoi_id = str(proj["aoi_id"])
+    _running_filters.add(project_id)
+
+    async def _run():
+        try:
+            await _run_uf_after_filter(
+                engine,
+                project_id,
+                aoi_id,
+                config,
+                lambda d: ws_manager.broadcast(project_id, d),
+            )
+        finally:
+            _running_filters.discard(project_id)
+
+    asyncio.create_task(_run())
     return {"status": "started", "project_id": project_id}
 
 
