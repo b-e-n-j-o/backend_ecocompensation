@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
@@ -300,7 +301,7 @@ def _run_durete_job(
 
 
 @router.post("/{project_id}/pool/runs/{run_id}/recompute-durete", status_code=status.HTTP_202_ACCEPTED)
-def recompute_durete(
+async def recompute_durete(
     project_id: str,
     run_id: str,
     body: DureteRecomputeBody | None = Body(default=None),
@@ -311,21 +312,24 @@ def recompute_durete(
     Réponse 202 + job_id : poller GET .../recompute-durete/jobs/{job_id}.
     Évite le 502 Render (timeout proxy ~100s, headers CORS absents → « Failed to fetch »).
     """
-    if not _project_exists(project_id):
-        raise HTTPException(404, f"Projet {project_id} introuvable")
-    try:
-        uuid.UUID(str(run_id))
-    except ValueError:
-        raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
+    def _prepare() -> None:
+        if not _project_exists(project_id):
+            raise HTTPException(404, f"Projet {project_id} introuvable")
+        try:
+            uuid.UUID(str(run_id))
+        except ValueError:
+            raise HTTPException(400, f"run_id invalide (UUID attendu): {run_id}")
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            if not pool_service.run_belongs_to_project(conn, project_id, run_id):
+                raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+
+    await asyncio.to_thread(_prepare)
     only_idus: set[str] | None = None
     if body and body.idus:
         only_idus = {str(x).strip() for x in body.idus if str(x).strip()}
         if not only_idus:
             only_idus = None
-    with engine.begin() as conn:
-        pool_service.ensure_tables(conn)
-        if not pool_service.run_belongs_to_project(conn, project_id, run_id):
-            raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
     job_id = str(uuid.uuid4())
     with _durete_jobs_lock:
         _durete_jobs[job_id] = {
@@ -338,13 +342,13 @@ def recompute_durete(
             "total_idus": len(only_idus) if only_idus is not None else None,
             "remaining_idus": len(only_idus) if only_idus is not None else None,
         }
-    thread = threading.Thread(
-        target=_run_durete_job,
+    # Démarrer après l'envoi du 202 : un thread immédiat peut tuer le worker
+    # (OOM dureté) avant que Render n'ait renvoyé la réponse → 502 sans CORS.
+    threading.Timer(
+        0.25,
+        _run_durete_job,
         args=(job_id, project_id, run_id, only_idus),
-        name=f"durete-{job_id[:8]}",
-        daemon=True,
-    )
-    thread.start()
+    ).start()
     return {
         "status": "accepted",
         "job_id": job_id,

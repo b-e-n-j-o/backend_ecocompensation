@@ -190,11 +190,21 @@ def _cors_headers_for_request(request: Request) -> dict[str, str]:
     }
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_cors_handler(request: Request, exc: HTTPException):
+    """404/400 FastAPI avec CORS (évite un faux « blocked by CORS » dans le navigateur)."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers={**_cors_headers_for_request(request), **(exc.headers or {})},
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """500 FastAPI avec CORS (le 502 Render, lui, reste hors app)."""
     if isinstance(exc, HTTPException):
-        raise exc
+        return await http_exception_cors_handler(request, exc)
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
