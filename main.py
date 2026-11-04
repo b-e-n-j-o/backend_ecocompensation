@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,10 +43,11 @@ import geopandas as gpd
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import (
-    FastAPI, HTTPException, UploadFile, File, Form, Query,
+    FastAPI, HTTPException, Request, UploadFile, File, Form, Query,
     WebSocket, WebSocketDisconnect, BackgroundTasks,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -172,6 +174,33 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Rapport-Rss-Delta-Mb"],
 )
+
+
+def _cors_headers_for_request(request: Request) -> dict[str, str]:
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    allowed = origin in _parse_cors_origins() or bool(
+        re.fullmatch(_cors_origin_regex(), origin)
+    )
+    if not origin or not allowed:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+    }
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """500 FastAPI avec CORS (le 502 Render, lui, reste hors app)."""
+    if isinstance(exc, HTTPException):
+        raise exc
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Erreur interne du serveur"},
+        headers=_cors_headers_for_request(request),
+    )
 
 app.include_router(foncier_router, prefix="/api/foncier")
 app.include_router(pool_router)

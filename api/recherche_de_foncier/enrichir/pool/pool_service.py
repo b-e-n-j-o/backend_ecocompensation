@@ -599,7 +599,7 @@ def get_all_metrics_grouped_by_idu(conn, project_id: str, run_id: str) -> dict[s
     ).mappings().all()
     by_idu: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        idu = str(r["idu"])
+        idu = str(r["idu"]).strip()
         by_idu.setdefault(idu, []).append(
             {
                 "metric_key": r["metric_key"],

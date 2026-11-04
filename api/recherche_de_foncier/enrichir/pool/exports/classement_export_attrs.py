@@ -60,6 +60,7 @@ EXPORT_ATTR_KEYS: tuple[str, ...] = (
     "faune_txt",
     "cesbio",
     "occ_sol",
+    "occ_json",
     "zh",
     "rem_nappe",
     "ebc",
@@ -204,6 +205,21 @@ def _cesbio_labels(enrich: dict[str, Any]) -> str:
     return ", ".join(labels)
 
 
+def _ratio_float(raw: Any) -> float | None:
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        fv = float(raw)
+    else:
+        try:
+            fv = float(str(raw).replace(",", ".").strip())
+        except (TypeError, ValueError):
+            return None
+    if math.isfinite(fv) and fv > 0:
+        return fv
+    return None
+
+
 def ratios_from_cesbio_profile(profile: dict[str, Any]) -> dict[str, float]:
     """
     Convertit la métrique `cesbio_profile` ({libelle: {area_m2, pct}})
@@ -218,11 +234,9 @@ def ratios_from_cesbio_profile(profile: dict[str, Any]) -> dict[str, float]:
             continue
         pct: float | None = None
         if isinstance(item, dict):
-            raw = item.get("pct")
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
-                pct = float(raw)
-        elif isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)):
-            pct = float(item)
+            pct = _ratio_float(item.get("pct"))
+        else:
+            pct = _ratio_float(item)
         if pct is None or pct <= 0:
             continue
         # pct CESBIO = % parcelle (0–100) ; déjà 0–1 si valeur ≤ 1.
@@ -233,17 +247,15 @@ def ratios_from_cesbio_profile(profile: dict[str, Any]) -> dict[str, float]:
 
 
 def occ_sol_ratios(mmap: dict[str, Any]) -> dict[str, float]:
-    """Parts d'occupation du sol 0–1 : hybride ZH en priorité, sinon CESBIO faune."""
+    """Parts d'occupation du sol 0–1 : végétation hybride (BD TOPO + CESBIO), sinon profil CESBIO."""
     veg_h = mmap.get("vegetation_hybride_ratio") or {}
     hyb = veg_h.get("ratios") if isinstance(veg_h, dict) else None
     if isinstance(hyb, dict) and hyb:
         out: dict[str, float] = {}
         for label, raw in hyb.items():
             name = str(label or "").strip()
-            if not name or not isinstance(raw, (int, float)) or isinstance(raw, bool):
-                continue
-            fv = float(raw)
-            if math.isfinite(fv) and fv > 0:
+            fv = _ratio_float(raw)
+            if name and fv is not None:
                 out[name] = round(fv, 6)
         if out:
             return out
@@ -251,6 +263,48 @@ def occ_sol_ratios(mmap: dict[str, Any]) -> dict[str, float]:
     if isinstance(profile, dict):
         return ratios_from_cesbio_profile(profile)
     return {}
+
+
+def format_occ_sol_compact(ratios: dict[str, float], *, max_len: int | None = None) -> str:
+    """Répartition lisible QGIS : « Prairie — 42 % ; Forêt — 31 % », classes triées décroissant."""
+    items: list[tuple[str, float]] = []
+    for label, ratio in ratios.items():
+        name = str(label or "").strip()
+        fv = _ratio_float(ratio)
+        if not name or fv is None:
+            continue
+        items.append((name, fv))
+    items.sort(key=lambda x: -x[1])
+    parts: list[str] = []
+    for name, fv in items:
+        pct = fv * 100.0 if fv <= 1.0 else fv
+        if pct < 1.0:
+            continue
+        pct_s = f"{pct:.0f}" if pct >= 10 else f"{pct:.1f}"
+        parts.append(f"{name} — {pct_s} %")
+    if not parts and items:
+        name, fv = items[0]
+        pct = fv * 100.0 if fv <= 1.0 else fv
+        pct_s = f"{pct:.1f}"
+        parts.append(f"{name} — {pct_s} %")
+    if not parts:
+        return ""
+    if max_len is None or max_len <= 0:
+        return " ; ".join(parts)
+    kept: list[str] = []
+    for part in parts:
+        candidate = " ; ".join(kept + [part])
+        if len(candidate) <= max_len:
+            kept.append(part)
+            continue
+        ellipsis = " ; …" if kept else "…"
+        budget = max_len - len(" ; ".join(kept)) - len(ellipsis)
+        if not kept and budget > 8:
+            return part[: max_len - 1] + "…"
+        if kept and len(" ; ".join(kept) + ellipsis) <= max_len:
+            return " ; ".join(kept) + ellipsis
+        return " ; ".join(kept)[:max_len]
+    return " ; ".join(kept)
 
 
 def _clip_text(text: str, *, clip: bool) -> str:
@@ -328,9 +382,11 @@ def build_parcelle_export_row(
 
     cesbio = _cesbio_labels(enrich)
     occ_ratios = occ_sol_ratios(mmap)
-    if occ_ratios:
-        occ_sol = json.dumps(occ_ratios, ensure_ascii=False, separators=(",", ":"))
-    else:
+    occ_json = (
+        json.dumps(occ_ratios, ensure_ascii=False, separators=(",", ":")) if occ_ratios else ""
+    )
+    occ_sol = format_occ_sol_compact(occ_ratios, max_len=254 if clip_for_shapefile else None)
+    if not occ_sol:
         occ_sol = cesbio
 
     pm_hit = pm.get("intersects_pm_database") is True
@@ -439,6 +495,7 @@ def build_parcelle_export_row(
         "faune_txt": _clip_text(faune_txt, clip=clip),
         "cesbio": _clip_text(cesbio, clip=clip),
         "occ_sol": _clip_text(occ_sol, clip=clip),
+        "occ_json": _clip_text(occ_json, clip=clip),
         "zh": zh_txt,
         "rem_nappe": str(remontee_str)[:254],
         "ebc": ebc_mode[:254],
@@ -473,9 +530,10 @@ def mmap_for_parcelle(
     parcelle: dict[str, Any],
     metrics_by_idu: dict[str, list[dict[str, Any]]] | None,
 ) -> dict[str, Any]:
-    idu = str(parcelle.get("idu") or "")
+    idu = str(parcelle.get("idu") or "").strip()
     by_idu = metrics_by_idu or {}
-    mmap = metrics_rows_to_map(by_idu.get(idu) or [])
+    rows = by_idu.get(idu) or by_idu.get(str(parcelle.get("idu") or "")) or []
+    mmap = metrics_rows_to_map(rows)
     # Fallback si le run n'a pas (encore) de métrique filter_enrich : champs déjà sur la parcelle.
     if not mmap.get("filter_enrich"):
         enrich: dict[str, Any] = {}

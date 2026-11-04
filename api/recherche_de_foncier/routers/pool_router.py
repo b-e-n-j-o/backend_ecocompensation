@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
 import uuid
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -15,6 +17,12 @@ from api.recherche_de_foncier.enrichir.pool.map_overlay import build_pool_map_ov
 router = APIRouter(prefix="/api/projects", tags=["pool"])
 all_runs_router = APIRouter(prefix="/api/pool", tags=["pool"])
 engine = get_engine()
+logger = logging.getLogger(__name__)
+
+# Jobs dureté en mémoire (évite le timeout HTTP Render ~100s / 502 sans CORS).
+_durete_jobs: dict[str, dict] = {}
+_durete_jobs_lock = threading.Lock()
+_DURETE_JOBS_MAX = 50
 
 
 def _project_exists(project_id: str) -> bool:
@@ -232,18 +240,76 @@ def recompute_metrics(project_id: str, run_id: str, score_only: bool = Query(Fal
     return {"status": "ok", "project_id": project_id, "run_id": run_id, "mode": "all_metrics"}
 
 
-@router.post("/{project_id}/pool/runs/{run_id}/recompute-durete")
+def _prune_durete_jobs() -> None:
+    if len(_durete_jobs) <= _DURETE_JOBS_MAX:
+        return
+    done = [
+        k
+        for k, v in _durete_jobs.items()
+        if v.get("status") in {"ok", "error"}
+    ]
+    for k in done[: max(0, len(_durete_jobs) - _DURETE_JOBS_MAX)]:
+        _durete_jobs.pop(k, None)
+
+
+def _patch_durete_job(job_id: str, **fields) -> None:
+    with _durete_jobs_lock:
+        current = _durete_jobs.get(job_id)
+        if not current:
+            return
+        current.update(fields)
+
+
+def _run_durete_job(
+    job_id: str,
+    project_id: str,
+    run_id: str,
+    only_idus: set[str] | None,
+) -> None:
+    def on_progress(info: dict) -> None:
+        _patch_durete_job(job_id, **info)
+
+    try:
+        # connect() + commits internes : pas de transaction ouverte pendant le LLM.
+        with engine.connect() as conn:
+            pool_service.ensure_tables(conn)
+            stats = profiling_service.compute_durete_for_run(
+                conn,
+                project_id=project_id,
+                run_id=run_id,
+                exclude_indesirables=True,
+                only_idus=only_idus,
+                on_progress=on_progress,
+            )
+        _patch_durete_job(
+            job_id,
+            status="ok",
+            metric_key="durete_fonciere",
+            **stats,
+        )
+        with _durete_jobs_lock:
+            _prune_durete_jobs()
+    except Exception as exc:
+        logger.exception("DURETE JOB FAIL | job_id=%s project_id=%s run_id=%s", job_id, project_id, run_id)
+        _patch_durete_job(
+            job_id,
+            status="error",
+            metric_key="durete_fonciere",
+            error=str(exc) or type(exc).__name__,
+        )
+
+
+@router.post("/{project_id}/pool/runs/{run_id}/recompute-durete", status_code=status.HTTP_202_ACCEPTED)
 def recompute_durete(
     project_id: str,
     run_id: str,
     body: DureteRecomputeBody | None = Body(default=None),
 ):
     """
-    Calcule la dureté foncière (attractivité) pour le pool du run,
-    ou seulement les IDU fournis dans le body.
+    Lance le calcul de dureté foncière en arrière-plan (LLM long).
 
-    Les parcelles marquées indésirables au niveau projet sont exclues du calcul.
-    Rafraîchit aussi les métriques PM et le score composite.
+    Réponse 202 + job_id : poller GET .../recompute-durete/jobs/{job_id}.
+    Évite le 502 Render (timeout proxy ~100s, headers CORS absents → « Failed to fetch »).
     """
     if not _project_exists(project_id):
         raise HTTPException(404, f"Projet {project_id} introuvable")
@@ -260,20 +326,43 @@ def recompute_durete(
         pool_service.ensure_tables(conn)
         if not pool_service.run_belongs_to_project(conn, project_id, run_id):
             raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
-        stats = profiling_service.compute_durete_for_run(
-            conn,
-            project_id=project_id,
-            run_id=run_id,
-            exclude_indesirables=True,
-            only_idus=only_idus,
-        )
+    job_id = str(uuid.uuid4())
+    with _durete_jobs_lock:
+        _durete_jobs[job_id] = {
+            "status": "running",
+            "project_id": project_id,
+            "run_id": run_id,
+            "metric_key": "durete_fonciere",
+            "phase": "queued",
+            "done_idus": 0,
+            "total_idus": len(only_idus) if only_idus is not None else None,
+            "remaining_idus": len(only_idus) if only_idus is not None else None,
+        }
+    thread = threading.Thread(
+        target=_run_durete_job,
+        args=(job_id, project_id, run_id, only_idus),
+        name=f"durete-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
     return {
-        "status": "ok",
+        "status": "accepted",
+        "job_id": job_id,
         "project_id": project_id,
         "run_id": run_id,
         "metric_key": "durete_fonciere",
-        **stats,
     }
+
+
+@router.get("/{project_id}/pool/runs/{run_id}/recompute-durete/jobs/{job_id}")
+def recompute_durete_job(project_id: str, run_id: str, job_id: str):
+    with _durete_jobs_lock:
+        job = _durete_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job dureté introuvable (expiré ou autre instance)")
+    if job.get("project_id") != project_id or job.get("run_id") != run_id:
+        raise HTTPException(404, "Job dureté introuvable pour ce run")
+    return job
 
 
 @router.post("/{project_id}/pool/runs/{run_id}/recompute-urbanisme")

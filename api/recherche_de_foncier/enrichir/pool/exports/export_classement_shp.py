@@ -15,13 +15,20 @@ Le SHP à côté reste une copie tronquée (limite DBF 254 c.) pour compatibilit
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import geopandas as gpd
 from sqlalchemy import text
 
-from api.recherche_de_foncier.enrichir.pool.exports.classement_export_attrs import build_parcelle_export_row, mmap_for_parcelle
+from api.recherche_de_foncier.enrichir.pool.exports.classement_export_attrs import (
+    build_parcelle_export_row,
+    mmap_for_parcelle,
+    occ_sol_ratios,
+)
+
+logger = logging.getLogger(__name__)
 from api.recherche_de_foncier.enrichir.pool.exports.project_context_layers import load_project_context_layers, write_geopackage_etude
 from api.recherche_de_foncier.enrichir.pool.exports.qgis_encoding import write_geodataframe_shapefile_qgis
 
@@ -73,6 +80,7 @@ def export_classement_shp(
     geoms = []
     rows_shp: list[dict[str, Any]] = []
     rows_gpkg: list[dict[str, Any]] = []
+    n_occ_sol = 0
 
     for p in parcelles:
         idu = p.get("idu")
@@ -84,6 +92,8 @@ def export_classement_shp(
 
         geoms.append(geom)
         mmap = mmap_for_parcelle(p, metrics_by_idu)
+        if occ_sol_ratios(mmap):
+            n_occ_sol += 1
         rows_shp.append(build_parcelle_export_row(p, mmap, options, clip_for_shapefile=True))
         rows_gpkg.append(build_parcelle_export_row(p, mmap, options, clip_for_shapefile=False))
 
@@ -91,6 +101,21 @@ def export_classement_shp(
         raise ValueError(
             "Aucune géométrie parcelle trouvée en base pour ce classement. "
             "Vérifiez que les parcelles sont bien chargées (couche parcelles / même projet ou AOI)."
+        )
+
+    if n_occ_sol == 0:
+        logger.warning(
+            "Export classement : aucune répartition d'occupation du sol "
+            "(vegetation_hybride_ratio / cesbio_profile) pour %d parcelles (project_id=%s).",
+            len(geoms),
+            project_id,
+        )
+    else:
+        logger.info(
+            "Export classement : occupation du sol renseignée pour %d/%d parcelles (project_id=%s).",
+            n_occ_sol,
+            len(geoms),
+            project_id,
         )
 
     gdf_shp = gpd.GeoDataFrame(

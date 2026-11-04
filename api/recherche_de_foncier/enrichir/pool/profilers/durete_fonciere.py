@@ -4,6 +4,7 @@ import logging
 import math
 import os
 from collections import defaultdict
+from collections.abc import Callable
 
 from sqlalchemy import text
 
@@ -232,6 +233,7 @@ class DureteFonciereProfiler(BasePoolProfiler):
         run_id: str,
         *,
         only_idus: set[str] | None = None,
+        on_payloads: Callable[[dict[str, dict]], None] | None = None,
     ) -> dict[str, dict]:
         progress_logs = _durete_progress_enabled()
         verbose_pipeline = _durete_verbose_pipeline_enabled()
@@ -345,6 +347,19 @@ class DureteFonciereProfiler(BasePoolProfiler):
                 len(group_to_idus),
             )
 
+        # Relâche la transaction pgBouncer avant les appels LLM (minutes).
+        try:
+            conn.commit()
+        except Exception:
+            pass
+
+        def emit(part: dict[str, dict]) -> None:
+            if on_payloads and part:
+                on_payloads(part)
+
+        # Skips / PM publiques : visibles tout de suite dans le tableau.
+        emit({idu: payload[idu] for idu in payload})
+
         total_groups = len(group_to_idus)
         for group_idx, (group_key, idus_for_siren) in enumerate(group_to_idus.items(), 1):
             meta = group_to_meta.get(group_key, {})
@@ -363,6 +378,10 @@ class DureteFonciereProfiler(BasePoolProfiler):
 
             # ── 1) Tentative cache SIREN ──────────────────────────────────────
             res = get_cached_siren(conn, siren)
+            try:
+                conn.commit()
+            except Exception:
+                pass
             if res is not None:
                 if progress_logs:
                     logger.info(
@@ -421,6 +440,7 @@ class DureteFonciereProfiler(BasePoolProfiler):
                                 idu,
                                 siren,
                             )
+                    emit({idu: payload[idu] for idu in idus_for_siren})
                     continue
 
                 # ── 3) Cache write non bloquant ──────────────────────────────
@@ -432,12 +452,17 @@ class DureteFonciereProfiler(BasePoolProfiler):
                         denomination=meta.get("denomination", ""),
                         forme_juridique=meta.get("forme_juridique", ""),
                     )
+                    conn.commit()
                 except Exception:
                     logger.warning(
                         "DURETE CACHE WRITE FAIL | siren=%s — résultat LLM utilisé quand même",
                         siren,
                         exc_info=True,
                     )
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
             sf_raw = _normalize_score_final(res.get("score_final"))
             warnings = res.get("avertissements", []) or []
@@ -497,6 +522,8 @@ class DureteFonciereProfiler(BasePoolProfiler):
                         sf_final,
                         bool(res.get("_from_cache")),
                     )
+
+            emit({idu: payload[idu] for idu in idus_for_siren})
 
         if progress_logs:
             logger.info(

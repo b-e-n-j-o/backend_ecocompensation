@@ -253,13 +253,16 @@ def _occ_sol_dict(value) -> dict | None:
     return None
 
 
-def _format_occ_sol_paragraph(value) -> str:
+def _format_occ_sol_paragraph(value, occ_json=None) -> str:
     """
     Occupation du sol : libellés avec part ≥ 2 % sur la parcelle, tri décroissant.
     Sortie mini-HTML pour ReportLab Paragraph.
     """
-    d = _occ_sol_dict(value)
+    d = _occ_sol_dict(occ_json) or _occ_sol_dict(value)
     if not d:
+        if isinstance(value, str) and "—" in value.strip():
+            parts = [p.strip() for p in value.split(";") if p.strip()]
+            return "<br/>".join(xml_esc.escape(p) for p in parts) if parts else "—"
         return "—"
     items: list[tuple[float, str]] = []
     for label, raw_v in d.items():
@@ -362,7 +365,12 @@ def _tableau_resultats_eco(gdf: gpd.GeoDataFrame, styles: dict, width_pt: float)
         row_cells: list[Paragraph] = []
         for key, _h in specs:
             if key == _COL_OCC_SOL:
-                row_cells.append(Paragraph(_format_occ_sol_paragraph(row.get("occ_sol")), td_occ))
+                row_cells.append(
+                    Paragraph(
+                        _format_occ_sol_paragraph(row.get("occ_sol"), row.get("occ_json")),
+                        td_occ,
+                    )
+                )
             elif key == eco_col:
                 row_cells.append(Paragraph(_format_eco_table_cell(key, row.get(key)), td_score_eco))
             elif key == "rang":

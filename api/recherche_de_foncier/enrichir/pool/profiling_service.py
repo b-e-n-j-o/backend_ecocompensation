@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 
 from sqlalchemy import text
 
@@ -144,6 +145,7 @@ def compute_durete_for_run(
     *,
     exclude_indesirables: bool = True,
     only_idus: set[str] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """
     Calcule la dureté foncière (attractivité) pour les parcelles du run pool.
@@ -157,6 +159,10 @@ def compute_durete_for_run(
     pool_service.ensure_tables(conn)
     try:
         conn.execute(text("SET LOCAL statement_timeout = '30min'"))
+    except Exception:
+        pass
+    try:
+        conn.commit()
     except Exception:
         pass
 
@@ -179,8 +185,12 @@ def compute_durete_for_run(
         requested_count = len(requested)
         active_idus = active_idus & requested
 
+    def progress(**kwargs) -> None:
+        if on_progress:
+            on_progress(kwargs)
+
     if not active_idus:
-        return {
+        empty = {
             "updated_count": 0,
             "active_idus": 0,
             "requested_idus": requested_count,
@@ -188,20 +198,63 @@ def compute_durete_for_run(
             "eligible_pm": 0,
             "composite_updated": 0,
             "duration_s": round(time.perf_counter() - t0, 2),
+            "done_idus": 0,
+            "total_idus": 0,
+            "remaining_idus": 0,
+            "phase": "done",
         }
+        progress(**empty)
+        return empty
+
+    total_idus = len(active_idus)
+    progress(
+        phase="pm",
+        done_idus=0,
+        total_idus=total_idus,
+        remaining_idus=total_idus,
+        active_idus=total_idus,
+        requested_idus=requested_count,
+        skipped_indesirables=skipped_indesirables,
+    )
 
     pm_profiler = PersonnesMoralesProfiler()
     pm_payload = pm_profiler.compute_for_run(conn, project_id, run_id)
     pm_upserts = _upsert_profiler_payload(
         conn, project_id, run_id, pm_profiler.metric_key, pm_payload
     )
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+    durete_upserts = 0
+
+    def flush_durete(part: dict) -> None:
+        nonlocal durete_upserts
+        n = _upsert_profiler_payload(
+            conn, project_id, run_id, "durete_fonciere", part
+        )
+        durete_upserts += n
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        done = min(durete_upserts, total_idus)
+        progress(
+            phase="scoring",
+            done_idus=done,
+            total_idus=total_idus,
+            remaining_idus=max(0, total_idus - done),
+            updated_count=durete_upserts,
+            active_idus=total_idus,
+            requested_idus=requested_count,
+            skipped_indesirables=skipped_indesirables,
+            pm_upserts=pm_upserts,
+        )
 
     durete_profiler = DureteFonciereProfiler()
     durete_payload = durete_profiler.compute_for_run(
-        conn, project_id, run_id, only_idus=active_idus
-    )
-    durete_upserts = _upsert_profiler_payload(
-        conn, project_id, run_id, durete_profiler.metric_key, durete_payload
+        conn, project_id, run_id, only_idus=active_idus, on_payloads=flush_durete
     )
 
     eligible_pm = sum(
@@ -210,11 +263,24 @@ def compute_durete_for_run(
         if (durete_payload.get(idu) or {}).get("eligible") is True
     )
 
+    progress(
+        phase="composite",
+        done_idus=total_idus,
+        total_idus=total_idus,
+        remaining_idus=0,
+        updated_count=durete_upserts,
+        active_idus=total_idus,
+    )
+
     composite_profiler = CompositeScoreV1Profiler()
     composite_payload = composite_profiler.compute_for_run(conn, project_id, run_id)
     composite_upserts = _upsert_profiler_payload(
         conn, project_id, run_id, composite_profiler.metric_key, composite_payload
     )
+    try:
+        conn.commit()
+    except Exception:
+        pass
 
     duration_s = round(time.perf_counter() - t0, 2)
     logger.info(
@@ -239,6 +305,10 @@ def compute_durete_for_run(
         "pm_upserts": pm_upserts,
         "composite_updated": composite_upserts,
         "duration_s": duration_s,
+        "done_idus": total_idus,
+        "total_idus": total_idus,
+        "remaining_idus": 0,
+        "phase": "done",
     }
 
 
