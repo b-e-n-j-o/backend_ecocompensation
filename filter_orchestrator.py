@@ -86,9 +86,21 @@ def _tile_fields_from_log(msg: str) -> dict:
     return extra
 
 
-def _filter_options_json(config: FilterConfig) -> dict:
+def _aoi_buffer_km(engine, aoi_id: str) -> float:
+    with engine.connect() as conn:
+        raw = conn.execute(
+            text("SELECT buffer_m FROM ecocompensation.aoi WHERE id = CAST(:aid AS uuid)"),
+            {"aid": aoi_id},
+        ).scalar()
+    if raw is None:
+        return 0.0
+    return round(float(raw) / 1000.0, 3)
+
+
+def _filter_options_json(config: FilterConfig, *, buffer_km: float = 0.0) -> dict:
     return {
         "pipeline": "filter_v2",
+        "buffer_km": buffer_km,
         "search_mode": config.search_mode,
         "min_area_ha": config.min_area_ha,
         "miller_thresh": config.miller_thresh,
@@ -97,6 +109,7 @@ def _filter_options_json(config: FilterConfig) -> dict:
             {"species": fc.species, "dist_m": fc.dist_m}
             for fc in config.fauna_criteria
         ],
+        "fauna_combine": "and" if str(config.fauna_combine).lower() == "and" else "or",
         "zone_humide_mode": config.zone_humide_mode,
         "zones_humides_probables_mode": config.zones_humides_probables_mode,
         "min_zone_humide_ha": config.min_zone_humide_ha,
@@ -327,27 +340,39 @@ def _persist_pipeline_results(
         })
 
     funnel: list[dict] = []
-    if result.n_tiled > 0:
+    pipeline_starts_at_area = bool(
+        result.funnel
+        and (
+            result.funnel[0].get("key") == "min_area_ha"
+            or str(result.funnel[0].get("label", "")).startswith("Candidats")
+        )
+    )
+    if result.n_tiled > 0 and not pipeline_starts_at_area:
         funnel.append({
             "step": 0,
+            "key": "min_area_ha",
             "label": f"Candidats (≥{config.min_area_ha} ha)",
             "count": result.n_tiled,
         })
     if result.funnel:
         offset = len(funnel)
         for step in result.funnel:
-            funnel.append({
+            item = {
                 "step": offset + int(step.get("step", 0)),
                 "label": str(step.get("label", "")),
                 "count": int(step.get("count", 0)),
-            })
+            }
+            if step.get("key"):
+                item["key"] = str(step["key"])
+            funnel.append(item)
     elif result.n_after_filter >= 0:
         funnel.append({
             "step": len(funnel),
             "label": "Après filtrage écologique",
             "count": result.n_after_filter,
         })
-    options_json = _filter_options_json(config)
+    buffer_km = _aoi_buffer_km(engine, aoi_id)
+    options_json = _filter_options_json(config, buffer_km=buffer_km)
     result_summary = {
         "pipeline": "filter_v2",
         "n_tiled": result.n_tiled,
@@ -355,6 +380,8 @@ def _persist_pipeline_results(
         "n_purged": result.n_purged,
         "duration_s": result.duration_s,
         "funnel": funnel,
+        "filter_config": options_json,
+        "final_radius_km": buffer_km,
     }
 
     pool_parcelles = [
@@ -424,12 +451,13 @@ def _persist_pipeline_results(
 
     last_results = {
         "total": len(parcelles),
-        "final_radius_km": 0.0,
+        "final_radius_km": buffer_km,
         "parcelles": [
             {k: v for k, v in p.items() if k not in ("veg_libelles", "fauna_distances")}
             for p in parcelles
         ],
         "funnel": funnel,
+        "filter_config": options_json,
         "pool_run_id": run_id,
         "pipeline": "filter_v2",
     }

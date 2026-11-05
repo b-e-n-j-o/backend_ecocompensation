@@ -66,6 +66,8 @@ class FilterConfig:
     miller_thresh: float | None = None
     cesbio_libelles: list[str] = field(default_factory=list)
     fauna_criteria: list[FaunaCriterion] = field(default_factory=list)
+    """Combinaison entre espèces : or = au moins une, and = toutes. Défaut métier = or."""
+    fauna_combine: str = "or"
     """exclude_source_buffer = hors emprise + buffer AOI ; within_foncier = à l'intérieur de l'AOI projet."""
     search_mode: str = "exclude_source_buffer"
     zone_humide_mode: str = "ignore"
@@ -391,19 +393,23 @@ def _build_filter_clauses(
     config: FilterConfig,
     *,
     spatial_mode: str | None = None,
-) -> tuple[list[str], list[str]]:
-    """Retourne (labels, clauses SQL cumulatives)."""
+) -> tuple[list[str], list[str], list[str]]:
+    """Retourne (clés, labels, clauses SQL cumulatives)."""
+    keys = ["min_area_ha"]
     labels = [f"Candidats (surface ≥ {config.min_area_ha} ha)"]
     clauses = ["p.project_id = :project_id"]
 
     if spatial_mode == "within_foncier":
+        keys.append("search_mode")
         labels.append("Dans le périmètre d'étude (AOI)")
         clauses.append(_CLAUSE_WITHIN_SOURCE)
     elif spatial_mode == "exclude_source":
+        keys.append("search_mode")
         labels.append("Hors emprise projet (source)")
         clauses.append(_CLAUSE_EXCLUDE_SOURCE)
 
     if config.same_bassin_versant:
+        keys.append("same_bassin_versant")
         labels.append("Même bassin versant que le projet")
         clauses.append(f"""
             EXISTS (
@@ -422,6 +428,7 @@ def _build_filter_clauses(
         """)
 
     if config.miller_thresh is not None:
+        keys.append("miller_thresh")
         labels.append(f"Miller ≥ {config.miller_thresh}")
         clauses.append("""
             (4.0 * PI() * ST_Area(p.geom_2154))
@@ -429,11 +436,13 @@ def _build_filter_clauses(
             >= :miller_th
         """)
 
-    for label, clause in national_exclusion_steps(config.excluded_layers, geom_alias="p"):
+    for key, label, clause in national_exclusion_steps(config.excluded_layers, geom_alias="p"):
+        keys.append(key)
         labels.append(label)
         clauses.append(clause)
 
     if config.cesbio_libelles:
+        keys.append("cesbio_libelles")
         labels.append("CESBIO (EXISTS/GiST)")
         clauses.append("""
             EXISTS (
@@ -456,10 +465,16 @@ def _build_filter_clauses(
                       AND ST_DWithin(p.geom_2154, f.geometry, :fauna_dist_m_{i})
                 )
             """)
-        labels.append(f"Faune ({len(config.fauna_criteria)} espèce(s))")
-        clauses.append("(" + " OR ".join(f"({p})" for p in fauna_parts) + ")")
+        keys.append("fauna_criteria")
+        combine = "and" if str(config.fauna_combine).lower() == "and" else "or"
+        joiner = " AND " if combine == "and" else " OR "
+        labels.append(
+            f"Faune ({len(config.fauna_criteria)} espèce(s), {'ET' if combine == 'and' else 'OU'})"
+        )
+        clauses.append("(" + joiner.join(f"({p})" for p in fauna_parts) + ")")
 
     if config.zone_humide_mode == "intersect":
+        keys.append("zone_humide_mode")
         if config.min_zone_humide_ha > 0:
             labels.append(
                 f"Zones humides établies — ≥ {config.min_zone_humide_ha:g} ha intersectés"
@@ -475,10 +490,12 @@ def _build_filter_clauses(
             labels.append("Zones humides établies — intersecte")
             clauses.append(_layer_intersect_clause("ecocompensation_results.zone_humide", "zh"))
     elif config.zone_humide_mode == "exclude":
+        keys.append("zone_humide_mode")
         labels.append("Zones humides établies — n'intersecte pas")
         clauses.append(_layer_exclude_clause("ecocompensation_results.zone_humide", "zh"))
 
     if config.zones_humides_probables_mode == "intersect":
+        keys.append("zones_humides_probables_mode")
         labels.append("Zones humides probables — intersecte")
         clauses.append(
             _layer_intersect_clause(
@@ -488,6 +505,7 @@ def _build_filter_clauses(
             )
         )
     elif config.zones_humides_probables_mode == "exclude":
+        keys.append("zones_humides_probables_mode")
         labels.append("Zones humides probables — n'intersecte pas")
         clauses.append(
             _layer_exclude_clause(
@@ -498,6 +516,7 @@ def _build_filter_clauses(
         )
 
     if config.troncons_hydros_max_dist_m is not None:
+        keys.append("troncons_hydros_max_dist_m")
         if config.troncons_hydros_max_dist_m <= 0:
             labels.append("Tronçons hydro — intersecte")
             clauses.append(
@@ -525,6 +544,7 @@ def _build_filter_clauses(
             """)
 
     if config.surfaces_hydros_max_dist_m is not None:
+        keys.append("surfaces_hydros_max_dist_m")
         if config.surfaces_hydros_max_dist_m <= 0:
             labels.append("Surfaces hydro — intersecte")
             clauses.append(
@@ -552,6 +572,7 @@ def _build_filter_clauses(
             """)
 
     if config.arrachage_vignes:
+        keys.append("arrachage_vignes")
         if config.arrachage_vignes_types:
             labels.append("Arrachage de vignes — types sélectionnés")
             clauses.append("""
@@ -576,7 +597,7 @@ def _build_filter_clauses(
                 )
             """)
 
-    return labels, clauses
+    return keys, labels, clauses
 
 
 def _filter_params(project_id: str, config: FilterConfig) -> dict:
@@ -669,7 +690,7 @@ def _spatial_filter(
         spatial_mode = None
         log("SOURCE_EXCLUSION:skipped_no_geom")
 
-    labels, all_clauses = _build_filter_clauses(config, spatial_mode=spatial_mode)
+    step_keys, labels, all_clauses = _build_filter_clauses(config, spatial_mode=spatial_mode)
     params = _filter_params(project_id, config)
     funnel_steps: list[dict] = []
     plan = plan_aoi_tiles(engine, aoi_id, config.min_area_ha)
@@ -677,7 +698,7 @@ def _spatial_filter(
 
     with engine.begin() as conn:
         cumulative: list[str] = []
-        for step_idx, (label, clause) in enumerate(zip(labels, all_clauses)):
+        for step_idx, (step_key, label, clause) in enumerate(zip(step_keys, labels, all_clauses)):
             cumulative.append(clause)
             where = " AND ".join(f"({c})" for c in cumulative)
             t0 = time.perf_counter()
@@ -710,7 +731,7 @@ def _spatial_filter(
                 count = int(n)
             dt = round(time.perf_counter() - t0, 2)
             log(f"FILTER_STEP:{label}:{count}:{dt}s")
-            funnel_steps.append({"step": step_idx, "label": label, "count": count})
+            funnel_steps.append({"step": step_idx, "key": step_key, "label": label, "count": count})
             if count == 0 and len(cumulative) > 1:
                 return [], funnel_steps
 
@@ -826,6 +847,7 @@ def _enrich_survivors(
 
 def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
     payload = {
+        "search_mode": config.search_mode,
         "min_area_ha": config.min_area_ha,
         "miller_thresh": config.miller_thresh,
         "cesbio_libelles": config.cesbio_libelles,
@@ -833,9 +855,11 @@ def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
             {"species": fc.species, "dist_m": fc.dist_m}
             for fc in config.fauna_criteria
         ],
+        "fauna_combine": "and" if str(config.fauna_combine).lower() == "and" else "or",
         "zone_humide_mode": config.zone_humide_mode,
         "zones_humides_probables_mode": config.zones_humides_probables_mode,
         "min_zone_humide_ha": config.min_zone_humide_ha,
+        "excluded_layers": list(config.excluded_layers),
         "troncons_hydros_max_dist_m": config.troncons_hydros_max_dist_m,
         "surfaces_hydros_max_dist_m": config.surfaces_hydros_max_dist_m,
         "same_bassin_versant": config.same_bassin_versant,

@@ -121,8 +121,8 @@ def national_exclusion_steps(
     excluded_layers: list[str] | set[str],
     *,
     geom_alias: str = "p",
-) -> list[tuple[str, str]]:
-    """Retourne [(label entonnoir, clause SQL), …] dans un ordre fixe."""
+) -> list[tuple[str, str, str]]:
+    """Retourne [(clé, label entonnoir, clause SQL), …] dans un ordre fixe."""
     active = {str(x).strip() for x in excluded_layers if str(x).strip()}
     builders = {
         "geomce": _clause_exclude_geomce,
@@ -133,12 +133,12 @@ def national_exclusion_steps(
         "znieff_2": lambda alias: _clause_exclude_znieff(alias, "2"),
         "ebc": clause_exclude_ebc_couverture_totale,
     }
-    steps: list[tuple[str, str]] = []
+    steps: list[tuple[str, str, str]] = []
     for key in _EXCLUSION_ORDER:
         if key not in active:
             continue
         builder = builders.get(key)
         if not builder:
             continue
-        steps.append((_LABELS[key], builder(geom_alias)))
+        steps.append((key, _LABELS[key], builder(geom_alias)))
     return steps

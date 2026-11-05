@@ -300,6 +300,10 @@ class FilterPipelineRequest(BaseModel):
     miller_thresh: float | None = Field(default=None, ge=0.0, le=1.0)
     cesbio_libelles: list[str] = Field(default_factory=list)
     fauna_criteria: list[FaunaFilterCriterionDTO] = Field(default_factory=list)
+    fauna_combine: str = Field(
+        default="or",
+        description="Combinaison entre espèces : or = au moins une, and = toutes.",
+    )
     zone_humide_mode: str = Field(default="ignore")
     zones_humides_probables_mode: str = Field(default="ignore")
     min_zone_humide_ha: float = Field(
@@ -922,6 +926,7 @@ async def start_filter_pipeline(
             for fc in body.fauna_criteria
             if fc.species.strip()
         ],
+        fauna_combine="and" if str(body.fauna_combine).lower() == "and" else "or",
         search_mode=search_mode,
         zone_humide_mode=zh_mode,
         zones_humides_probables_mode=zhp_mode,
@@ -987,6 +992,7 @@ async def start_uf_only(project_id: str):
         miller_thresh=None if miller is None else float(miller),
         cesbio_libelles=[str(x).strip() for x in (raw.get("cesbio_libelles") or []) if str(x).strip()],
         fauna_criteria=fauna,
+        fauna_combine="and" if str(raw.get("fauna_combine") or "or").lower() == "and" else "or",
         search_mode=str(raw.get("search_mode") or "exclude_source_buffer"),
         zone_humide_mode=str(raw.get("zone_humide_mode") or "ignore"),
         zones_humides_probables_mode=str(raw.get("zones_humides_probables_mode") or "ignore"),
@@ -1184,6 +1190,16 @@ def get_uf_pool(
 @app.get("/api/projects/{project_id}/results")
 def get_results(project_id: str):
     proj = _get_project(project_id)
+    buffer_km = None
+    aoi_id = proj.get("aoi_id")
+    if aoi_id:
+        with engine.connect() as conn:
+            buf_m = conn.execute(
+                text("SELECT buffer_m FROM ecocompensation.aoi WHERE id = CAST(:aid AS uuid)"),
+                {"aid": str(aoi_id)},
+            ).scalar()
+        if buf_m is not None:
+            buffer_km = round(float(buf_m) / 1000.0, 3)
     return {
         "status":          proj["status"],
         "last_filter":     proj.get("last_filter"),
@@ -1191,6 +1207,7 @@ def get_results(project_id: str):
         "last_filter_uf":  proj.get("last_filter_uf"),
         "last_results_uf": proj.get("last_results_uf"),
         "layers_status":   proj.get("layers_status", {}),
+        "buffer_km":       buffer_km,
     }
 
 

@@ -536,13 +536,25 @@ def build_filter_snapshot_from_run(
     parcelles = get_parcelles_for_run_results(conn, project_id, run_id, aoi_id_str)
     by_idu = get_all_metrics_grouped_by_idu(conn, project_id, run_id)
     rs = meta.get("result_summary") or {}
+    opts = meta.get("options_json") or {}
     total = int(rs.get("total") or len(parcelles) or meta.get("total_count") or 0)
+    radius = rs.get("final_radius_km")
+    if radius is None:
+        radius = opts.get("buffer_km")
+    if radius in (None, 0, 0.0) and aoi_id_str:
+        buf_m = conn.execute(
+            text("SELECT buffer_m FROM ecocompensation.aoi WHERE id = CAST(:aid AS uuid)"),
+            {"aid": aoi_id_str},
+        ).scalar()
+        if buf_m is not None:
+            radius = float(buf_m) / 1000.0
     return {
         "pool_run_id": str(meta["id"]),
-        "filter_options": meta.get("options_json") or {},
+        "filter_options": opts,
         "total": total,
-        "final_radius_km": float(rs.get("final_radius_km") or 0),
+        "final_radius_km": float(radius or 0),
         "funnel": rs.get("funnel") if isinstance(rs.get("funnel"), list) else [],
+        "filter_config": rs.get("filter_config") or meta.get("options_json") or {},
         "parcelles": parcelles,
         "by_idu": by_idu,
         "total_parcelles_metrics": len(by_idu),
