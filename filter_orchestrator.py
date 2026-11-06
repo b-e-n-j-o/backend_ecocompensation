@@ -26,6 +26,7 @@ from api.recherche_de_foncier.filtrage.layers.filter_pipeline import FilterConfi
 from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
 from orchestrator import UF_PHASE_KEYS, run_orchestration
 from api.recherche_de_foncier.filtrage.layers.uf_profiling import build_uf_pool_with_profiling
+from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots.runner import run_ilots_rpg_after_filter
 from api.recherche_de_foncier.enrichir.pool import pool_service
 from api.recherche_de_foncier.enrichir.pool.pool_service import persist_parcelles_pool_run
 from api.recherche_de_foncier.enrichir.pool.profiler_registry import profiling_summary_label
@@ -110,6 +111,11 @@ def _filter_options_json(config: FilterConfig, *, buffer_km: float = 0.0) -> dic
             for fc in config.fauna_criteria
         ],
         "fauna_combine": "and" if str(config.fauna_combine).lower() == "and" else "or",
+        "flora_criteria": [
+            {"taxon_key": fc.taxon_key, "label": fc.label, "dist_m": fc.dist_m}
+            for fc in config.flora_criteria
+        ],
+        "flora_combine": "and" if str(config.flora_combine).lower() == "and" else "or",
         "zone_humide_mode": config.zone_humide_mode,
         "zones_humides_probables_mode": config.zones_humides_probables_mode,
         "min_zone_humide_ha": config.min_zone_humide_ha,
@@ -120,6 +126,7 @@ def _filter_options_json(config: FilterConfig, *, buffer_km: float = 0.0) -> dic
         "arrachage_vignes": config.arrachage_vignes,
         "arrachage_vignes_types": list(config.arrachage_vignes_types),
         "include_unites_foncieres": config.include_unites_foncieres,
+        "include_ilots_rpg": getattr(config, "include_ilots_rpg", False),
         "natura2000_mode": (
             "exclude" if "natura_2000" in config.excluded_layers else "ignore"
         ),
@@ -295,6 +302,7 @@ def _persist_pipeline_results(
                     )::numeric, 3) AS distance_km,
                     p.veg_libelles,
                     p.fauna_distances,
+                    COALESCE(p.flora_distances, '{}'::jsonb) AS flora_distances,
                     COALESCE(p.zone_humide_ha, 0) AS zone_humide_ha,
                     p.dist_hydro_m,
                     COALESCE(p.troncons_hydro_info, '[]'::jsonb) AS troncons_hydro_info,
@@ -336,6 +344,7 @@ def _persist_pipeline_results(
             "surfaces_hydro_info": list(row.get("surfaces_hydro_info") or []),
             "veg_libelles": list(row["veg_libelles"] or []),
             "fauna_distances": dict(row["fauna_distances"] or {}),
+            "flora_distances": dict(row["flora_distances"] or {}),
             "zone_humide_ha": float(row["zone_humide_ha"] or 0),
         })
 
@@ -421,6 +430,8 @@ def _persist_pipeline_results(
                 enrich["veg_libelles"] = p["veg_libelles"]
             if p.get("fauna_distances"):
                 enrich["fauna_distances"] = p["fauna_distances"]
+            if p.get("flora_distances"):
+                enrich["flora_distances"] = p["flora_distances"]
             if config.zone_humide_mode in ("intersect", "exclude") and p.get("zone_humide_ha") is not None:
                 zh_ha = float(p["zone_humide_ha"] or 0)
                 enrich["zone_humide_ha"] = zh_ha
@@ -453,7 +464,7 @@ def _persist_pipeline_results(
         "total": len(parcelles),
         "final_radius_km": buffer_km,
         "parcelles": [
-            {k: v for k, v in p.items() if k not in ("veg_libelles", "fauna_distances")}
+            {k: v for k, v in p.items() if k not in ("veg_libelles", "fauna_distances", "flora_distances")}
             for p in parcelles
         ],
         "funnel": funnel,
@@ -543,6 +554,16 @@ async def _run_uf_after_filter(
             layer_keys=list(UF_PHASE_KEYS),
             fauna_species=fauna_species or None,
             uf_min_area_ha=config.min_area_ha,
+            uf_miller_thresh=config.miller_thresh,
+            uf_cesbio_libelles=(
+                [] if config.search_mode == "within_foncier" else list(config.cesbio_libelles)
+            ),
+            uf_fauna_criteria=[
+                {"species": fc.species, "dist_m": fc.dist_m}
+                for fc in config.fauna_criteria
+                if fc.species.strip()
+            ],
+            uf_fauna_combine=config.fauna_combine,
         )
         cx, cy = _get_aoi_centre(engine, aoi_id)
         fauna_criteria = [
@@ -857,6 +878,10 @@ async def run_filter_orchestration(
         if config.include_unites_foncieres:
             asyncio.create_task(
                 _run_uf_after_filter(engine, project_id, aoi_id, config, push)
+            )
+        if getattr(config, "include_ilots_rpg", False):
+            asyncio.create_task(
+                run_ilots_rpg_after_filter(engine, project_id, aoi_id, config, push)
             )
 
     return result

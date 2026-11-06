@@ -36,20 +36,15 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
 
-def export_classement_shp(
+def build_parcelles_geodataframes(
     engine: "Engine",
     project_id: str,
     parcelles: list[dict],
     options,  # FiltreOptions
-    final_radius_km: float,
-    output_path: Path,
     aoi_id: str | None = None,
     metrics_by_idu: dict[str, list[dict[str, Any]]] | None = None,
-) -> None:
-    """
-    Exporte les parcelles classées en un Shapefile (une couche).
-    metrics_by_idu : { idu: lignes métriques pool } — optionnel (sinon champs scores NaN / vides).
-    """
+) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """(shapefile tronqué, geopackage textes complets) des parcelles classées, EPSG:2154."""
     if not parcelles:
         raise ValueError("Liste de parcelles vide.")
 
@@ -128,7 +123,22 @@ def export_classement_shp(
         geometry=geoms,
         crs="EPSG:2154",
     )
+    return gdf_shp, gdf_gpkg
 
+
+def export_classement_shp(
+    engine: "Engine",
+    project_id: str,
+    parcelles: list[dict],
+    options,  # FiltreOptions
+    final_radius_km: float,  # noqa: ARG001
+    output_path: Path,
+    aoi_id: str | None = None,
+    metrics_by_idu: dict[str, list[dict[str, Any]]] | None = None,
+) -> None:
+    gdf_shp, gdf_gpkg = build_parcelles_geodataframes(
+        engine, project_id, parcelles, options, aoi_id=aoi_id, metrics_by_idu=metrics_by_idu,
+    )
     output_path = Path(output_path)
     if output_path.suffix.lower() != ".shp":
         output_path = output_path.with_suffix(".shp")

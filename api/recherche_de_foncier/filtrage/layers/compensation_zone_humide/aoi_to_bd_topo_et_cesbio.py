@@ -20,6 +20,8 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE
+
 
 def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     log = cb or (lambda msg: None)
@@ -47,20 +49,20 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
 
     with engine.begin() as conn:
         reg = conn.execute(
-            text("SELECT to_regclass('ecocompensation.vegetation_sur_cesbio') IS NOT NULL")
+            text(f"SELECT to_regclass('{VEG_TABLE}') IS NOT NULL")
         ).scalar_one()
         if not reg:
             log("[HYBRIDE] Table ecocompensation.vegetation_sur_cesbio absente - rien a inserer.")
             return 0
 
     with engine.begin() as conn:
-        log("[HYBRIDE] Comptage des entites intersectant l'AOI...")
+        log("[HYBRIDE] Comptage des dalles intersectant l'AOI...")
         t0 = time.perf_counter()
         count = conn.execute(
             text(
-                """
+                f"""
                 SELECT count(*)
-                FROM ecocompensation.vegetation_sur_cesbio h
+                FROM {VEG_TABLE} h
                 WHERE ST_Intersects(h.geom, ST_GeomFromText(:wkt_aoi, 2154));
                 """
             ),
@@ -68,7 +70,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
         ).scalar_one()
         t1 = time.perf_counter()
 
-    log(f"[HYBRIDE] {count} entites intersectent l'AOI (en {t1 - t0:.2f} s).")
+    log(f"[HYBRIDE] {count} dalles intersectent l'AOI (en {t1 - t0:.2f} s).")
     if count == 0:
         log("[HYBRIDE] Rien a inserer, fin.")
         return 0
@@ -109,7 +111,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
 
         res = conn.execute(
             text(
-                """
+                f"""
                 INSERT INTO ecocompensation_results.bd_topo_et_cesbio (
                     project_id,
                     aoi_id,
@@ -119,29 +121,28 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
                     libelle_prio,
                     geom_2154
                 )
-                SELECT
-                    CAST(:pid AS uuid) AS project_id,
-                    CAST(:aid AS uuid) AS aoi_id,
-                    q.source,
-                    q.nature,
-                    q.libelle,
-                    q.libelle_prio,
-                    q.geom_clip AS geom_2154
+                SELECT project_id, aoi_id, source, nature, libelle, libelle_prio, geom_2154
                 FROM (
                     SELECT
+                        CAST(:pid AS uuid) AS project_id,
+                        CAST(:aid AS uuid) AS aoi_id,
                         h.source,
-                        h.nature,
-                        h.libelle,
+                        MIN(h.nature) AS nature,
+                        MIN(h.libelle) AS libelle,
                         COALESCE(h.libelle_prio, h.nature, h.libelle) AS libelle_prio,
-                        ST_Intersection(
-                            h.geom,
-                            ST_GeomFromText(:wkt_aoi, 2154)
-                        ) AS geom_clip
-                    FROM ecocompensation.vegetation_sur_cesbio h
-                    WHERE ST_Intersects(h.geom, ST_GeomFromText(:wkt_aoi, 2154))
-                ) AS q
-                WHERE q.geom_clip IS NOT NULL
-                  AND NOT ST_IsEmpty(q.geom_clip);
+                        ST_Multi(ST_CollectionExtract(
+                            ST_MakeValid(ST_UnaryUnion(ST_Collect(
+                                ST_Intersection(h.geom, ST_GeomFromText(:wkt_aoi, 2154))
+                            ))),
+                            3
+                        )) AS geom_2154
+                    FROM {VEG_TABLE} h
+                    WHERE h.geom && ST_GeomFromText(:wkt_aoi, 2154)
+                      AND ST_Intersects(h.geom, ST_GeomFromText(:wkt_aoi, 2154))
+                    GROUP BY h.source, COALESCE(h.libelle_prio, h.nature, h.libelle)
+                ) q
+                WHERE q.geom_2154 IS NOT NULL
+                  AND NOT ST_IsEmpty(q.geom_2154);
                 """
             ),
             {"pid": project_id, "aid": aoi_id, "wkt_aoi": aoi_wkt},
@@ -150,7 +151,7 @@ def run(engine, project_id: str, aoi_id: str, cb=None) -> int:
     t3 = time.perf_counter()
     rows_inserted = res.rowcount if res.rowcount is not None else count
     log(
-        f"[RESULTS] {rows_inserted} entites inserees dans ecocompensation_results.bd_topo_et_cesbio "
+        f"[RESULTS] {rows_inserted} classes inserees dans ecocompensation_results.bd_topo_et_cesbio "
         f"pour project_id={project_id} (en {t3 - t2:.2f} s)."
     )
     return rows_inserted

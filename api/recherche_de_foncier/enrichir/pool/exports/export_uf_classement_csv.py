@@ -4,48 +4,37 @@
 export_uf_classement_csv.py
 ===========================
 
-Export CSV des sous-ensembles UF (une ligne par sous-ensemble, ordre = classement).
+CSV QGIS / Excel : une ligne par parcelle, groupable par uf_id / uf_rang.
 """
 
 from __future__ import annotations
 
+import csv
 import io
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from api.recherche_de_foncier.enrichir.pool.exports.classement_export_attrs import build_parcelle_export_row
-from api.recherche_de_foncier.enrichir.pool.exports.export_classement_csv import CSV_FIELDNAMES, _csv_cell
+from api.recherche_de_foncier.enrichir.pool.exports.export_classement_csv import _csv_cell
 from api.recherche_de_foncier.enrichir.pool.exports.qgis_encoding import QGIS_CSV_ENCODING
-
-if TYPE_CHECKING:
-    pass
+from api.recherche_de_foncier.enrichir.pool.exports.uf_export_adapter import (
+    UF_PARCELLE_CSV_FIELDS,
+    build_uf_parcelle_attr_rows,
+)
 
 
 def export_uf_classement_csv(results_uf: dict, output_path: Path | io.StringIO) -> None:
-    items = build_subset_export_inputs(results_uf)
-    if not items:
+    rows = build_uf_parcelle_attr_rows(results_uf)
+    if not rows:
         return
-    from filtre_options import FiltreOptions
 
     if isinstance(output_path, Path):
         file_obj = open(output_path, "w", newline="", encoding=QGIS_CSV_ENCODING)
     else:
         file_obj = output_path
 
-    import csv
-
-    writer = csv.DictWriter(file_obj, fieldnames=CSV_FIELDNAMES, delimiter=";")
+    writer = csv.DictWriter(file_obj, fieldnames=UF_PARCELLE_CSV_FIELDS, delimiter=";")
     writer.writeheader()
-    options = FiltreOptions.defaut()
-
-    for item in items:
-        row = build_parcelle_export_row(
-            item["parcelle"],
-            item["mmap"],
-            options,
-            clip_for_shapefile=False,
-        )
-        writer.writerow({k: _csv_cell(row.get(k)) for k in CSV_FIELDNAMES})
+    for row in rows:
+        writer.writerow({k: _csv_cell(row.get(k)) for k in UF_PARCELLE_CSV_FIELDS})
 
     if isinstance(output_path, Path):
         file_obj.close()

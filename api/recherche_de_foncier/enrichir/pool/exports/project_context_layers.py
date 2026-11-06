@@ -132,15 +132,20 @@ def write_geopackage_etude(
     main_gdf: gpd.GeoDataFrame,
     main_layer: str,
     context: dict[str, gpd.GeoDataFrame],
+    extra_layers: list[tuple[str, gpd.GeoDataFrame]] | None = None,
 ) -> Path:
     """
-    Un GeoPackage : couche métier + zone projet + aire d'étude.
+    Un GeoPackage : couche métier (+ couches extra) + zone projet + aire d'étude.
     ``mode=a`` pour empiler les couches sans écraser le fichier.
     """
     gpkg_path = Path(gpkg_path)
     if gpkg_path.exists():
         gpkg_path.unlink()
     main_gdf.to_file(gpkg_path, driver="GPKG", layer=main_layer)
+    for layer_name, gdf in extra_layers or []:
+        if gdf is None or gdf.empty:
+            continue
+        gdf.to_file(gpkg_path, driver="GPKG", layer=layer_name, mode="a")
     for layer_name, gdf in (
         (LAYER_ZONE_PROJET, context.get(LAYER_ZONE_PROJET)),
         (LAYER_AIRE_ETUDE, context.get(LAYER_AIRE_ETUDE)),

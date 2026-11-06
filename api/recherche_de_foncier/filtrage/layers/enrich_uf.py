@@ -11,10 +11,14 @@ Enrichit ecocompensation_results.sous_ensembles avec :
 Colonne clé = subset_id, géom = geom_2154.
 """
 from __future__ import annotations
+import json
 import math
+import time
 from collections import defaultdict
 from typing import Callable
 from sqlalchemy import text
+
+from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
 
 VEG_BATCH_SIZE   = 100
 FAUNA_BATCH_SIZE = 300
@@ -24,6 +28,7 @@ STMT_TIMEOUT     = "90s"
 _ALTER_DDL = """
 ALTER TABLE ecocompensation_results.sous_ensembles
     ADD COLUMN IF NOT EXISTS veg_libelles    text[]  NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS veg_profile     jsonb   NOT NULL DEFAULT '{}',
     ADD COLUMN IF NOT EXISTS fauna_distances jsonb   NOT NULL DEFAULT '{}';
 
 CREATE INDEX IF NOT EXISTS idx_ss_veg
@@ -32,6 +37,50 @@ CREATE INDEX IF NOT EXISTS idx_ss_fauna
     ON ecocompensation_results.sous_ensembles USING GIN (fauna_distances);
 """
 
+def attach_stored_veg_profiles(engine, project_id: str, results: dict | None) -> dict | None:
+    """Complète veg_profile depuis sous_ensembles si l'instantané projet ne l'a pas."""
+    if not isinstance(results, dict):
+        return results
+    unites = results.get("unites_foncieres") or []
+    ids: list[str] = []
+    for uf in unites:
+        for ss in uf.get("sous_ensembles") or []:
+            sid = str(ss.get("subset_id") or "").strip()
+            if sid:
+                ids.append(sid)
+    if not ids:
+        return results
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT subset_id, veg_libelles, veg_profile
+                FROM ecocompensation_results.sous_ensembles
+                WHERE project_id = CAST(:pid AS uuid)
+                  AND subset_id = ANY(CAST(:ids AS text[]))
+                """
+            ),
+            {"pid": project_id, "ids": ids},
+        ).mappings().all()
+    by_id = {str(r["subset_id"]): r for r in rows}
+    for uf in unites:
+        for ss in uf.get("sous_ensembles") or []:
+            row = by_id.get(str(ss.get("subset_id") or ""))
+            if not row:
+                continue
+            profile = row["veg_profile"] or {}
+            if isinstance(profile, str):
+                try:
+                    profile = json.loads(profile)
+                except json.JSONDecodeError:
+                    profile = {}
+            if isinstance(profile, dict) and profile:
+                ss["veg_profile"] = profile
+            if row["veg_libelles"] and not ss.get("veg_libelles"):
+                ss["veg_libelles"] = list(row["veg_libelles"])
+    return results
+
+
 def ensure_columns(engine) -> None:
     """Migration one-shot. Appeler au démarrage de l'app avec filter_pipeline.ensure_columns."""
     with engine.begin() as conn:
@@ -39,22 +88,86 @@ def ensure_columns(engine) -> None:
 
 # ── SQL enrichissement ────────────────────────────────────────────────────────
 
-_SQL_VEG_BATCH = """
-WITH veg_agg AS (
-    SELECT
-        ss.subset_id,
-        array_agg(DISTINCT v.libelle_prio ORDER BY v.libelle_prio)
-            FILTER (WHERE v.libelle_prio IS NOT NULL) AS veg_libelles
+# Hypothèse : geom_2154 du sous-ensemble = union exacte de parcelles entières
+# (unites_foncieres.geom_2154), sans clip AOI et sans chevauchement entre parcelles.
+# On croise donc chaque parcelle une seule fois, puis on somme par sous-ensemble.
+_SQL_COUNT_DISTINCT_PARC = """
+SELECT COUNT(DISTINCT u.idu)
+FROM ecocompensation_results.sous_ensembles ss
+CROSS JOIN LATERAL unnest(ss.idus) AS u(idu)
+WHERE ss.project_id = :pid
+  AND ss.subset_id = ANY(CAST(:batch AS text[]))
+"""
+
+_SQL_VEG_BATCH = f"""
+WITH ss_parc AS (
+    SELECT ss.subset_id, u.idu
     FROM ecocompensation_results.sous_ensembles ss
-    JOIN ecocompensation.vegetation_sur_cesbio v
-        ON ss.geom_2154 && v.geom
-       AND ST_Intersects(ss.geom_2154, v.geom)
+    CROSS JOIN LATERAL unnest(ss.idus) AS u(idu)
     WHERE ss.project_id = :pid
-      AND ss.subset_id  = ANY(CAST(:batch AS text[]))
-    GROUP BY ss.subset_id
+      AND ss.subset_id = ANY(CAST(:batch AS text[]))
+),
+parc AS (
+    SELECT DISTINCT ON (uf.idu) uf.idu, uf.geom_2154
+    FROM ecocompensation_results.unites_foncieres uf
+    WHERE uf.project_id = :pid
+      AND uf.idu IN (SELECT idu FROM ss_parc)
+    ORDER BY uf.idu
+),
+parc_veg AS (
+    SELECT
+        parc.idu,
+        v.libelle_prio,
+        SUM(
+            CASE
+                WHEN ST_CoveredBy(v.geom, parc.geom_2154) THEN ST_Area(v.geom)
+                ELSE ST_Area(ST_Intersection(parc.geom_2154, v.geom))
+            END
+        ) AS area_m2,
+        (array_agg(DISTINCT v.source) FILTER (WHERE v.source IS NOT NULL))[1] AS source
+    FROM parc
+    JOIN {VEG_TABLE_CALC} v
+        ON parc.geom_2154 && v.geom
+       AND ST_Intersects(parc.geom_2154, v.geom)
+    WHERE v.libelle_prio IS NOT NULL
+    GROUP BY parc.idu, v.libelle_prio
+),
+class_areas AS (
+    SELECT
+        sp.subset_id,
+        pv.libelle_prio,
+        SUM(pv.area_m2) AS area_m2,
+        (array_agg(DISTINCT pv.source) FILTER (WHERE pv.source IS NOT NULL))[1] AS source
+    FROM ss_parc sp
+    JOIN parc_veg pv ON pv.idu = sp.idu
+    GROUP BY sp.subset_id, pv.libelle_prio
+    HAVING SUM(pv.area_m2) > 0
+),
+geom_areas AS (
+    SELECT subset_id, ST_Area(geom_2154) AS area_m2
+    FROM ecocompensation_results.sous_ensembles
+    WHERE project_id = :pid
+      AND subset_id = ANY(CAST(:batch AS text[]))
+),
+veg_agg AS (
+    SELECT
+        ca.subset_id,
+        array_agg(ca.libelle_prio ORDER BY ca.libelle_prio) AS veg_libelles,
+        jsonb_object_agg(
+            ca.libelle_prio,
+            jsonb_build_object(
+                'area_m2', ROUND(ca.area_m2::numeric, 1),
+                'pct', ROUND((ca.area_m2 / NULLIF(ga.area_m2, 0) * 100)::numeric, 2),
+                'source', ca.source
+            )
+        ) AS veg_profile
+    FROM class_areas ca
+    JOIN geom_areas ga ON ga.subset_id = ca.subset_id
+    GROUP BY ca.subset_id
 )
 UPDATE ecocompensation_results.sous_ensembles ss
-SET    veg_libelles = COALESCE(va.veg_libelles, '{}')
+SET    veg_libelles = COALESCE(va.veg_libelles, '{{}}'),
+       veg_profile  = COALESCE(va.veg_profile, '{{}}')
 FROM   veg_agg va
 WHERE  ss.project_id = :pid
   AND  ss.subset_id  = va.subset_id
@@ -87,6 +200,108 @@ WHERE  ss.project_id = :pid
 
 # ── run() ─────────────────────────────────────────────────────────────────────
 
+def _subset_ids_passing_cheap_filters(
+    engine,
+    project_id: str,
+    *,
+    miller_thresh: float | None,
+    cesbio_libelles: list[str] | None,
+    fauna_criteria: list[dict] | None,
+    fauna_combine: str,
+    log: Callable[[str], None],
+) -> list[str]:
+    """Miller, distance faune, puis intersection CESBIO sans calcul d'aire.
+
+    Même ordre que le filtre parcelles : la surface est déjà appliquée à la
+    construction des sous-ensembles. ST_Area(ST_Intersection) ne porte ensuite
+    que sur les survivants.
+    """
+    params: dict = {"pid": project_id}
+    where = ["ss.project_id = :pid"]
+    if miller_thresh is not None:
+        where.append("ss.miller >= :miller_th")
+        params["miller_th"] = float(miller_thresh)
+
+    with engine.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '3min'"))
+        ids = [
+            row[0] for row in conn.execute(
+                text(
+                    "SELECT ss.subset_id FROM ecocompensation_results.sous_ensembles ss "
+                    f"WHERE {' AND '.join(where)} ORDER BY ss.subset_id"
+                ),
+                params,
+            ).fetchall()
+        ]
+    log(f"[ENRICH_UF] Après Miller : {len(ids):,} sous-ensembles.")
+    if not ids:
+        return []
+
+    criteria = [c for c in (fauna_criteria or []) if str(c.get("species") or "").strip()]
+    if criteria:
+        parts = []
+        fauna_params: dict = {"pid": project_id, "batch": ids}
+        for i, c in enumerate(criteria):
+            parts.append(f"""
+                EXISTS (
+                    SELECT 1 FROM ecocompensation.fauna f
+                    WHERE f.nom_vernaculaire = :fauna_species_{i}
+                      AND ST_DWithin(ss.geom_2154, f.geometry, :fauna_dist_m_{i})
+                )
+            """)
+            fauna_params[f"fauna_species_{i}"] = str(c["species"]).strip()
+            fauna_params[f"fauna_dist_m_{i}"] = float(c.get("dist_m") or 0)
+        joiner = " AND " if str(fauna_combine).lower() == "and" else " OR "
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL statement_timeout = '3min'"))
+            ids = [
+                row[0] for row in conn.execute(
+                    text(f"""
+                        SELECT ss.subset_id
+                        FROM ecocompensation_results.sous_ensembles ss
+                        WHERE ss.project_id = :pid
+                          AND ss.subset_id = ANY(CAST(:batch AS text[]))
+                          AND ({joiner.join(parts)})
+                        ORDER BY ss.subset_id
+                    """),
+                    fauna_params,
+                ).fetchall()
+            ]
+        log(f"[ENRICH_UF] Après faune : {len(ids):,} sous-ensembles.")
+        if not ids:
+            return []
+
+    labels = [str(x).strip() for x in (cesbio_libelles or []) if str(x).strip()]
+    if labels:
+        kept: list[str] = []
+        for start in range(0, len(ids), VEG_BATCH_SIZE):
+            batch = ids[start:start + VEG_BATCH_SIZE]
+            with engine.begin() as conn:
+                conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
+                kept.extend(
+                    row[0] for row in conn.execute(
+                        text(f"""
+                            SELECT ss.subset_id
+                            FROM ecocompensation_results.sous_ensembles ss
+                            WHERE ss.project_id = :pid
+                              AND ss.subset_id = ANY(CAST(:batch AS text[]))
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM {VEG_TABLE_CALC} v
+                                  WHERE v.libelle_prio = ANY(CAST(:labels AS text[]))
+                                    AND ss.geom_2154 && v.geom
+                                    AND ST_Intersects(ss.geom_2154, v.geom)
+                              )
+                            ORDER BY ss.subset_id
+                        """),
+                        {"pid": project_id, "batch": batch, "labels": labels},
+                    ).fetchall()
+                )
+        ids = kept
+        log(f"[ENRICH_UF] Après CESBIO (intersection, sans aire) : {len(ids):,} sous-ensembles.")
+    return ids
+
+
 def run(
     engine,
     project_id:   str,
@@ -94,6 +309,10 @@ def run(
     cb:           Callable[[str], None] | None = None,
     *,
     species_list: list[str] | None = None,
+    miller_thresh: float | None = None,
+    cesbio_libelles: list[str] | None = None,
+    fauna_criteria: list[dict] | None = None,
+    fauna_combine: str = "or",
 ) -> int:
     """
     Enrichit tous les sous-ensembles du projet avec veg_libelles + fauna_distances.
@@ -112,25 +331,52 @@ def run(
         log("[ENRICH_UF] Aucun sous-ensemble — lancer d'abord sous_ensembles.")
         return 0
 
-    log(f"[ENRICH_UF] {n:,} sous-ensembles à enrichir.")
+    log(f"[ENRICH_UF] {n:,} sous-ensembles en base (surface déjà filtrée).")
 
-    with engine.begin() as conn:
-        subset_ids: list[str] = [
-            row[0] for row in conn.execute(
-                text("SELECT subset_id FROM ecocompensation_results.sous_ensembles "
-                     "WHERE project_id = :pid ORDER BY subset_id"),
-                {"pid": project_id},
-            ).fetchall()
-        ]
+    use_cheap = (
+        miller_thresh is not None
+        or bool(cesbio_libelles)
+        or bool(fauna_criteria)
+    )
+    if use_cheap:
+        subset_ids = _subset_ids_passing_cheap_filters(
+            engine,
+            project_id,
+            miller_thresh=miller_thresh,
+            cesbio_libelles=cesbio_libelles,
+            fauna_criteria=fauna_criteria,
+            fauna_combine=fauna_combine,
+            log=log,
+        )
+    else:
+        with engine.begin() as conn:
+            subset_ids = [
+                row[0] for row in conn.execute(
+                    text("SELECT subset_id FROM ecocompensation_results.sous_ensembles "
+                         "WHERE project_id = :pid ORDER BY subset_id"),
+                    {"pid": project_id},
+                ).fetchall()
+            ]
+
+    if not subset_ids:
+        log("[ENRICH_UF] Aucun sous-ensemble après filtres légers — pas d'intersection d'aires.")
+        return 0
 
     # Végétation
     n_veg = math.ceil(len(subset_ids) / VEG_BATCH_SIZE)
     log(f"[ENRICH_UF] 🌿 Vég : {n_veg} batch(s) × {VEG_BATCH_SIZE}")
     for bi, start in enumerate(range(0, len(subset_ids), VEG_BATCH_SIZE), 1):
         batch = subset_ids[start:start + VEG_BATCH_SIZE]
+        t0 = time.perf_counter()
         with engine.begin() as conn:
             conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
+            n_parc = conn.execute(
+                text(_SQL_COUNT_DISTINCT_PARC),
+                {"pid": project_id, "batch": batch},
+            ).scalar_one()
             conn.execute(text(_SQL_VEG_BATCH), {"pid": project_id, "batch": batch})
+        dt = time.perf_counter() - t0
+        log(f"[ENRICH_UF] 🌿 Vég batch {bi}/{n_veg} : {n_parc} parcelles distinctes, {dt:.1f}s")
         log(f"TILE_PROGRESS:{bi}/{n_veg}:{bi*VEG_BATCH_SIZE} 🌿 Vég {bi}/{n_veg}")
     log("[ENRICH_UF] ✓ veg_libelles mis à jour.")
 
@@ -150,7 +396,7 @@ def run(
     else:
         log("[ENRICH_UF] Aucune espèce — fauna_distances ignorée.")
 
-    return n
+    return len(subset_ids)
 
 
 # ── build_uf_pool_response() ──────────────────────────────────────────────────
@@ -230,6 +476,7 @@ def build_uf_pool_response(
                 ROUND(ss.miller::numeric, 3)                  AS miller,
                 ROUND((ss.dist_centre_m / 1000.0)::numeric, 3) AS distance_centre_km,
                 ss.veg_libelles,
+                ss.veg_profile,
                 ss.fauna_distances,
                 ROUND(COALESCE(zh.zone_humide_ha, 0)::numeric, 4) AS zone_humide_ha,
                 {"(ss.fauna_distances->>:fauna_species)::int" if fauna_species else "NULL::int"} AS dist_fauna_m
@@ -257,6 +504,7 @@ def build_uf_pool_response(
                 ROUND(ss.miller::numeric, 3)                  AS miller,
                 ROUND((ss.dist_centre_m / 1000.0)::numeric, 3) AS distance_centre_km,
                 ss.veg_libelles,
+                ss.veg_profile,
                 ss.fauna_distances,
                 0::numeric AS zone_humide_ha,
                 {"(ss.fauna_distances->>:fauna_species)::int" if fauna_species else "NULL::int"} AS dist_fauna_m
@@ -286,6 +534,7 @@ def build_uf_pool_response(
             "miller":             float(r["miller"] or 0),
             "distance_centre_km": float(r["distance_centre_km"] or 0),
             "veg_libelles":       list(r["veg_libelles"] or []),
+            "veg_profile":        dict(r["veg_profile"] or {}),
             "fauna_distances":    dict(r["fauna_distances"] or {}),
             "dist_fauna_m":       r["dist_fauna_m"],
             "zone_humide_ha":     float(r["zone_humide_ha"] or 0),

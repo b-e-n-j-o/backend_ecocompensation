@@ -91,6 +91,7 @@ SELECT
     )::numeric, 3) AS distance_km,
     p.veg_libelles,
     p.fauna_distances,
+    COALESCE(p.flora_distances, '{}'::jsonb) AS flora_distances,
     COALESCE(p.zone_humide_ha, 0) AS zone_humide_ha,
     p.dist_hydro_m,
     COALESCE(p.troncons_hydro_info, '[]'::jsonb) AS troncons_hydro_info,
@@ -235,6 +236,7 @@ def _insert_pool_row(
         metric_value={
             "source": "manual_idu",
             "geom_source": source,
+            "in_classement": False,
             "added_at": datetime.now(timezone.utc).isoformat(),
         },
     )
@@ -267,6 +269,9 @@ def _upsert_filter_enrich(
         enrich["veg_libelles"] = veg
     if fauna:
         enrich["fauna_distances"] = fauna
+    flora = dict(attrs.get("flora_distances") or {})
+    if flora:
+        enrich["flora_distances"] = flora
     if include_zone_humide and attrs.get("zone_humide_ha") is not None:
         zh_ha = float(attrs["zone_humide_ha"] or 0)
         enrich["zone_humide_ha"] = zh_ha

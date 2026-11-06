@@ -83,6 +83,7 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
             return {}
 
         eco_by_idu: dict[str, float] = {}
+        eco_max_by_idu: dict[str, float] = {}
         durete_by_idu: dict[str, float] = {}
         urba_by_idu: dict[str, float] = {}
 
@@ -96,6 +97,9 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
                 raw = val.get("total_score")
                 if _valid_eco_total(raw):
                     eco_by_idu[idu] = float(raw)
+                    mx = val.get("max_score")
+                    if isinstance(mx, (int, float)) and float(mx) > 0:
+                        eco_max_by_idu[idu] = float(mx)
             elif key == "durete_fonciere":
                 raw = val.get("score_final")
                 if _valid_durete_for_composite(raw):
@@ -115,7 +119,8 @@ class CompositeScoreV1Profiler(BasePoolProfiler):
 
             eco_norm = None
             if eco_raw is not None:
-                eco_norm = max(0.0, min(100.0, (eco_raw / self.ECO_MAX) * 100.0))
+                eco_max = eco_max_by_idu.get(idu) or self.ECO_MAX
+                eco_norm = max(0.0, min(100.0, (eco_raw / eco_max) * 100.0))
 
             attractivite = None
             if durete_raw is not None:

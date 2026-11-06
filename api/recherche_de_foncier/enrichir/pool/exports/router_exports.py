@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -26,6 +27,11 @@ from api.recherche_de_foncier.enrichir.pool.exports.export_classement_csv import
 from api.recherche_de_foncier.enrichir.pool.exports.export_uf_classement_csv import export_uf_classement_csv
 from api.recherche_de_foncier.enrichir.pool.exports.export_classement_shp import export_classement_shp
 from api.recherche_de_foncier.enrichir.pool.exports.export_uf_classement_shp import export_uf_classement_shp
+from api.recherche_de_foncier.enrichir.pool.exports.export_etude_gpkg import write_etude_geopackage
+
+_FILTER_REPORT_DIR = (
+    Path(__file__).resolve().parents[3] / "filtrage" / "export" / "filter_report"
+)
 
 logger = logging.getLogger(__name__)
 engine = get_engine()
@@ -144,9 +150,8 @@ def export_csv(
     if isinstance(last_results_uf, str):
         last_results_uf = json.loads(last_results_uf)
     unites = last_results_uf.get("unites_foncieres") or []
-    n_ss = sum(len(uf.get("sous_ensembles") or []) for uf in unites)
-    if n_ss == 0:
-        raise HTTPException(400, "Aucun sous-ensemble UF à exporter")
+    if not unites:
+        raise HTTPException(400, "Aucune unité foncière à exporter")
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".csv", encoding=QGIS_CSV_ENCODING) as nf:
         csv_path = Path(nf.name)
         export_uf_classement_csv(last_results_uf, csv_path)
@@ -305,8 +310,8 @@ def export_shp(
     # scope == uf
     last_results_uf = proj.get("last_results_uf")
     last_filter_uf = proj.get("last_filter_uf")
-    if not last_results_uf or not last_filter_uf:
-        raise HTTPException(400, "Résultats ou filtre UF introuvables")
+    if not last_results_uf:
+        raise HTTPException(400, "Résultats UF introuvables")
     if isinstance(last_results_uf, str):
         last_results_uf = json.loads(last_results_uf)
     if isinstance(last_filter_uf, str):
@@ -314,20 +319,21 @@ def export_shp(
     options = _to_filtre_options_from_dict(last_filter_uf if isinstance(last_filter_uf, dict) else {})
     final_radius_km = float(last_results_uf.get("final_radius_km", 0) or 0)
     with tempfile.TemporaryDirectory() as tmpdir:
-        shp_path = Path(tmpdir) / "uf_subsets.shp"
+        tmp = Path(tmpdir)
         try:
             export_uf_classement_shp(
-                engine, project_id, last_results_uf, options, shp_path, final_radius_km=final_radius_km
+                engine, project_id, last_results_uf, options, tmp / "uf.shp", final_radius_km=final_radius_km
             )
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
-        zip_path = Path(tmpdir) / "uf.zip"
+        zip_path = tmp / "uf.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
-            for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
-                f = shp_path.with_suffix(ext)
-                if f.exists():
-                    zf.write(f, f.name)
-            gpkg = shp_path.with_suffix(".gpkg")
+            for stem in ("unites_foncieres", "parcelles"):
+                for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                    f = tmp / f"{stem}{ext}"
+                    if f.exists():
+                        zf.write(f, f.name)
+            gpkg = tmp / "uf.gpkg"
             if gpkg.exists():
                 zf.write(gpkg, gpkg.name)
         with zipfile.ZipFile(zip_path, "r") as zr:
@@ -338,4 +344,153 @@ def export_shp(
             final_path = nf.name
     background_tasks.add_task(os.remove, final_path)
     return FileResponse(final_path, filename=f"uf_{project_id[:8]}.zip", media_type="application/zip")
+
+
+def _load_parcelles_export(project_id: str, proj: dict, run_id: str | None):
+    """Parcelles du classement (hors indésirables), options et métriques. Vide si aucun résultat."""
+    aoi_id = str(proj.get("aoi_id") or "")
+    parcelles: list = []
+    last_filter_dict: dict | None = None
+    pool_run_id: str | None = None
+    if run_id:
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            if not pool_service.run_belongs_to_project(conn, project_id, run_id):
+                raise HTTPException(404, f"Run {run_id} introuvable pour ce projet")
+            snap = pool_service.build_filter_snapshot_from_run(conn, project_id, run_id, aoi_id)
+        if snap:
+            parcelles = snap.get("parcelles") or []
+            last_filter_dict = snap.get("filter_options") or {}
+            pool_run_id = str(snap.get("pool_run_id") or run_id)
+    else:
+        last_results = proj.get("last_results")
+        last_filter = proj.get("last_filter")
+        if isinstance(last_results, str):
+            last_results = json.loads(last_results)
+        if isinstance(last_filter, str):
+            last_filter = json.loads(last_filter)
+        if isinstance(last_results, dict):
+            parcelles = last_results.get("parcelles") or []
+            pool_run_id = last_results.get("pool_run_id")
+        last_filter_dict = last_filter if isinstance(last_filter, dict) else {}
+    if parcelles:
+        with engine.begin() as conn:
+            pool_service.ensure_tables(conn)
+            parcelles = pool_service.filter_parcelles_excluding_project_indesirables(
+                conn, project_id, parcelles
+            )
+    metrics_by_idu = None
+    if pool_run_id and parcelles:
+        try:
+            with engine.begin() as conn:
+                metrics_by_idu = get_all_metrics_grouped_by_idu(conn, project_id, str(pool_run_id))
+        except Exception:
+            logger.exception("Export étude : métriques pool ignorées (project_id=%s)", project_id)
+    return parcelles, _to_filtre_options_from_dict(last_filter_dict or {}), aoi_id, metrics_by_idu
+
+
+@router.get("/api/projects/{project_id}/export/etude.gpkg")
+def export_etude_gpkg(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    layers: str = Query(
+        "parcelles,uf,ilots",
+        description="Liste séparée par des virgules : parcelles, uf, ilots",
+    ),
+    run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results"),
+):
+    """Un GeoPackage QGIS : les couches cochées + zone projet + aire d'étude."""
+    wanted = {p.strip().lower() for p in layers.split(",") if p.strip()}
+    unknown = wanted - {"parcelles", "uf", "ilots"}
+    if not wanted or unknown:
+        raise HTTPException(400, "Paramètre layers : parcelles, uf, ilots.")
+    proj = _get_project(project_id)
+    parcelles, options, aoi_id, metrics = _load_parcelles_export(project_id, proj, run_id)
+    results_uf = proj.get("last_results_uf")
+    if isinstance(results_uf, str):
+        results_uf = json.loads(results_uf)
+    if not isinstance(results_uf, dict):
+        results_uf = None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".gpkg") as nf:
+        gpkg_path = Path(nf.name)
+    try:
+        written = write_etude_geopackage(
+            engine,
+            project_id,
+            gpkg_path,
+            include_parcelles="parcelles" in wanted,
+            include_uf="uf" in wanted,
+            include_ilots="ilots" in wanted,
+            parcelles=parcelles,
+            parcelle_options=options,
+            aoi_id=aoi_id,
+            metrics_by_idu=metrics,
+            results_uf=results_uf,
+        )
+    except ValueError as e:
+        gpkg_path.unlink(missing_ok=True)
+        raise HTTPException(400, str(e)) from e
+    background_tasks.add_task(os.remove, str(gpkg_path))
+    logger.info("Export étude GPKG %s couches=%s", project_id, written)
+    return FileResponse(
+        str(gpkg_path),
+        filename=f"etude_{project_id[:8]}.gpkg",
+        media_type="application/geopackage+sqlite3",
+    )
+
+
+@router.get("/api/projects/{project_id}/export/fiche-filtrage.pdf")
+def export_fiche_filtrage(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+):
+    """Fiche A4 des critères de filtrage exécutés (config d'entrée + entonnoir)."""
+    proj = _get_project(project_id)
+    last = proj.get("last_results")
+    if isinstance(last, str):
+        last = json.loads(last)
+    if not isinstance(last, dict) or not (last.get("funnel") or last.get("filter_config")):
+        raise HTTPException(400, "Aucun filtrage enregistré pour cette étude.")
+    radius = last.get("final_radius_km")
+    cfg = last.get("filter_config") or {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if radius is None:
+        radius = cfg.get("buffer_km")
+    total = last.get("total")
+    if total is None:
+        total = last.get("n_after_filter")
+    if total is None:
+        total = len(last.get("parcelles") or [])
+    payload = {
+        "etude": {
+            "nom": proj.get("name"),
+            "projet": proj.get("name"),
+            "organisme": "Kerelia",
+        },
+        "computed_at": last.get("run_created_at"),
+        "buffer_km": radius,
+        "filter_config": cfg,
+        "funnel": last.get("funnel") or [],
+        "total": int(total or 0),
+        "aoi_total": last.get("n_tiled"),
+    }
+    if str(_FILTER_REPORT_DIR) not in sys.path:
+        sys.path.insert(0, str(_FILTER_REPORT_DIR))
+    from fiche import render_fiche_pdf_bytes
+
+    try:
+        pdf = render_fiche_pdf_bytes(payload)
+    except Exception as exc:
+        logger.exception("Fiche filtrage PDF")
+        raise HTTPException(500, f"Impossible de générer la fiche : {exc}") from exc
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as nf:
+        path = Path(nf.name)
+        path.write_bytes(pdf)
+    background_tasks.add_task(os.remove, str(path))
+    return FileResponse(
+        str(path),
+        filename=f"fiche_filtrage_{project_id[:8]}.pdf",
+        media_type="application/pdf",
+    )
 

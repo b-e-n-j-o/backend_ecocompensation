@@ -32,6 +32,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from db import get_engine, get_engine_ppm
+from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import run as run_sub_uf
 
 GEOM_ZIP        = BACKEND_DIR / "geometrie_test.zip"
@@ -129,8 +130,8 @@ def filter_sous_ensembles(engine, project_id: str) -> list[dict]:
          ["ss.project_id = :project_id",
           "ss.surface_ha >= :min_area_ha",
           "ss.miller >= :miller_th",
-          """EXISTS (
-              SELECT 1 FROM ecocompensation.vegetation_sur_cesbio v
+          f"""EXISTS (
+              SELECT 1 FROM {VEG_TABLE_CALC} v
               WHERE v.libelle_prio = ANY(:cesbio_libelles)
                 AND ss.geom_2154 && v.geom
                 AND ST_Intersects(ss.geom_2154, v.geom)
@@ -139,8 +140,8 @@ def filter_sous_ensembles(engine, project_id: str) -> list[dict]:
          ["ss.project_id = :project_id",
           "ss.surface_ha >= :min_area_ha",
           "ss.miller >= :miller_th",
-          """EXISTS (
-              SELECT 1 FROM ecocompensation.vegetation_sur_cesbio v
+          f"""EXISTS (
+              SELECT 1 FROM {VEG_TABLE_CALC} v
               WHERE v.libelle_prio = ANY(:cesbio_libelles)
                 AND ss.geom_2154 && v.geom
                 AND ST_Intersects(ss.geom_2154, v.geom)
@@ -180,7 +181,7 @@ def filter_sous_ensembles(engine, project_id: str) -> list[dict]:
                 (
                     SELECT array_agg(DISTINCT v.libelle_prio)
                            FILTER (WHERE v.libelle_prio IS NOT NULL)
-                    FROM ecocompensation.vegetation_sur_cesbio v
+                    FROM {VEG_TABLE_CALC} v
                     WHERE ss.geom_2154 && v.geom
                       AND ST_Intersects(ss.geom_2154, v.geom)
                 ) AS veg_libelles,

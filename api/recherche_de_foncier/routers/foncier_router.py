@@ -10,6 +10,7 @@ from shapely.ops import unary_union
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from db import get_engine
+from api.project_kind import KIND_RECHERCHE
 
 router = APIRouter(tags=["foncier"])
 
@@ -282,7 +283,7 @@ async def import_foncier(
             "name": name,
             "aoi": aoi_id,
             "foncier": foncier_id,
-            "study_type": study_type,
+            "study_type": KIND_RECHERCHE,
         }).mappings().one()
 
         project_id = str(project_row["id"])

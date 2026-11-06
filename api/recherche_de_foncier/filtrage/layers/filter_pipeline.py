@@ -29,6 +29,8 @@ from typing import Callable
 
 from sqlalchemy import text
 
+from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
+
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_parcelles_v2 import (
     TileEnvelope,
     plan_aoi_tiles,
@@ -61,6 +63,13 @@ class FaunaCriterion:
 
 
 @dataclass
+class FloraCriterion:
+    taxon_key: str
+    label: str
+    dist_m: float
+
+
+@dataclass
 class FilterConfig:
     min_area_ha: float = 7.0
     miller_thresh: float | None = None
@@ -68,6 +77,9 @@ class FilterConfig:
     fauna_criteria: list[FaunaCriterion] = field(default_factory=list)
     """Combinaison entre espèces : or = au moins une, and = toutes. Défaut métier = or."""
     fauna_combine: str = "or"
+    flora_criteria: list[FloraCriterion] = field(default_factory=list)
+    """Combinaison entre taxons : or = au moins un, and = tous. Défaut métier = or."""
+    flora_combine: str = "or"
     """exclude_source_buffer = hors emprise + buffer AOI ; within_foncier = à l'intérieur de l'AOI projet."""
     search_mode: str = "exclude_source_buffer"
     zone_humide_mode: str = "ignore"
@@ -87,6 +99,8 @@ class FilterConfig:
     arrachage_vignes_types: list[str] = field(default_factory=list)
     """False = pool parcelles seulement, sans calcul des unités foncières."""
     include_unites_foncieres: bool = True
+    """True = après le filtre parcelles, calcule aussi les îlots agricoles RPG."""
+    include_ilots_rpg: bool = False
 
 
 @dataclass
@@ -110,6 +124,7 @@ _ENSURE_DDL = """
 ALTER TABLE ecocompensation_results.parcelles
     ADD COLUMN IF NOT EXISTS veg_libelles    text[]  NOT NULL DEFAULT '{}',
     ADD COLUMN IF NOT EXISTS fauna_distances jsonb   NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS flora_distances jsonb  NOT NULL DEFAULT '{}',
     ADD COLUMN IF NOT EXISTS zone_humide_ha  double precision NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS dist_hydro_m    double precision NULL,
     ADD COLUMN IF NOT EXISTS troncons_hydro_info jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -121,6 +136,8 @@ CREATE INDEX IF NOT EXISTS idx_parcelles_results_veg
     ON ecocompensation_results.parcelles USING GIN (veg_libelles);
 CREATE INDEX IF NOT EXISTS idx_parcelles_results_fauna
     ON ecocompensation_results.parcelles USING GIN (fauna_distances);
+CREATE INDEX IF NOT EXISTS idx_parcelles_results_flora
+    ON ecocompensation_results.parcelles USING GIN (flora_distances);
 
 ALTER TABLE ecocompensation.projects
     ADD COLUMN IF NOT EXISTS filter_config jsonb NOT NULL DEFAULT '{}';
@@ -132,14 +149,14 @@ def ensure_columns(engine) -> None:
     with engine.begin() as conn:
         conn.execute(text(_ENSURE_DDL))
 
-_SQL_ENRICH_VEG_BATCH = """
+_SQL_ENRICH_VEG_BATCH = f"""
 WITH veg_agg AS (
     SELECT
         p.idu,
         array_agg(DISTINCT v.libelle_prio ORDER BY v.libelle_prio)
             FILTER (WHERE v.libelle_prio IS NOT NULL) AS veg_libelles
     FROM ecocompensation_results.parcelles p
-    JOIN ecocompensation.vegetation_sur_cesbio v
+    JOIN {VEG_TABLE_CALC} v
         ON p.geom_2154 && v.geom
        AND ST_Intersects(p.geom_2154, v.geom)
     WHERE p.project_id = :pid
@@ -147,7 +164,7 @@ WITH veg_agg AS (
     GROUP BY p.idu
 )
 UPDATE ecocompensation_results.parcelles p
-SET    veg_libelles = COALESCE(va.veg_libelles, '{}')
+SET    veg_libelles = COALESCE(va.veg_libelles, '{{}}')
 FROM   veg_agg va
 WHERE  p.project_id = :pid
   AND  p.idu = va.idu
@@ -174,6 +191,30 @@ WITH fauna_agg AS (
 UPDATE ecocompensation_results.parcelles p
 SET    fauna_distances = fauna_distances || jsonb_build_object(:species, fa.dist_m)
 FROM   fauna_agg fa
+WHERE  p.project_id = :pid
+  AND  p.idu = fa.idu
+"""
+
+_SQL_ENRICH_FLORA_BATCH = """
+WITH flora_agg AS (
+    SELECT
+        p.idu,
+        COALESCE(
+            (
+                SELECT ROUND(MIN(ST_Distance(p.geom_2154, o.geom)))::int
+                FROM   ecocompensation.flore_observation o
+                WHERE  o.taxon_key = :taxon_key
+                  AND  ST_DWithin(p.geom_2154, o.geom, CAST(:dist_m AS float8))
+            ),
+            -1
+        ) AS dist_m
+    FROM ecocompensation_results.parcelles p
+    WHERE p.project_id = :pid
+      AND p.idu = ANY(:idus)
+)
+UPDATE ecocompensation_results.parcelles p
+SET    flora_distances = flora_distances || jsonb_build_object(CAST(:label AS text), fa.dist_m)
+FROM   flora_agg fa
 WHERE  p.project_id = :pid
   AND  p.idu = fa.idu
 """
@@ -444,10 +485,10 @@ def _build_filter_clauses(
     if config.cesbio_libelles:
         keys.append("cesbio_libelles")
         labels.append("CESBIO (EXISTS/GiST)")
-        clauses.append("""
+        clauses.append(f"""
             EXISTS (
                 SELECT 1
-                FROM ecocompensation.vegetation_sur_cesbio v
+                FROM {VEG_TABLE_CALC} v
                 WHERE v.libelle_prio = ANY(:cesbio_libelles)
                   AND p.geom_2154 && v.geom
                   AND ST_Intersects(p.geom_2154, v.geom)
@@ -472,6 +513,33 @@ def _build_filter_clauses(
             f"Faune ({len(config.fauna_criteria)} espèce(s), {'ET' if combine == 'and' else 'OU'})"
         )
         clauses.append("(" + joiner.join(f"({p})" for p in fauna_parts) + ")")
+
+    if config.flora_criteria:
+        keys.append("flora_criteria")
+        combine = "and" if str(config.flora_combine).lower() == "and" else "or"
+        labels.append(flora_step_label(config))
+        if combine == "and":
+            clauses.append("""
+                NOT EXISTS (
+                    SELECT 1
+                    FROM unnest(CAST(:flora_keys AS text[]), CAST(:flora_dists AS float8[])) AS c(k, d)
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM ecocompensation.flore_observation o
+                        WHERE o.taxon_key = c.k
+                          AND ST_DWithin(p.geom_2154, o.geom, c.d)
+                    )
+                )
+            """)
+        else:
+            clauses.append("""
+                EXISTS (
+                    SELECT 1
+                    FROM unnest(CAST(:flora_keys AS text[]), CAST(:flora_dists AS float8[])) AS c(k, d)
+                    JOIN ecocompensation.flore_observation o ON o.taxon_key = c.k
+                    WHERE ST_DWithin(p.geom_2154, o.geom, c.d)
+                )
+            """)
 
     if config.zone_humide_mode == "intersect":
         keys.append("zone_humide_mode")
@@ -611,6 +679,9 @@ def _filter_params(project_id: str, config: FilterConfig) -> dict:
     for i, fc in enumerate(config.fauna_criteria):
         params[f"fauna_species_{i}"] = fc.species
         params[f"fauna_dist_m_{i}"] = fc.dist_m
+    if config.flora_criteria:
+        params["flora_keys"] = [fc.taxon_key for fc in config.flora_criteria]
+        params["flora_dists"] = [float(fc.dist_m) for fc in config.flora_criteria]
     if config.troncons_hydros_max_dist_m is not None:
         params["troncons_hydros_max_dist_m"] = config.troncons_hydros_max_dist_m
     if config.surfaces_hydros_max_dist_m is not None:
@@ -775,6 +846,7 @@ def _enrich_survivors(
     species_list: list[str],
     log: Callable[[str], None],
     *,
+    flora_criteria: list[FloraCriterion] | None = None,
     enrich_zone_humide: bool = False,
     enrich_troncons_hydro: bool = False,
     troncons_max_dist_m: float = 100.0,
@@ -818,6 +890,25 @@ def _enrich_survivors(
                 f"{round(time.perf_counter() - t0, 1)}s"
             )
 
+        for fc in flora_criteria or []:
+            t0 = time.perf_counter()
+            with engine.begin() as conn:
+                conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
+                conn.execute(
+                    text(_SQL_ENRICH_FLORA_BATCH),
+                    {
+                        "pid": project_id,
+                        "idus": batch,
+                        "taxon_key": fc.taxon_key,
+                        "dist_m": float(fc.dist_m),
+                        "label": fc.label or fc.taxon_key,
+                    },
+                )
+            log(
+                f"ENRICH_BATCH:{i}/{len(batches)}:flora:{fc.taxon_key}:"
+                f"{round(time.perf_counter() - t0, 1)}s"
+            )
+
         if enrich_troncons_hydro:
             t0 = time.perf_counter()
             with engine.begin() as conn:
@@ -845,8 +936,14 @@ def _enrich_survivors(
             )
 
 
-def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
-    payload = {
+def flora_step_label(config: FilterConfig) -> str:
+    n = len(config.flora_criteria)
+    combine = "ET" if str(config.flora_combine).lower() == "and" else "OU"
+    return f"Flore ({n} taxon(s), {combine})"
+
+
+def filter_config_dict(config: FilterConfig) -> dict:
+    return {
         "search_mode": config.search_mode,
         "min_area_ha": config.min_area_ha,
         "miller_thresh": config.miller_thresh,
@@ -856,6 +953,11 @@ def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
             for fc in config.fauna_criteria
         ],
         "fauna_combine": "and" if str(config.fauna_combine).lower() == "and" else "or",
+        "flora_criteria": [
+            {"taxon_key": fc.taxon_key, "label": fc.label, "dist_m": fc.dist_m}
+            for fc in config.flora_criteria
+        ],
+        "flora_combine": "and" if str(config.flora_combine).lower() == "and" else "or",
         "zone_humide_mode": config.zone_humide_mode,
         "zones_humides_probables_mode": config.zones_humides_probables_mode,
         "min_zone_humide_ha": config.min_zone_humide_ha,
@@ -866,7 +968,12 @@ def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
         "arrachage_vignes": config.arrachage_vignes,
         "arrachage_vignes_types": config.arrachage_vignes_types,
         "include_unites_foncieres": config.include_unites_foncieres,
+        "include_ilots_rpg": config.include_ilots_rpg,
     }
+
+
+def _save_filter_config(engine, project_id: str, config: FilterConfig) -> None:
+    payload = filter_config_dict(config)
     with engine.begin() as conn:
         conn.execute(text(_ENSURE_DDL))
         conn.execute(
@@ -931,6 +1038,7 @@ def run(
         # ── 4. Enrichissement léger ─────────────────────────────────────────
         if surviving:
             species = [fc.species for fc in config.fauna_criteria]
+            flora = list(config.flora_criteria)
             enrich_zh = config.zone_humide_mode in ("intersect", "exclude")
             enrich_troncons = config.troncons_hydros_max_dist_m is not None
             enrich_surfaces = config.surfaces_hydros_max_dist_m is not None
@@ -946,6 +1054,7 @@ def run(
                 troncons_max_dist_m=max(config.troncons_hydros_max_dist_m or 0.0, 0.0),
                 enrich_surfaces_hydro=enrich_surfaces,
                 surfaces_max_dist_m=max(config.surfaces_hydros_max_dist_m or 0.0, 0.0),
+                flora_criteria=flora,
             )
             log(f"PHASE:enrich:done:{len(surviving)}")
 

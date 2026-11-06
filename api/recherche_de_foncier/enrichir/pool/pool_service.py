@@ -273,6 +273,7 @@ def list_runs(conn, project_id: str, limit: int = 50) -> list[dict[str, Any]]:
             SELECT id, project_id, scope, options_json, total_count, created_at
             FROM ecocompensation_results.parcelles_pool_runs
             WHERE project_id = CAST(:project_id AS uuid)
+              AND scope <> 'uf_export'
             ORDER BY created_at DESC
             LIMIT :limit
             """
@@ -629,6 +630,7 @@ def purge_old_runs(conn, project_id: str, keep_last: int = 5) -> None:
             SELECT id
             FROM ecocompensation_results.parcelles_pool_runs
             WHERE project_id = CAST(:project_id AS uuid)
+              AND scope <> 'uf_export'
             ORDER BY created_at DESC
             OFFSET :keep_last
             """

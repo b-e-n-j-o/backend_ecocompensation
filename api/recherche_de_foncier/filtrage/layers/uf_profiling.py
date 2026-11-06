@@ -302,7 +302,7 @@ def build_uf_pool_with_profiling(
         study_type=study_type,
         min_zone_humide_ha=min_zone_humide_ha,
     )
-    return attach_uf_profiling(
+    profiled = attach_uf_profiling(
         engine,
         raw,
         fauna_criteria=fauna_criteria,
@@ -310,3 +310,8 @@ def build_uf_pool_with_profiling(
         fauna_dist_m=fauna_dist_m,
         study_type=study_type,
     )
+    # Vue « parcelles » de chaque UF (parcelles retenues + présence dans les combinaisons).
+    # Ajoute des champs, ne retire rien : les sous_ensembles restent disponibles.
+    from api.recherche_de_foncier.filtrage.layers.uf_parcelles import attach_uf_parcelles
+
+    return attach_uf_parcelles(engine, project_id, profiled)

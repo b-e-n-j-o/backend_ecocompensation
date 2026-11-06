@@ -16,7 +16,8 @@ class ScoreEcoProfiler(BasePoolProfiler):
     """
     Score écologique (0..6) :
     - distance parcelle ↔ projet (``parcelles_pool.distance_km``) : 0..3 ;
-    - espèces faune : 0..3 depuis ``especes_faune`` (legacy) ou ``filter_enrich.fauna_distances`` (filter_v2).
+    - espèces faune : 0..3 depuis ``especes_faune`` (legacy) ou ``filter_enrich.fauna_distances`` (filter_v2) ;
+    - flore : +1 si une observation du filtre intersecte la parcelle ou tombe dans le rayon du critère.
     """
 
     metric_key = "score_eco"
@@ -56,6 +57,62 @@ class ScoreEcoProfiler(BasePoolProfiler):
                 dist_m = 0.0
             out.append({"species": species, "dist_m": dist_m})
         return out
+
+    @staticmethod
+    def _flora_criteria(opts: dict) -> list[dict]:
+        crit = opts.get("flora_criteria")
+        if not isinstance(crit, list):
+            return []
+        out: list[dict] = []
+        for c in crit:
+            if not isinstance(c, dict):
+                continue
+            label = str(c.get("label") or c.get("taxon_key") or "").strip()
+            if not label:
+                continue
+            try:
+                dist_m = float(c.get("dist_m") or 0)
+            except (TypeError, ValueError):
+                dist_m = 0.0
+            out.append({"label": label, "dist_m": dist_m})
+        return out
+
+    @staticmethod
+    def _flora_points(taxa: list, criteria: list[dict], enrich: dict | None) -> tuple[int, str, dict]:
+        if not criteria:
+            return 0, "no_flore_criteria", {}
+        by_label: dict[str, float] = {}
+        for t in taxa or []:
+            if not isinstance(t, dict):
+                continue
+            label = str(t.get("label") or "").strip()
+            if not label:
+                continue
+            try:
+                by_label[label] = float(t.get("dist_m"))
+            except (TypeError, ValueError):
+                continue
+        if isinstance(enrich, dict):
+            for label, raw in enrich.items():
+                if label in by_label:
+                    continue
+                try:
+                    by_label[str(label)] = float(raw)
+                except (TypeError, ValueError):
+                    continue
+        for crit in criteria:
+            dist = by_label.get(crit["label"])
+            if dist is None or dist < 0:
+                continue
+            radius = float(crit.get("dist_m") or 0)
+            if radius <= 0 or dist <= radius:
+                reason = "intersection" if dist <= 0 else "within_radius"
+                return 1, reason, {
+                    "label": crit["label"],
+                    "dist_m": round(dist, 1),
+                    "radius_m": radius,
+                }
+        return 0, "beyond_radius", {}
 
     @staticmethod
     def _species_points_from_faune(j: dict) -> tuple[int, str, dict]:
@@ -185,7 +242,10 @@ class ScoreEcoProfiler(BasePoolProfiler):
         t0 = time.perf_counter()
         opts = self._filter_options(conn, project_id, run_id)
         fauna_criteria = self._fauna_criteria(opts)
+        flora_criteria = self._flora_criteria(opts)
         has_faune = len(fauna_criteria) > 0
+        has_flore = len(flora_criteria) > 0
+        score_max = ECO_MAX + (1 if has_flore else 0)
         study_type = str(opts.get("study_type") or "faune_buffer")
         is_zh = study_type == "zones_humides_intra"
 
@@ -208,8 +268,9 @@ class ScoreEcoProfiler(BasePoolProfiler):
 
         fauna_legacy_by_idu: dict[str, dict] = {}
         filter_enrich_by_idu: dict[str, dict] = {}
+        flore_by_idu: dict[str, dict] = {}
 
-        if has_faune or is_zh:
+        if has_faune or is_zh or has_flore:
             metric_rows = conn.execute(
                 text(
                     """
@@ -217,7 +278,7 @@ class ScoreEcoProfiler(BasePoolProfiler):
                     FROM ecocompensation_results.parcelles_pool_metrics
                     WHERE project_id = CAST(:project_id AS uuid)
                       AND run_id = CAST(:run_id AS uuid)
-                      AND metric_key IN ('especes_faune', 'filter_enrich')
+                      AND metric_key IN ('especes_faune', 'filter_enrich', 'especes_flore')
                     """
                 ),
                 {"project_id": project_id, "run_id": run_id},
@@ -233,6 +294,8 @@ class ScoreEcoProfiler(BasePoolProfiler):
                     fauna_legacy_by_idu[idu] = j
                 elif key == "filter_enrich":
                     filter_enrich_by_idu[idu] = j
+                elif key == "especes_flore":
+                    flore_by_idu[idu] = j
 
             if not fauna_legacy_by_idu and not filter_enrich_by_idu:
                 log.warning(
@@ -260,10 +323,15 @@ class ScoreEcoProfiler(BasePoolProfiler):
                     species_points = min(3, species_points)
                 else:
                     species_points, species_reason, species_extra = 0, "no_faune_criteria", {}
-                total_score = int(zh_points + species_points)
+                flora_pts, flora_reason, flora_extra = self._flora_points(
+                    (flore_by_idu.get(idu) or {}).get("taxa") or [],
+                    flora_criteria,
+                    (enrich.get("flora_distances") if isinstance(enrich.get("flora_distances"), dict) else None),
+                )
+                total_score = int(zh_points + species_points + flora_pts)
                 payload[idu] = {
                     "total_score": total_score,
-                    "max_score": ECO_MAX,
+                    "max_score": score_max,
                     "breakdown": {
                         "zone_humide": {
                             "points": zh_points,
@@ -274,6 +342,11 @@ class ScoreEcoProfiler(BasePoolProfiler):
                             "points": species_points,
                             "reason": species_reason,
                             **species_extra,
+                        },
+                        "flore": {
+                            "points": flora_pts,
+                            "reason": flora_reason,
+                            **flora_extra,
                         },
                     },
                 }
@@ -308,15 +381,26 @@ class ScoreEcoProfiler(BasePoolProfiler):
                     fauna_criteria,
                 )
 
-            total_score = int(species_points + distance_points)
+            enrich = filter_enrich_by_idu.get(idu) or {}
+            flora_pts, flora_reason, flora_extra = self._flora_points(
+                (flore_by_idu.get(idu) or {}).get("taxa") or [],
+                flora_criteria,
+                enrich.get("flora_distances") if isinstance(enrich.get("flora_distances"), dict) else None,
+            )
+            total_score = int(species_points + distance_points + flora_pts)
             payload[idu] = {
                 "total_score": total_score,
-                "max_score": ECO_MAX,
+                "max_score": score_max,
                 "breakdown": {
                     "especes": {
                         "points": species_points,
                         "reason": species_reason,
                         **species_extra,
+                    },
+                    "flore": {
+                        "points": flora_pts,
+                        "reason": flora_reason,
+                        **flora_extra,
                     },
                     "distance": {
                         "points": distance_points,

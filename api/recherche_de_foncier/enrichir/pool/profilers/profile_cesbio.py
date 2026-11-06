@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from sqlalchemy import text
 
+from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
+
 from .base import BasePoolProfiler
 
 logger = logging.getLogger(__name__)
@@ -27,17 +29,21 @@ STMT_TIMEOUT = "90s"
 
 Cb = Callable[[str], None] | None
 
-_SQL_PROFILE_VEG_BATCH = """
+_SQL_PROFILE_VEG_BATCH = f"""
 WITH hits AS (
     SELECT
         pp.idu,
         v.libelle_prio,
-        ST_Area(ST_Intersection(p.geom_2154, v.geom)) AS inter_area_m2
+        v.source,
+        CASE
+            WHEN ST_CoveredBy(v.geom, p.geom_2154) THEN ST_Area(v.geom)
+            ELSE ST_Area(ST_Intersection(p.geom_2154, v.geom))
+        END AS inter_area_m2
     FROM ecocompensation_results.parcelles_pool pp
     JOIN ecocompensation_results.parcelles p
       ON p.project_id = pp.project_id
      AND p.idu = pp.idu
-    JOIN ecocompensation.vegetation_sur_cesbio v
+    JOIN {VEG_TABLE_CALC} v
         ON p.geom_2154 && v.geom
        AND ST_Intersects(p.geom_2154, v.geom)
     WHERE pp.project_id = CAST(:pid AS uuid)
@@ -46,7 +52,11 @@ WITH hits AS (
       AND v.libelle_prio IS NOT NULL
 ),
 class_areas AS (
-    SELECT idu, libelle_prio, SUM(inter_area_m2) AS area_m2
+    SELECT
+        idu,
+        libelle_prio,
+        SUM(inter_area_m2) AS area_m2,
+        (array_agg(DISTINCT source) FILTER (WHERE source IS NOT NULL))[1] AS source
     FROM hits
     WHERE inter_area_m2 > 0
     GROUP BY idu, libelle_prio
@@ -65,7 +75,8 @@ SELECT
     ca.idu,
     ca.libelle_prio,
     ROUND(ca.area_m2::numeric, 1) AS area_m2,
-    ROUND((ca.area_m2 / NULLIF(pa.parcel_area_m2, 0) * 100)::numeric, 2) AS pct
+    ROUND((ca.area_m2 / NULLIF(pa.parcel_area_m2, 0) * 100)::numeric, 2) AS pct,
+    ca.source
 FROM class_areas ca
 JOIN parcel_areas pa ON pa.idu = ca.idu
 ORDER BY ca.idu, ca.area_m2 DESC
@@ -105,10 +116,13 @@ def _profile_idus(
         for r in rows:
             idu = str(r["idu"])
             lib = str(r["libelle_prio"])
-            result.setdefault(idu, {})[lib] = {
+            entry: dict[str, float | str] = {
                 "area_m2": float(r["area_m2"]),
                 "pct": float(r["pct"]),
             }
+            if r.get("source"):
+                entry["source"] = str(r["source"])
+            result.setdefault(idu, {})[lib] = entry
 
     log(f"PROFILE_CESBIO:done:{len(result)}:{round(t_total, 1)}s")
     try:

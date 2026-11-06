@@ -523,6 +523,49 @@ def recompute_autorisations_urba(
     }
 
 
+class IntegrateParcellesBody(BaseModel):
+    idus: list[str] = Field(default_factory=list)
+
+
+@router.post("/{project_id}/pool/runs/{run_id}/parcelles/integrer")
+def integrate_manual_parcelles(project_id: str, run_id: str, body: IntegrateParcellesBody):
+    """Passe des ajouts manuels du sas vers le classement. Le tag pool_origin reste."""
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Projet {project_id} introuvable")
+    idus = [str(x).strip() for x in body.idus if str(x).strip()]
+    if not idus:
+        raise HTTPException(400, "Aucun IDU fourni")
+    integrated: list[str] = []
+    with engine.begin() as conn:
+        for idu in idus:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT metric_value_jsonb
+                    FROM ecocompensation_results.parcelles_pool_metrics
+                    WHERE run_id = CAST(:run_id AS uuid)
+                      AND idu = :idu
+                      AND metric_key = 'pool_origin'
+                    """
+                ),
+                {"run_id": run_id, "idu": idu},
+            ).mappings().first()
+            value = dict(row["metric_value_jsonb"] or {}) if row else {"source": "manual_idu"}
+            if value.get("source") != "manual_idu":
+                continue
+            value["in_classement"] = True
+            pool_service.upsert_metric(
+                conn,
+                project_id=project_id,
+                run_id=run_id,
+                idu=idu,
+                metric_key="pool_origin",
+                metric_value=value,
+            )
+            integrated.append(idu)
+    return {"status": "ok", "integrated": integrated}
+
+
 @router.post("/{project_id}/pool/runs/{run_id}/parcelles")
 def add_parcelles_to_run(
     project_id: str,

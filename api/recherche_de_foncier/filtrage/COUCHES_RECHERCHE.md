@@ -38,7 +38,7 @@ Aucun de ces critères n’est obligatoire. S’il n’est pas activé, la table
 
 | Critère dans le formulaire | Table source | Clip projet (si le critère est actif) | Lecture pendant le filtre |
 |---|---|---|---|
-| Occupation du sol (CESBIO) | `ecocompensation.vegetation_sur_cesbio` | non (requête directe) | `ST_Intersects` sur `libelle_prio` |
+| Occupation du sol (CESBIO) | `ecocompensation.vegetation_sur_cesbio` (`VEG_TABLE`) | non (requête directe) | `ST_Intersects` sur `libelle_prio` |
 | Espèces | `ecocompensation.fauna` | non (requête directe) | `ST_DWithin` sur `nom_vernaculaire` |
 | Zones humides établies | `ecocompensation.zone_humide` | `ecocompensation_results.zone_humide` | intersection, ou surface minimale en ha |
 | Zones humides probables | `geo.zones_humides_probables` (raster) | `ecocompensation_results.zones_humides_probables` | intersection ou exclusion |
@@ -47,7 +47,7 @@ Aucun de ces critères n’est obligatoire. S’il n’est pas activé, la table
 
 Emprises déjà notées dans le catalogue carte, à revérifier :
 
-- `vegetation_sur_cesbio` : emprise commentée « Gironde » dans `catalog.py` (`BBOX_VEGETATION_CESBIO`).
+- `vegetation_sur_cesbio` : emprise commentée « Gironde » dans `catalog.py` (`BBOX_VEGETATION_CESBIO`). Partition BD TOPO puis CESBIO, géométries en dalles. Filtre, surfaces et libellés lisent `VEG_TABLE`. La table `vegetation_sur_cesbio_sub` n'existe plus. L'affichage carte est un remplissage sans contour, et la copie projet regroupe les dalles par classe (`ST_Union`).
 - `zone_humide` : emprise commentée « Adour-Garonne / RPDZH » (`BBOX_ZONE_HUMIDE`). Le libellé catalogue est « Zones humides (RPDZH) ».
 
 Faune, hydrographie, raster de zones humides probables : emprise à vérifier.

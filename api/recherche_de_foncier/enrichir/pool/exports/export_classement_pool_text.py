@@ -233,6 +233,15 @@ def _format_zonage_ratios_lines(val: dict[str, Any], label_total: str) -> str:
 
 
 def format_vegetation_hybride_details(val: dict[str, Any]) -> str:
+    v = _as_dict(val)
+    pct = v.get("pct")
+    if isinstance(pct, dict) and pct:
+        ratios = {
+            str(k): float(x) / 100.0
+            for k, x in pct.items()
+            if isinstance(x, (int, float)) and not isinstance(x, bool) and float(x) > 0
+        }
+        return _format_zonage_ratios_lines({**v, "ratios": ratios}, "Intersection couche / parcelle:")
     return _format_zonage_ratios_lines(val, "Intersection couche / parcelle:")
 
 
@@ -251,7 +260,7 @@ def format_cesbio_profile_details(val: dict[str, Any]) -> str:
         area = item.get("area_m2")
         ratio: float | None = None
         if isinstance(pct, (int, float)) and not isinstance(pct, bool) and pct > 0:
-            ratio = float(pct) / 100.0 if float(pct) > 1.0 else float(pct)
+            ratio = float(pct) / 100.0
             ratios[str(label)] = ratio
         if isinstance(area, (int, float)) and not isinstance(area, bool) and area > 0:
             area_sum += float(area)
@@ -479,4 +488,7 @@ def shp_trunc(text: str, max_len: int = 254) -> str:
     t = unicodedata.normalize("NFC", str(text).replace("\r\n", "\n").replace("\r", "\n"))
     if len(t) <= max_len:
         return t
-    return t[: max_len - 20] + "\n…(tronqué, voir CSV)"
+    suffix = "\n…(tronqué, voir CSV)"
+    if len(suffix) >= max_len:
+        return t[:max_len]
+    return t[: max_len - len(suffix)] + suffix

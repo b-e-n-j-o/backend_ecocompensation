@@ -1,0 +1,99 @@
+{
+  "etude": {
+    "nom": "Recherche foncier — Crapaud calamite",
+    "reference": "Étude test"
+  },
+  "computed_at": "2026-11-04T09:40:00+01:00",
+  "buffer_km": 5,
+  "filter_config": {
+    "search_mode": "exclude_source_buffer",
+    "fauna_criteria": [
+      {
+        "species": "Crapaud calamite (Le)",
+        "dist_m": 600
+      }
+    ],
+    "min_area_ha": 4.0,
+    "miller_thresh": 0.39,
+    "cesbio_libelles": [
+      "Prairies",
+      "Pelouses",
+      "Lande herbacée",
+      "Lande ligneuse",
+      "Landes ligneuses",
+      "Haie",
+      "Bois",
+      "Forêt ouverte",
+      "Forêt fermée de feuillus",
+      "Forêts de feuillus",
+      "Forêt fermée mixte",
+      "Peupleraie",
+      "Eau",
+      "Plages et dunes",
+      "Céréales à pailles",
+      "Protéagineux",
+      "Autres"
+    ],
+    "zone_humide_mode": "exclude",
+    "min_zone_humide_ha": 0,
+    "zones_humides_probables_mode": "exclude",
+    "same_bassin_versant": false,
+    "troncons_hydros_max_dist_m": null,
+    "surfaces_hydros_max_dist_m": null,
+    "arrachage_vignes": false,
+    "arrachage_vignes_types": [],
+    "excluded_layers": [
+      "geomce",
+      "preemption_ens",
+      "ens",
+      "natura_2000"
+    ]
+  },
+  "funnel": [
+    {
+      "label": "Candidats (surface ≥ 4.0 ha)",
+      "count": 668
+    },
+    {
+      "label": "Hors emprise projet (source)",
+      "count": 659
+    },
+    {
+      "label": "Indice de Miller ≥ 0.39",
+      "count": 511
+    },
+    {
+      "label": "Hors mesures compensatoires (GEOMCE)",
+      "count": 507
+    },
+    {
+      "label": "Hors préemption espaces naturels sensibles (ENS)",
+      "count": 507
+    },
+    {
+      "label": "Hors espaces naturels sensibles (ENS)",
+      "count": 491
+    },
+    {
+      "label": "Hors Natura 2000 (ecocompensation.natura_2000)",
+      "count": 491
+    },
+    {
+      "label": "CESBIO (EXISTS/GiST)",
+      "count": 491
+    },
+    {
+      "label": "Faune (1 espèce(s))",
+      "count": 37
+    },
+    {
+      "label": "Hors zones humides établies",
+      "count": 36
+    },
+    {
+      "label": "Hors zones humides probables",
+      "count": 36
+    }
+  ],
+  "total": 36
+}

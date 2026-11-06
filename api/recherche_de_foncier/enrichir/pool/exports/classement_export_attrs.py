@@ -222,8 +222,8 @@ def _ratio_float(raw: Any) -> float | None:
 
 def ratios_from_cesbio_profile(profile: dict[str, Any]) -> dict[str, float]:
     """
-    Convertit la métrique `cesbio_profile` ({libelle: {area_m2, pct}})
-    en parts 0–1 (même contrat que vegetation_hybride_ratio.ratios / occ_sol).
+    Convertit `cesbio_profile` ({libelle: {area_m2, pct}}) en parts 0–1.
+    `pct` est un pourcentage 0–100.
     """
     if not isinstance(profile, dict):
         return {}
@@ -239,24 +239,34 @@ def ratios_from_cesbio_profile(profile: dict[str, Any]) -> dict[str, float]:
             pct = _ratio_float(item)
         if pct is None or pct <= 0:
             continue
-        # pct CESBIO = % parcelle (0–100) ; déjà 0–1 si valeur ≤ 1.
-        ratio = pct / 100.0 if pct > 1.0 else pct
+        # `pct` est un pourcentage 0–100. 0,52 reste 0,52 %, pas 52 %.
+        ratio = pct / 100.0
         if ratio > 0:
             out[name] = round(ratio, 6)
     return out
 
 
 def occ_sol_ratios(mmap: dict[str, Any]) -> dict[str, float]:
-    """Parts d'occupation du sol 0–1 : végétation hybride (BD TOPO + CESBIO), sinon profil CESBIO."""
+    """Parts d'occupation du sol 0–1 pour l'export. La source stockée est `pct` (0–100)."""
     veg_h = mmap.get("vegetation_hybride_ratio") or {}
+    hyb_pct = veg_h.get("pct") if isinstance(veg_h, dict) else None
+    if isinstance(hyb_pct, dict) and hyb_pct:
+        out: dict[str, float] = {}
+        for label, raw in hyb_pct.items():
+            name = str(label or "").strip()
+            fv = _ratio_float(raw)
+            if name and fv is not None and fv > 0:
+                out[name] = round(fv / 100.0, 6)
+        if out:
+            return out
     hyb = veg_h.get("ratios") if isinstance(veg_h, dict) else None
     if isinstance(hyb, dict) and hyb:
-        out: dict[str, float] = {}
+        out = {}
         for label, raw in hyb.items():
             name = str(label or "").strip()
             fv = _ratio_float(raw)
             if name and fv is not None:
-                out[name] = round(fv, 6)
+                out[name] = round(fv / 100.0 if fv > 1.0 else fv, 6)
         if out:
             return out
     profile = mmap.get("cesbio_profile") or {}

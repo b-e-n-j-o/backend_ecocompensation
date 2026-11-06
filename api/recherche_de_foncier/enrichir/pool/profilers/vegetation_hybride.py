@@ -115,9 +115,9 @@ class VegetationHybrideProfiler(BasePoolProfiler):
             total = totals.get(idu, 0.0)
             if total <= 0:
                 continue
-            ratios = {k: round(v / total, 6) for k, v in classes.items() if v > 0}
+            pct = {k: round(v / total * 100.0, 2) for k, v in classes.items() if v > 0}
             payload[idu] = {
-                "ratios": ratios,
+                "pct": pct,
                 "total_intersection_area_m2": round(total, 3),
             }
         return payload

@@ -72,9 +72,27 @@ def _make(key, table, fn):
 
 
 def _make_enrich_uf(key: str, table: str, fn):
-    def wrapped(engine, project_id, aoi_id, cb=None, *, species_list=None):
+    def wrapped(
+        engine,
+        project_id,
+        aoi_id,
+        cb=None,
+        *,
+        species_list=None,
+        miller_thresh=None,
+        cesbio_libelles=None,
+        fauna_criteria=None,
+        fauna_combine="or",
+    ):
         def inner(e, p, a, c):
-            return fn(e, p, a, c, species_list=species_list)
+            return fn(
+                e, p, a, c,
+                species_list=species_list,
+                miller_thresh=miller_thresh,
+                cesbio_libelles=cesbio_libelles,
+                fauna_criteria=fauna_criteria,
+                fauna_combine=fauna_combine,
+            )
         return _wrap(key, table, inner, engine, project_id, aoi_id, cb)
     wrapped.__name__ = f"layer_{key}"
     return wrapped

@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from api.project_kind import ecological_study_type
+
 from api.recherche_de_foncier.enrichir.pool.profilers.arrachage_vignes import ArrachageVignesProfiler
 from api.recherche_de_foncier.enrichir.pool.profilers.base import BasePoolProfiler
 from api.recherche_de_foncier.enrichir.pool.profilers.espaces_boises_classes import (
     EspacesBoisesClassesProfiler,
 )
+from api.recherche_de_foncier.enrichir.pool.profilers.flore import FloreProfiler
 from api.recherche_de_foncier.enrichir.pool.profilers.hydros import HydrosProfiler
 from api.recherche_de_foncier.enrichir.pool.profilers.personnes_morales import PersonnesMoralesProfiler
 from api.recherche_de_foncier.enrichir.pool.profilers.profile_cesbio import ProfileCesbioProfiler
@@ -34,6 +37,7 @@ PROFILER_REGISTRY: dict[str, list[type[BasePoolProfiler]]] = {
         ArrachageVignesProfiler,
         EspacesBoisesClassesProfiler,
         ZnieffProfiler,
+        FloreProfiler,
         ScoreEcoProfiler,
     ],
     STUDY_TYPE_ZH: [
@@ -43,6 +47,7 @@ PROFILER_REGISTRY: dict[str, list[type[BasePoolProfiler]]] = {
         ArrachageVignesProfiler,
         EspacesBoisesClassesProfiler,
         ZnieffProfiler,
+        FloreProfiler,
     ],
 }
 
@@ -66,7 +71,7 @@ def resolve_study_type(conn, project_id: str, run_id: str | None = None) -> str:
             {"project_id": project_id, "run_id": run_id},
         ).mappings().one_or_none()
         if row and row.get("study_type"):
-            return str(row["study_type"])
+            return ecological_study_type(str(row["study_type"]))
 
     row = conn.execute(
         text(
@@ -79,7 +84,7 @@ def resolve_study_type(conn, project_id: str, run_id: str | None = None) -> str:
         {"project_id": project_id, "default": DEFAULT_STUDY_TYPE},
     ).mappings().one_or_none()
     if row and row.get("study_type"):
-        return str(row["study_type"])
+        return ecological_study_type(str(row["study_type"]))
     return DEFAULT_STUDY_TYPE
 
 

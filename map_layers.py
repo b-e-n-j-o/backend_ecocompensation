@@ -19,6 +19,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE
+
 logger = logging.getLogger(__name__)
 
 STMT_TIMEOUT = "120s"
@@ -154,21 +156,22 @@ def get_cesbio_aoi_geojson(conn, project_id: str, libelles: list[str]) -> dict:
             WITH aoi AS ({_aoi_subquery()})
             SELECT
                 COALESCE(v.libelle_prio, v.nature, v.libelle) AS libelle_prio,
-                v.libelle,
-                v.nature,
+                MIN(v.libelle) AS libelle,
+                MIN(v.nature) AS nature,
                 v.source,
                 ST_AsGeoJSON(
                     ST_Transform(
-                        ST_Intersection(v.geom, aoi.geom),
+                        ST_UnaryUnion(ST_Collect(ST_Intersection(v.geom, aoi.geom))),
                         4326
                     ),
                     6
                 )::json AS geometry
-            FROM ecocompensation.vegetation_sur_cesbio v
+            FROM {VEG_TABLE} v
             CROSS JOIN aoi
             WHERE v.geom && aoi.geom
               AND ST_Intersects(v.geom, aoi.geom)
               AND v.libelle_prio = ANY(:libelles)
+            GROUP BY COALESCE(v.libelle_prio, v.nature, v.libelle), v.source
         """),
         {"pid": project_id, "libelles": libelles},
     ).mappings().all()

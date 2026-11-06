@@ -17,12 +17,21 @@ Géométrie initiale + tampon autour. Stocké sur `ecocompensation.aoi.buffer_m`
 
 ## 1. Présence d’espèce(s)
 
-Recherche `nom_vernaculaire`, distance max observation ↔ parcelle (ex. 1000 m).
+Recherche `nom_vernaculaire`. Distance max observation ↔ parcelle réglable **par espèce**.
 
 | Champ | Défaut | Effet |
 |---|---|---|
 | `fauna_criteria` | `[]` | `{species, dist_m}` ; vide = pas de filtre |
 | `fauna_combine` | `or` | `or` = au moins une espèce ; `and` = toutes les espèces |
+
+## 1b. Présence de flore
+
+Jumeau de la faune, juste après dans l’entonnoir. Observations dans `ecocompensation.flore_observation` (`taxon_key`).
+
+| Champ | Défaut | Effet |
+|---|---|---|
+| `flora_criteria` | `[]` | `{taxon_key, label, dist_m}` ; vide = pas de filtre ; `0` = intersection stricte |
+| `flora_combine` | `or` | `or` = au moins un taxon ; `and` = tous les taxons |
 
 ## 2. Filtre géométrique
 
@@ -120,5 +129,5 @@ Découpe AOI → tables `ecocompensation_results.*`, avant ou pour le filtre.
 
 ## Champs enrichis sur les survivantes
 
-`parcelles` : `veg_libelles`, `fauna_distances`, `zone_humide_ha`, `dist_hydro_m`, `troncons_hydro_info`, `dist_surface_hydro_m`, `surface_hydro_ha`, `surfaces_hydro_info`.
+`parcelles` : `veg_libelles`, `fauna_distances`, `flora_distances`, `zone_humide_ha`, `dist_hydro_m`, `troncons_hydro_info`, `dist_surface_hydro_m`, `surface_hydro_ha`, `surfaces_hydro_info`.
 Config enregistrée : `ecocompensation.projects.filter_config` (jsonb). Snapshot du calcul : `last_results.filter_config` / `result_summary.filter_config`.

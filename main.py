@@ -30,6 +30,7 @@ Endpoints :
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -47,20 +48,30 @@ from fastapi import (
     WebSocket, WebSocketDisconnect, BackgroundTasks,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 # ── Modules métier ────────────────────────────────────────────────────────────
 from orchestrator import run_orchestration, fetch_project_two_phases
 from filter_orchestrator import FULL_PIPELINE_PHASES, _run_uf_after_filter, run_filter_orchestration
-from api.recherche_de_foncier.filtrage.layers.filter_pipeline import FaunaCriterion, FilterConfig, ensure_columns
+from api.recherche_de_foncier.filtrage.layers.filter_pipeline import (
+    FaunaCriterion,
+    FilterConfig,
+    FloraCriterion,
+    ensure_columns,
+)
 from api.recherche_de_foncier.filtrage.layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
 from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
 from db import get_engine
+from api.project_kind import KIND_RECHERCHE, normalize_project_kind, project_kind_filter_values
+from api.recherche_de_foncier.filtrage.layers import enrich_uf
 from api.recherche_de_foncier.filtrage.layers.enrich_uf import ensure_columns as ensure_uf_columns
 from api.recherche_de_foncier.filtrage.layers.uf_profiling import build_uf_pool_with_profiling
+from api.recherche_de_foncier.filtrage.layers.uf_parcelles import build_uf_parcelles_geojson
+from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots import api as ilots_rpg_api
 from api.recherche_de_foncier.routers.foncier_router import router as foncier_router
 from api.recherche_de_foncier.routers.pool_router import all_runs_router as pool_all_runs_router
 from api.recherche_de_foncier.routers.pool_router import router as pool_router
@@ -68,9 +79,12 @@ from api.recherche_de_foncier.routers.results_geojson_router import router as re
 from api.recherche_de_foncier.routers.durete_router import router as durete_router
 from api.recherche_de_foncier.routers.autorisations_urba_router import router as autorisations_urba_router
 from api.recherche_de_foncier.routers.cadastre_bbox_router import router as cadastre_bbox_router
+from api.recherche_de_foncier.carte.cadastre_autour.cadastre_autour import router as cadastre_autour_router
 from api.recherche_de_foncier.enrichir.pool.exports.router_exports import router as exports_router
 from api.recherche_de_foncier.routers.rapport_router import router as rapport_router
 from api.recherche_de_foncier.routers.fauna_router import router as fauna_router
+from api.recherche_de_foncier.routers.flore_router import router as flore_router
+from api.reserve_fonciere.flore_import import router as flore_import_router
 from api.reserve_fonciere.router import router as data_interne_router
 from api.reserve_fonciere.ajout_de_foncier.ajout_de_foncier_router import router as ajout_foncier_router
 from api.recherche_de_foncier.enrichir.pool import pool_service
@@ -212,7 +226,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         headers=_cors_headers_for_request(request),
     )
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+_analyse_router_path = Path(__file__).resolve().parent / "api" / "analyse-foncier" / "router.py"
+_analyse_spec = importlib.util.spec_from_file_location("analyse_foncier_router", _analyse_router_path)
+_analyse_mod = importlib.util.module_from_spec(_analyse_spec)
+assert _analyse_spec and _analyse_spec.loader
+_analyse_spec.loader.exec_module(_analyse_mod)
+analyse_foncier_router = _analyse_mod.router
+
+app.include_router(analyse_foncier_router)
 app.include_router(foncier_router, prefix="/api/foncier")
+app.include_router(cadastre_autour_router, prefix="/api")
 app.include_router(pool_router)
 app.include_router(pool_all_runs_router)
 app.include_router(results_geojson_router)
@@ -222,6 +247,8 @@ app.include_router(cadastre_bbox_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
 app.include_router(fauna_router, prefix="/api/fauna", tags=["fauna"])
+app.include_router(flore_router, prefix="/api/flore", tags=["flore"])
+app.include_router(flore_import_router, prefix="/api/reserve-fonciere/flore", tags=["flore-import"])
 app.include_router(data_interne_router, prefix="/api/data-interne", tags=["data-interne"])
 app.include_router(ajout_foncier_router, prefix="/api/reserve-fonciere", tags=["ajout-foncier"])
 
@@ -294,6 +321,12 @@ class FaunaFilterCriterionDTO(BaseModel):
     dist_m: float = Field(..., ge=0, le=50_000)
 
 
+class FloraFilterCriterionDTO(BaseModel):
+    taxon_key: str = Field(..., min_length=1)
+    label: str = Field(default="")
+    dist_m: float = Field(..., ge=0, le=50_000)
+
+
 class FilterPipelineRequest(BaseModel):
     """POST /api/projects/{id}/filter-pipeline — pipeline filter_v2."""
     min_area_ha: float = Field(default=7.0, ge=0.1, le=500)
@@ -303,6 +336,11 @@ class FilterPipelineRequest(BaseModel):
     fauna_combine: str = Field(
         default="or",
         description="Combinaison entre espèces : or = au moins une, and = toutes.",
+    )
+    flora_criteria: list[FloraFilterCriterionDTO] = Field(default_factory=list)
+    flora_combine: str = Field(
+        default="or",
+        description="Combinaison entre taxons : or = au moins un, and = tous.",
     )
     zone_humide_mode: str = Field(default="ignore")
     zones_humides_probables_mode: str = Field(default="ignore")
@@ -344,6 +382,10 @@ class FilterPipelineRequest(BaseModel):
         default=True,
         description="Calcule aussi les unités foncières après le filtre parcelles.",
     )
+    include_ilots_rpg: bool = Field(
+        default=False,
+        description="Calcule aussi les îlots agricoles RPG après le filtre parcelles.",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -365,7 +407,7 @@ def _get_project(project_id: str) -> dict:
         ).mappings().one_or_none()
     if not row:
         raise HTTPException(404, f"Projet {project_id} introuvable")
-    return dict(row)
+    return _project_row_out(row)
 
 
 def _get_aoi_centre(aoi_id: str) -> tuple[float, float]:
@@ -387,30 +429,41 @@ def _get_aoi_centre(aoi_id: str) -> tuple[float, float]:
 # Routes — Projets
 # ─────────────────────────────────────────────
 
+def _project_row_out(row) -> dict:
+    d = dict(row)
+    d["study_type"] = normalize_project_kind(d.get("study_type"))
+    return d
+
+
 @app.get("/api/projects")
 def list_projects(study_type: str | None = None):
     sql = """
         SELECT id, name, status, layers_status, created_at, updated_at,
-               COALESCE(study_type, 'faune_buffer') AS study_type
+               COALESCE(study_type, 'recherche') AS study_type
         FROM ecocompensation.projects
     """
     params: dict = {}
-    if study_type:
-        sql += " WHERE COALESCE(study_type, 'faune_buffer') = :study_type"
-        params["study_type"] = study_type
+    kinds = project_kind_filter_values(study_type)
+    if kinds:
+        sql += " WHERE COALESCE(study_type, 'recherche') IN :kinds"
+        params["kinds"] = kinds
     sql += " ORDER BY created_at DESC"
+    stmt = text(sql)
+    if kinds:
+        stmt = stmt.bindparams(bindparam("kinds", expanding=True))
     with engine.begin() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    return [dict(r) for r in rows]
+        rows = conn.execute(stmt, params).mappings().all()
+    return [_project_row_out(r) for r in rows]
 
 
 @app.get("/api/projects/history")
 def list_projects_history(study_type: str | None = None):
     study_filter = ""
     params: dict = {}
-    if study_type:
-        study_filter = " WHERE COALESCE(p.study_type, 'faune_buffer') = :study_type"
-        params["study_type"] = study_type
+    kinds = project_kind_filter_values(study_type)
+    if kinds:
+        study_filter = " WHERE COALESCE(p.study_type, 'recherche') IN :kinds"
+        params["kinds"] = kinds
 
     with engine.begin() as conn:
         has_pool_runs = bool(
@@ -429,7 +482,8 @@ def list_projects_history(study_type: str | None = None):
                         p.created_at,
                         p.updated_at,
                         p.last_filter,
-                        COALESCE(p.study_type, 'faune_buffer') AS study_type,
+                        p.filter_config,
+                        COALESCE(p.study_type, 'recherche') AS study_type,
                         a.buffer_m,
                         f.area_ha AS foncier_area_ha,
                         {pool_col}
@@ -464,7 +518,10 @@ def list_projects_history(study_type: str | None = None):
                 study_filter=study_filter,
             )
 
-        rows = conn.execute(text(sql), params).mappings().all()
+        hist_stmt = text(sql)
+        if kinds:
+            hist_stmt = hist_stmt.bindparams(bindparam("kinds", expanding=True))
+        rows = conn.execute(hist_stmt, params).mappings().all()
 
     out: list[dict] = []
     for r in rows:
@@ -477,6 +534,15 @@ def list_projects_history(study_type: str | None = None):
         if not isinstance(last_filter, dict):
             last_filter = None
 
+        filter_config = r.get("filter_config")
+        if isinstance(filter_config, str):
+            try:
+                filter_config = json.loads(filter_config)
+            except Exception:
+                filter_config = None
+        if not isinstance(filter_config, dict):
+            filter_config = None
+
         buffer_m = r.get("buffer_m")
         buffer_km = (float(buffer_m) / 1000.0) if buffer_m is not None else None
         out.append(
@@ -484,10 +550,11 @@ def list_projects_history(study_type: str | None = None):
                 "id": str(r["id"]),
                 "name": r.get("name"),
                 "status": r.get("status"),
-                "study_type": r.get("study_type") or "faune_buffer",
+                "study_type": normalize_project_kind(r.get("study_type")),
                 "layers_status": r.get("layers_status") or {},
                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
                 "updated_at": r["updated_at"].isoformat() if r.get("updated_at") else None,
+                "filter_config": filter_config,
                 "history": {
                     "buffer_km": buffer_km,
                     "foncier_area_ha": float(r["foncier_area_ha"]) if r.get("foncier_area_ha") is not None else None,
@@ -497,6 +564,65 @@ def list_projects_history(study_type: str | None = None):
             }
         )
     return out
+
+
+@app.get("/api/projects/history-map")
+def list_projects_history_map():
+    """Centroïdes + contours des géométries projet (parcelle source, sinon foncier)."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    p.id,
+                    p.name,
+                    ST_AsGeoJSON(ST_Transform(
+                        ST_PointOnSurface(COALESCE(src.geom, f.geom_2154, a.geom_2154)),
+                        4326
+                    ))::json AS point_geom,
+                    ST_AsGeoJSON(ST_Transform(
+                        ST_SimplifyPreserveTopology(COALESCE(src.geom, f.geom_2154), 15),
+                        4326
+                    ))::json AS outline_geom
+                FROM ecocompensation.projects p
+                LEFT JOIN LATERAL (
+                    SELECT ST_Union(geom_2154) AS geom
+                    FROM ecocompensation.project_parcelles
+                    WHERE project_id = p.id
+                    HAVING COUNT(*) > 0
+                ) src ON TRUE
+                LEFT JOIN ecocompensation.aoi a ON a.id = p.aoi_id
+                LEFT JOIN ecocompensation.foncier f ON f.id = p.foncier_id
+                WHERE COALESCE(src.geom, f.geom_2154, a.geom_2154) IS NOT NULL
+                """
+            )
+        ).mappings().all()
+
+    points = []
+    outlines = []
+    for r in rows:
+        pid = str(r["id"])
+        name = r.get("name") or pid[:8]
+        if r.get("point_geom"):
+            points.append(
+                {
+                    "type": "Feature",
+                    "geometry": dict(r["point_geom"]),
+                    "properties": {"project_id": pid, "name": name},
+                }
+            )
+        if r.get("outline_geom"):
+            outlines.append(
+                {
+                    "type": "Feature",
+                    "geometry": dict(r["outline_geom"]),
+                    "properties": {"project_id": pid, "name": name},
+                }
+            )
+    return {
+        "points": {"type": "FeatureCollection", "features": points},
+        "outlines": {"type": "FeatureCollection", "features": outlines},
+    }
 
 
 @app.post("/api/projects", status_code=201)
@@ -553,12 +679,17 @@ async def create_project(
         proj = conn.execute(
             text(
                 """
-                INSERT INTO ecocompensation.projects (id, name, aoi_id, status)
-                VALUES (:project_id, :name, :aoi_id, 'created')
+                INSERT INTO ecocompensation.projects (id, name, aoi_id, status, study_type)
+                VALUES (:project_id, :name, :aoi_id, 'created', :study_type)
                 RETURNING id, name, status, created_at
                 """
             ),
-            {"project_id": project_id, "name": name, "aoi_id": aoi_id},
+            {
+                "project_id": project_id,
+                "name": name,
+                "aoi_id": aoi_id,
+                "study_type": KIND_RECHERCHE,
+            },
         ).mappings().one()
 
     return {"id": str(proj["id"]), "name": proj["name"], "status": proj["status"],
@@ -685,7 +816,7 @@ def _create_project_from_union_geometry(
                 "name": project_name,
                 "aoi_id": aoi_id,
                 "foncier_id": foncier_id,
-                "study_type": study_type,
+                "study_type": KIND_RECHERCHE,
             },
         ).mappings().one()
     return {
@@ -906,8 +1037,8 @@ async def start_filter_pipeline(
     if proj["status"] in ("fetching", "filtering") or project_id in _running_filters:
         raise HTTPException(409, "Filtrage déjà en cours")
 
-    study_type = str(proj.get("study_type") or "faune_buffer")
-    search_mode = "within_foncier" if study_type == "zones_humides_intra" else "exclude_source_buffer"
+    study_type = str(proj.get("study_type") or KIND_RECHERCHE)
+    search_mode = "exclude_source_buffer"
 
     zh_mode = body.zone_humide_mode if body.zone_humide_mode in ("ignore", "intersect", "exclude") else "ignore"
     zhp_mode = (
@@ -927,6 +1058,16 @@ async def start_filter_pipeline(
             if fc.species.strip()
         ],
         fauna_combine="and" if str(body.fauna_combine).lower() == "and" else "or",
+        flora_criteria=[
+            FloraCriterion(
+                taxon_key=fc.taxon_key.strip(),
+                label=(fc.label or fc.taxon_key).strip(),
+                dist_m=fc.dist_m,
+            )
+            for fc in body.flora_criteria
+            if fc.taxon_key.strip()
+        ],
+        flora_combine="and" if str(body.flora_combine).lower() == "and" else "or",
         search_mode=search_mode,
         zone_humide_mode=zh_mode,
         zones_humides_probables_mode=zhp_mode,
@@ -942,6 +1083,7 @@ async def start_filter_pipeline(
         arrachage_vignes=body.arrachage_vignes,
         arrachage_vignes_types=[x.strip() for x in body.arrachage_vignes_types if x and str(x).strip()],
         include_unites_foncieres=body.include_unites_foncieres,
+        include_ilots_rpg=body.include_ilots_rpg,
     )
     _running_filters.add(project_id)
 
@@ -986,6 +1128,20 @@ async def start_uf_only(project_id: str):
         dist = fc.get("dist_m")
         fauna.append(FaunaCriterion(species=species, dist_m=float(dist) if dist is not None else 1000.0))
 
+    flora = []
+    for fc in raw.get("flora_criteria") or []:
+        if not isinstance(fc, dict):
+            continue
+        key = str(fc.get("taxon_key") or "").strip()
+        if not key:
+            continue
+        dist = fc.get("dist_m")
+        flora.append(FloraCriterion(
+            taxon_key=key,
+            label=str(fc.get("label") or key).strip(),
+            dist_m=float(dist) if dist is not None else 200.0,
+        ))
+
     miller = raw.get("miller_thresh")
     config = FilterConfig(
         min_area_ha=float(raw.get("min_area_ha") or 7),
@@ -993,6 +1149,8 @@ async def start_uf_only(project_id: str):
         cesbio_libelles=[str(x).strip() for x in (raw.get("cesbio_libelles") or []) if str(x).strip()],
         fauna_criteria=fauna,
         fauna_combine="and" if str(raw.get("fauna_combine") or "or").lower() == "and" else "or",
+        flora_criteria=flora,
+        flora_combine="and" if str(raw.get("flora_combine") or "or").lower() == "and" else "or",
         search_mode=str(raw.get("search_mode") or "exclude_source_buffer"),
         zone_humide_mode=str(raw.get("zone_humide_mode") or "ignore"),
         zones_humides_probables_mode=str(raw.get("zones_humides_probables_mode") or "ignore"),
@@ -1005,6 +1163,7 @@ async def start_uf_only(project_id: str):
         arrachage_vignes=bool(raw.get("arrachage_vignes")),
         arrachage_vignes_types=[str(x).strip() for x in (raw.get("arrachage_vignes_types") or []) if str(x).strip()],
         include_unites_foncieres=True,
+        include_ilots_rpg=bool(raw.get("include_ilots_rpg")),
     )
     aoi_id = str(proj["aoi_id"])
     _running_filters.add(project_id)
@@ -1153,7 +1312,7 @@ def get_uf_pool(
         except Exception:
             pass
 
-    resolved_study_type = (study_type or "").strip() or str(proj.get("study_type") or "faune_buffer")
+    resolved_study_type = (study_type or "").strip() or "faune_buffer"
     resolved_min_zh = min_zone_humide_ha
     if resolved_min_zh is None and proj.get("last_filter"):
         try:
@@ -1205,7 +1364,10 @@ def get_results(project_id: str):
         "last_filter":     proj.get("last_filter"),
         "last_results":    proj.get("last_results"),
         "last_filter_uf":  proj.get("last_filter_uf"),
-        "last_results_uf": proj.get("last_results_uf"),
+        "last_results_uf": enrich_uf.attach_stored_veg_profiles(
+            engine, project_id, proj.get("last_results_uf"),
+        ),
+        "last_results_ilots_rpg": ilots_rpg_api.get_results(engine, project_id),
         "layers_status":   proj.get("layers_status", {}),
         "buffer_km":       buffer_km,
     }
@@ -1417,6 +1579,31 @@ def get_uf_subsets_geojson(project_id: str):
         raise HTTPException(400, "Géométries des sous-ensembles introuvables en base")
 
     return {"type": "FeatureCollection", "features": features}
+
+
+@app.get("/api/projects/{project_id}/geojson/uf-parcelles")
+def get_uf_parcelles_geojson(project_id: str):
+    """Parcelles retenues de chaque UF (présence dans les combinaisons) pour la carte UF."""
+    proj = _get_project(project_id)
+    results_uf = proj.get("last_results_uf")
+    if not results_uf:
+        raise HTTPException(400, "Aucun résultat UF")
+    if isinstance(results_uf, str):
+        results_uf = json.loads(results_uf)
+    return build_uf_parcelles_geojson(engine, project_id, results_uf)
+
+
+@app.get("/api/projects/{project_id}/ilots-rpg")
+def get_ilots_rpg(project_id: str):
+    _get_project(project_id)
+    res = ilots_rpg_api.get_results(engine, project_id)
+    return res or {"source": "rpg_ilots", "millesime": "2025", "total_candidats": 0, "total_ilots": 0, "ilots": []}
+
+
+@app.get("/api/projects/{project_id}/geojson/ilots-rpg")
+def get_ilots_rpg_geojson(project_id: str):
+    _get_project(project_id)
+    return ilots_rpg_api.get_geojson(engine, project_id)
 
 
 # ─────────────────────────────────────────────

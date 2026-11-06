@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Paramètres de filtrage — {{ etude.nom or "Étude" }}</title>
+<style>
+@page { size: A4; margin: 12mm 13mm 13mm 13mm;
+  @bottom-left { content: "Paramètres de filtrage · empreinte {{ config_hash }}"; font: 6.8pt "DejaVu Sans", sans-serif; color: #8a948e; }
+  @bottom-right { content: "Généré le {{ generated_at }}"; font: 6.8pt "DejaVu Sans", sans-serif; color: #8a948e; } }
+:root { --ink:#1d2a24; --muted:#6b766f; --line:#dfe5e1; --soft:#f4f7f5; --green:#2f6f55; --red:#c4673f; }
+html { font-family: "Inter","DejaVu Sans",sans-serif; font-size: 8pt; line-height: 1.35; color: var(--ink); }
+body { margin: 0; }
+.head { margin-bottom: 10pt !important; display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 1.5pt solid var(--green); padding-bottom: 5pt; margin-bottom: 7pt; }
+.kicker { font-size: 6.8pt; letter-spacing: .08em; text-transform: uppercase; color: var(--green); font-weight: 600; }
+h1 { font-size: 15pt; margin: 1pt 0 0; font-weight: 600; }
+.sub { color: var(--muted); font-size: 8pt; }
+.meta { text-align: right; font-size: 7.4pt; color: var(--muted); }
+.meta b { color: var(--ink); font-weight: 600; }
+.kpis { display: flex; gap: 6pt; margin-bottom: 8pt; }
+.kpi { flex: 1; background: var(--soft); border-radius: 4pt; padding: 5pt 8pt; }
+.kpi--final { background: var(--green); color: #fff; }
+.kpi .v { font-size: 15pt; font-weight: 700; line-height: 1.05; }
+.kpi .l { font-size: 7pt; opacity: .85; }
+.arrow { align-self: center; color: var(--muted); font-size: 13pt; }
+.grid { columns: 2; column-gap: 8pt; }
+.block { break-inside: avoid; border: .75pt solid var(--line); border-radius: 4pt; margin: 0 0 6pt; padding: 4pt 7pt 5pt; }
+.block--off { background: #fafbfa; }
+.bt { font-size: 6.8pt; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin-bottom: 2pt; display: flex; justify-content: space-between; }
+.row { display: flex; align-items: baseline; gap: 6pt; padding: 3.5pt 0; border-top: .5pt solid #eef1ef; }
+.row:first-of-type { border-top: 0; }
+.pill { flex: none; width: 24pt; text-align: center; font-size: 6.2pt; font-weight: 700; border-radius: 6pt; padding: .5pt 0; }
+.on { background: var(--green); color: #fff; }
+.off { background: #e6eae8; color: #8a948e; }
+.lab { flex: 1; font-size: 8.6pt; font-weight: 500; }
+.row--off .lab { color: #9aa39e; }
+.val { display: block; margin-top: 2pt; }
+.chip { display: inline-block; background: #e8f1ec; border: .6pt solid #b9d3c5; border-radius: 3pt; padding: 1pt 5pt; margin: 1.5pt 3pt 0 0; font-size: 8.4pt; }
+.chip i { font-style: normal; color: var(--muted); font-size: 7.4pt; }
+.chip b { color: #1e4a38; font-weight: 700; }
+.stat { flex: none; text-align: right; font-size: 7pt; white-space: nowrap; color: var(--muted); }
+.stat b { color: var(--red); font-weight: 600; }
+.stat .z { color: var(--muted); }
+.legend { font-size: 6.8pt; color: var(--muted); margin-top: 2pt; }
+</style>
+</head>
+<body>
+<div class="head">
+  <div>
+    <div class="kicker">{{ etude.organisme or "Kerelia" }} · KerFoncier</div>
+    <h1>Paramètres de filtrage</h1>
+    <div class="sub">{{ etude.nom or "" }}{% if etude.projet %} · {{ etude.projet }}{% endif %}</div>
+  </div>
+  <div class="meta">
+    {% if etude.reference %}Réf. <b>{{ etude.reference }}</b><br>{% endif %}
+    Calcul du {{ computed_at }}{% if etude.auteur %}<br>{{ etude.auteur }}{% endif %}
+  </div>
+</div>
+
+
+<div class="grid">
+{% for b in blocks %}
+  <div class="block{{ ' block--off' if not b.any_on }}">
+    <div class="bt"><span>{{ b.title }}</span>{% if not b.any_on %}<span>non utilisé</span>{% endif %}</div>
+    {% for c in b.crits %}
+    <div class="row{{ '' if c.applied else ' row--off' }}">
+      <span class="pill {{ 'on' if c.applied else 'off' }}">{{ 'ON' if c.applied else 'OFF' }}</span>
+      <span class="lab">{{ c.name }}
+        {% if c.applied and c.chips %}<span class="val">{% for k, v in c.chips %}<span class="chip">{% if k %}<i>{{ k }}</i> {% endif %}<b>{{ v }}</b></span>{% endfor %}</span>{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+{% endfor %}
+</div>
+<div class="legend">ON / OFF : état de chaque critère au moment du calcul. Les valeurs indiquées sont celles réglées dans le panneau de filtrage.</div>
+</body>
+</html>
