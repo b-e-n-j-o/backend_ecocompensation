@@ -83,8 +83,10 @@ from api.recherche_de_foncier.carte.cadastre_autour.cadastre_autour import route
 from api.recherche_de_foncier.enrichir.pool.exports.router_exports import router as exports_router
 from api.recherche_de_foncier.routers.rapport_router import router as rapport_router
 from api.recherche_de_foncier.routers.fauna_router import router as fauna_router
+from api.recherche_de_foncier.routers.hydro_preview import router as hydro_preview_router
 from api.recherche_de_foncier.routers.flore_router import router as flore_router
-from api.reserve_fonciere.flore_import import router as flore_import_router
+from api.reserve_fonciere.ajout_de_foncier.flore.flore_import import router as flore_import_router
+from api.reserve_fonciere.ajout_de_foncier.faune.faune_import import router as faune_import_router
 from api.reserve_fonciere.router import router as data_interne_router
 from api.reserve_fonciere.ajout_de_foncier.ajout_de_foncier_router import router as ajout_foncier_router
 from api.recherche_de_foncier.enrichir.pool import pool_service
@@ -247,8 +249,10 @@ app.include_router(cadastre_bbox_router)
 app.include_router(exports_router)
 app.include_router(rapport_router)
 app.include_router(fauna_router, prefix="/api/fauna", tags=["fauna"])
+app.include_router(hydro_preview_router, prefix="/api/hydro", tags=["hydro"])
 app.include_router(flore_router, prefix="/api/flore", tags=["flore"])
 app.include_router(flore_import_router, prefix="/api/reserve-fonciere/flore", tags=["flore-import"])
+app.include_router(faune_import_router, prefix="/api/reserve-fonciere/faune", tags=["faune-import"])
 app.include_router(data_interne_router, prefix="/api/data-interne", tags=["data-interne"])
 app.include_router(ajout_foncier_router, prefix="/api/reserve-fonciere", tags=["ajout-foncier"])
 
@@ -319,6 +323,7 @@ class FetchRequest(BaseModel):
 class FaunaFilterCriterionDTO(BaseModel):
     species: str = Field(..., min_length=1)
     dist_m: float = Field(..., ge=0, le=50_000)
+    aliases: list[str] = Field(default_factory=list)
 
 
 class FloraFilterCriterionDTO(BaseModel):
@@ -337,10 +342,16 @@ class FilterPipelineRequest(BaseModel):
         default="or",
         description="Combinaison entre espèces : or = au moins une, and = toutes.",
     )
+    fauna_joins: list[str] = Field(default_factory=list)
     flora_criteria: list[FloraFilterCriterionDTO] = Field(default_factory=list)
     flora_combine: str = Field(
         default="or",
         description="Combinaison entre taxons : or = au moins un, and = tous.",
+    )
+    flora_joins: list[str] = Field(default_factory=list)
+    bio_combine: str = Field(
+        default="or",
+        description="Entre faune et flore : or = l'un ou l'autre, and = les deux.",
     )
     zone_humide_mode: str = Field(default="ignore")
     zones_humides_probables_mode: str = Field(default="ignore")
@@ -1053,11 +1064,16 @@ async def start_filter_pipeline(
         miller_thresh=body.miller_thresh,
         cesbio_libelles=[x.strip() for x in body.cesbio_libelles if x.strip()],
         fauna_criteria=[
-            FaunaCriterion(species=fc.species.strip(), dist_m=fc.dist_m)
+            FaunaCriterion(
+                species=fc.species.strip(),
+                dist_m=fc.dist_m,
+                aliases=[a.strip() for a in fc.aliases if a.strip() and a.strip() != fc.species.strip()],
+            )
             for fc in body.fauna_criteria
             if fc.species.strip()
         ],
         fauna_combine="and" if str(body.fauna_combine).lower() == "and" else "or",
+        fauna_joins=[j for j in body.fauna_joins if str(j).lower() in ("and", "or")],
         flora_criteria=[
             FloraCriterion(
                 taxon_key=fc.taxon_key.strip(),
@@ -1068,6 +1084,8 @@ async def start_filter_pipeline(
             if fc.taxon_key.strip()
         ],
         flora_combine="and" if str(body.flora_combine).lower() == "and" else "or",
+        flora_joins=[j for j in body.flora_joins if str(j).lower() in ("and", "or")],
+        bio_combine="and" if str(body.bio_combine).lower() == "and" else "or",
         search_mode=search_mode,
         zone_humide_mode=zh_mode,
         zones_humides_probables_mode=zhp_mode,
@@ -1103,6 +1121,30 @@ async def start_filter_pipeline(
     return {"status": "started", "project_id": project_id}
 
 
+@app.get("/api/projects/{project_id}/uf-combinations-audit")
+def uf_combinations_audit(project_id: str, max_k: int = Query(5, ge=2, le=15)):
+    """Compte les combinaisons d'UF pour un k max, sans remplacer les résultats."""
+    proj = _get_project(project_id)
+    from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import audit_combinations
+    from db import get_engine_ppm
+
+    raw = proj.get("last_filter") or proj.get("filter_config") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    min_area = float(raw.get("min_area_ha") or 7) if isinstance(raw, dict) else 7.0
+    return audit_combinations(
+        engine,
+        project_id,
+        str(proj["aoi_id"]),
+        engine_ppm=get_engine_ppm(),
+        min_area_ha=min_area,
+        max_k=max_k,
+    )
+
+
 @app.post("/api/projects/{project_id}/filter-uf")
 async def start_uf_only(project_id: str):
     """Relance uniquement les unités foncières avec les paramètres du dernier filtre."""
@@ -1126,7 +1168,12 @@ async def start_uf_only(project_id: str):
         if not species:
             continue
         dist = fc.get("dist_m")
-        fauna.append(FaunaCriterion(species=species, dist_m=float(dist) if dist is not None else 1000.0))
+        aliases = [str(a).strip() for a in (fc.get("aliases") or []) if str(a).strip() and str(a).strip() != species]
+        fauna.append(FaunaCriterion(
+            species=species,
+            dist_m=float(dist) if dist is not None else 1000.0,
+            aliases=aliases,
+        ))
 
     flora = []
     for fc in raw.get("flora_criteria") or []:
@@ -1149,8 +1196,11 @@ async def start_uf_only(project_id: str):
         cesbio_libelles=[str(x).strip() for x in (raw.get("cesbio_libelles") or []) if str(x).strip()],
         fauna_criteria=fauna,
         fauna_combine="and" if str(raw.get("fauna_combine") or "or").lower() == "and" else "or",
+        fauna_joins=[str(j).lower() for j in (raw.get("fauna_joins") or []) if str(j).lower() in ("and", "or")],
         flora_criteria=flora,
         flora_combine="and" if str(raw.get("flora_combine") or "or").lower() == "and" else "or",
+        flora_joins=[str(j).lower() for j in (raw.get("flora_joins") or []) if str(j).lower() in ("and", "or")],
+        bio_combine="and" if str(raw.get("bio_combine") or "or").lower() == "and" else "or",
         search_mode=str(raw.get("search_mode") or "exclude_source_buffer"),
         zone_humide_mode=str(raw.get("zone_humide_mode") or "ignore"),
         zones_humides_probables_mode=str(raw.get("zones_humides_probables_mode") or "ignore"),

@@ -28,6 +28,7 @@ from api.recherche_de_foncier.enrichir.pool.exports.export_uf_classement_csv imp
 from api.recherche_de_foncier.enrichir.pool.exports.export_classement_shp import export_classement_shp
 from api.recherche_de_foncier.enrichir.pool.exports.export_uf_classement_shp import export_uf_classement_shp
 from api.recherche_de_foncier.enrichir.pool.exports.export_etude_gpkg import write_etude_geopackage
+from api.recherche_de_foncier.enrichir.pool.exports.export_zip_readme import add_export_readme
 
 _FILTER_REPORT_DIR = (
     Path(__file__).resolve().parents[3] / "filtrage" / "export" / "filter_report"
@@ -244,6 +245,7 @@ def export_shp(
                 raise HTTPException(400, str(e)) from e
             zip_path = Path(tmpdir) / "parcelles.zip"
             with zipfile.ZipFile(zip_path, "w") as zf:
+                add_export_readme(zf, "parcelles")
                 for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
                     f = shp_path.with_suffix(ext)
                     if f.exists():
@@ -289,6 +291,7 @@ def export_shp(
                 raise HTTPException(400, str(e)) from e
             zip_path = Path(tmpdir) / "indesirables.zip"
             with zipfile.ZipFile(zip_path, "w") as zf:
+                add_export_readme(zf, "indesirables")
                 for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
                     f = shp_path.with_suffix(ext)
                     if f.exists():
@@ -328,6 +331,7 @@ def export_shp(
             raise HTTPException(400, str(e)) from e
         zip_path = tmp / "uf.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
+            add_export_readme(zf, "uf")
             for stem in ("unites_foncieres", "parcelles"):
                 for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
                     f = tmp / f"{stem}{ext}"

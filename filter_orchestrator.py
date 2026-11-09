@@ -111,11 +111,14 @@ def _filter_options_json(config: FilterConfig, *, buffer_km: float = 0.0) -> dic
             for fc in config.fauna_criteria
         ],
         "fauna_combine": "and" if str(config.fauna_combine).lower() == "and" else "or",
+        "fauna_joins": list(config.fauna_joins),
         "flora_criteria": [
             {"taxon_key": fc.taxon_key, "label": fc.label, "dist_m": fc.dist_m}
             for fc in config.flora_criteria
         ],
         "flora_combine": "and" if str(config.flora_combine).lower() == "and" else "or",
+        "flora_joins": list(config.flora_joins),
+        "bio_combine": "and" if str(config.bio_combine).lower() == "and" else "or",
         "zone_humide_mode": config.zone_humide_mode,
         "zones_humides_probables_mode": config.zones_humides_probables_mode,
         "min_zone_humide_ha": config.min_zone_humide_ha,
@@ -564,6 +567,7 @@ async def _run_uf_after_filter(
                 if fc.species.strip()
             ],
             uf_fauna_combine=config.fauna_combine,
+            uf_fauna_joins=config.fauna_joins,
         )
         cx, cy = _get_aoi_centre(engine, aoi_id)
         fauna_criteria = [

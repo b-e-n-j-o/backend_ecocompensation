@@ -571,6 +571,132 @@ def _geojson_fc_to_gdf(fc: dict[str, Any]) -> gpd.GeoDataFrame:
 # =========================================================================
 
 
+class ZoneCountBody(BaseModel):
+    species: str = Field(..., min_length=1)
+    buffer_m: float = Field(3000, ge=0, le=50_000)
+    geometry: dict
+
+
+@router.post("/zone-count")
+def zone_count(body: ZoneCountBody):
+    """Nombre d'observations Fauna de l'espèce dans la zone + son buffer."""
+    try:
+        geom = shape(body.geometry)
+    except Exception as e:
+        raise HTTPException(400, "Géométrie illisible") from e
+    if geom.is_empty:
+        return {"count": 0}
+    srid = 2154 if abs(geom.bounds[0]) > 1000 else 4326
+    sql = text("""
+        SELECT COUNT(*)::int
+        FROM ecocompensation.fauna f
+        WHERE f.nom_vernaculaire = :species
+          AND f.geometry && ST_Expand(
+                CASE WHEN :srid = 2154
+                     THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
+                     ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
+                END,
+                :buf)
+          AND ST_DWithin(
+                f.geometry,
+                CASE WHEN :srid = 2154
+                     THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
+                     ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
+                END,
+                :buf)
+    """)
+    with _engine.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '8s'"))
+        n = conn.execute(sql, {
+            "species": body.species.strip(),
+            "gj": json.dumps(body.geometry),
+            "srid": srid,
+            "buf": float(body.buffer_m),
+        }).scalar_one()
+    return {"count": int(n)}
+
+
+class ZonePointsBody(BaseModel):
+    names: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
+    buffer_m: float = Field(3000, ge=0, le=50_000)
+    geometry: dict
+
+
+@router.post("/zone-points")
+def zone_points(body: ZonePointsBody):
+    """Points Fauna et observations personnelles de ces noms, dans la zone bufferisée."""
+    names = [n.strip() for n in body.names if n and n.strip()]
+    aliases = [n.strip() for n in body.aliases if n and n.strip()]
+    if not names and not aliases:
+        return {"type": "FeatureCollection", "features": []}
+    try:
+        geom = shape(body.geometry)
+    except Exception as e:
+        raise HTTPException(400, "Géométrie illisible") from e
+    if geom.is_empty:
+        return {"type": "FeatureCollection", "features": []}
+    srid = 2154 if abs(geom.bounds[0]) > 1000 else 4326
+    zone = """
+        CASE WHEN :srid = 2154
+             THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
+             ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
+        END
+    """
+    sql = text(f"""
+        SELECT src, nom, ST_AsGeoJSON(ST_Transform(ST_Centroid(geom), 4326)) AS geojson
+        FROM (
+            SELECT 'fauna' AS src, f.nom_vernaculaire AS nom, f.geometry AS geom
+            FROM ecocompensation.fauna f
+            WHERE f.nom_vernaculaire = ANY(:names)
+              AND ST_DWithin(f.geometry, {zone}, :buf)
+            UNION ALL
+            SELECT 'perso', o.nom_espece, o.geom
+            FROM ecocompensation.observation_faune o
+            WHERE to_regclass('ecocompensation.observation_faune') IS NOT NULL
+              AND o.nom_espece = ANY(:aliases)
+              AND ST_DWithin(o.geom, {zone}, :buf)
+        ) q
+        LIMIT 2000
+    """)
+    try:
+        with _engine.begin() as conn:
+            conn.execute(text("SET LOCAL statement_timeout = '12s'"))
+            rows = conn.execute(sql, {
+                "names": names,
+                "aliases": aliases,
+                "gj": json.dumps(body.geometry),
+                "srid": srid,
+                "buf": float(body.buffer_m),
+            }).mappings().all()
+    except Exception:
+        with _engine.begin() as conn:
+            conn.execute(text("SET LOCAL statement_timeout = '12s'"))
+            rows = conn.execute(text(f"""
+                SELECT 'fauna' AS src, f.nom_vernaculaire AS nom,
+                       ST_AsGeoJSON(ST_Transform(ST_Centroid(f.geometry), 4326)) AS geojson
+                FROM ecocompensation.fauna f
+                WHERE f.nom_vernaculaire = ANY(:names)
+                  AND ST_DWithin(f.geometry, {zone}, :buf)
+                LIMIT 2000
+            """), {
+                "names": names,
+                "gj": json.dumps(body.geometry),
+                "srid": srid,
+                "buf": float(body.buffer_m),
+            }).mappings().all()
+    features = []
+    for r in rows:
+        if not r["geojson"]:
+            continue
+        features.append({
+            "type": "Feature",
+            "properties": {"source": r["src"], "nom": r["nom"]},
+            "geometry": json.loads(r["geojson"]),
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
 @router.get("/species", response_model=list[FaunaTaxonRefItem])
 def list_species_catalog(
     limit: int = Query(

@@ -319,6 +319,7 @@ def run(
     engine_ppm=None,
     min_area_ha: float | None = None,
     max_uf_parcelles: int | None = None,
+    max_k: int | None = None,
 ) -> int:
     """
     Construit UF + sous-ensembles pour l'AOI.
@@ -329,6 +330,7 @@ def run(
     engine_ppm = engine_ppm or engine_core
     min_area = MIN_AREA_HA_PREFILTER if min_area_ha is None else float(min_area_ha)
     cap = MAX_UF_PARCELLES if max_uf_parcelles is None else int(max_uf_parcelles)
+    k_max = MAX_K if max_k is None else max(2, min(int(max_k), 15))
     t0 = time.perf_counter()
 
     with engine_core.begin() as conn:
@@ -433,7 +435,7 @@ def run(
                     })
 
                 adj = _adj_from_pairs(members, pairs)
-                subsets = get_contiguous_subsets(adj, members, MAX_K)
+                subsets = get_contiguous_subsets(adj, members, k_max)
                 surf_map = {
                     i: float(idu_to_p[i].get("area_m2") or 0) / 10_000
                     for i in members
@@ -515,6 +517,84 @@ def run(
     )
     log(f"   Ignorés pré-filtre surface (<{min_area} ha) : {n_prefilter_skip:,}")
     return len(ss_rows)
+
+
+def audit_combinations(
+    engine_core,
+    project_id: str,
+    aoi_id: str,
+    *,
+    engine_ppm=None,
+    min_area_ha: float | None = None,
+    max_k: int = 5,
+) -> dict:
+    """Compte les combinaisons contiguës sans écrire ni calculer Miller / distance.
+
+    Le plafond de parcelles par UF est relevé à max_k quand celui-ci dépasse 10,
+    sinon les UF de 11 à 15 parcelles resteraient écartées et le compte serait faux.
+    """
+    engine_ppm = engine_ppm or engine_core
+    k_max = max(2, min(int(max_k), 15))
+    cap = max(MAX_UF_PARCELLES, k_max)
+    min_area = MIN_AREA_HA_PREFILTER if min_area_ha is None else float(min_area_ha)
+    t0 = time.perf_counter()
+
+    with engine_core.begin() as conn:
+        aoi_wkt, _cx, _cy = _get_aoi(conn, aoi_id)
+        depts = _dept_codes_for_aoi(conn, project_id, aoi_wkt)
+    with engine_ppm.begin() as conn:
+        parcelles = _fetch_ppm_in_aoi(conn, aoi_wkt, depts)
+
+    by_siren: dict[str, list[dict]] = defaultdict(list)
+    for p in parcelles:
+        by_siren[p["siren"]].append(p)
+
+    by_k: dict[int, int] = defaultdict(int)
+    n_uf = 0
+    n_raw = 0
+    n_area = 0
+    n_uf_over_default_cap = 0
+
+    with engine_ppm.begin() as conn_ppm:
+        for _siren, ps in by_siren.items():
+            if len(ps) < 2:
+                continue
+            idus = [p["idu"] for p in ps]
+            idu_to_p = {p["idu"]: p for p in ps}
+            pairs = _find_touching_pairs(conn_ppm, idus)
+            uf = UnionFind()
+            for idu in idus:
+                uf.find(idu)
+            for a, b in pairs:
+                uf.union(a, b)
+            for _root, members in uf.clusters(idus).items():
+                if len(members) < 2:
+                    continue
+                surf = sum(float(idu_to_p[i].get("area_m2") or 0) / 10_000 for i in members)
+                if surf < min_area or len(members) > cap:
+                    continue
+                if len(members) > MAX_UF_PARCELLES:
+                    n_uf_over_default_cap += 1
+                n_uf += 1
+                adj = _adj_from_pairs(members, pairs)
+                for subset in get_contiguous_subsets(adj, members, k_max):
+                    n_raw += 1
+                    if sum(float(idu_to_p[i].get("area_m2") or 0) / 10_000 for i in subset) < min_area:
+                        continue
+                    n_area += 1
+                    by_k[len(subset)] += 1
+
+    return {
+        "max_k": k_max,
+        "cap_parcelles_uf": cap,
+        "cap_parcelles_uf_actuel": MAX_UF_PARCELLES,
+        "n_uf": n_uf,
+        "n_uf_au_dela_du_plafond_actuel": n_uf_over_default_cap,
+        "n_combinaisons": n_raw,
+        "n_combinaisons_surface_ok": n_area,
+        "par_taille": {str(k): by_k[k] for k in sorted(by_k)},
+        "secondes": round(time.perf_counter() - t0, 2),
+    }
 
 
 def main():

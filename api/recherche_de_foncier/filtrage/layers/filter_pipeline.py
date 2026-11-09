@@ -30,6 +30,13 @@ from typing import Callable
 from sqlalchemy import text
 
 from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
+from api.recherche_de_foncier.filtrage.layers.faune import (
+    FAUNA_POINTS,
+    aliases_only,
+    chain_sql,
+    criterion_names,
+    fauna_exists_sql,
+)
 
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_parcelles_v2 import (
     TileEnvelope,
@@ -60,6 +67,7 @@ def _make_log(project_id: str, cb: Cb) -> Callable[[str], None]:
 class FaunaCriterion:
     species: str
     dist_m: float
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -77,9 +85,14 @@ class FilterConfig:
     fauna_criteria: list[FaunaCriterion] = field(default_factory=list)
     """Combinaison entre espèces : or = au moins une, and = toutes. Défaut métier = or."""
     fauna_combine: str = "or"
+    """Opérateur entre chaque espèce, de gauche à droite. Vide = fauna_combine partout."""
+    fauna_joins: list[str] = field(default_factory=list)
     flora_criteria: list[FloraCriterion] = field(default_factory=list)
     """Combinaison entre taxons : or = au moins un, and = tous. Défaut métier = or."""
     flora_combine: str = "or"
+    flora_joins: list[str] = field(default_factory=list)
+    """Entre faune et flore : or = l'un ou l'autre, and = les deux."""
+    bio_combine: str = "or"
     """exclude_source_buffer = hors emprise + buffer AOI ; within_foncier = à l'intérieur de l'AOI projet."""
     search_mode: str = "exclude_source_buffer"
     zone_humide_mode: str = "ignore"
@@ -148,6 +161,8 @@ def ensure_columns(engine) -> None:
     """DDL enrichissement parcelles + filter_config. Appelé au démarrage FastAPI."""
     with engine.begin() as conn:
         conn.execute(text(_ENSURE_DDL))
+    from api.reserve_fonciere.ajout_de_foncier.faune.faune_import import ensure_faune_schema
+    ensure_faune_schema(engine)
 
 _SQL_ENRICH_VEG_BATCH = f"""
 WITH veg_agg AS (
@@ -170,15 +185,15 @@ WHERE  p.project_id = :pid
   AND  p.idu = va.idu
 """
 
-_SQL_ENRICH_FAUNA_BATCH = """
+_SQL_ENRICH_FAUNA_BATCH = f"""
 WITH fauna_agg AS (
     SELECT
         p.idu,
         COALESCE(
             (
                 SELECT ROUND(ST_Distance(p.geom_2154, f.geometry))::int
-                FROM   ecocompensation.fauna f
-                WHERE  f.nom_vernaculaire = :species
+                FROM   {FAUNA_POINTS} f
+                WHERE  f.nom_vernaculaire = ANY(CAST(:names AS text[]))
                 ORDER  BY p.geom_2154 <-> f.geometry
                 LIMIT  1
             ),
@@ -495,51 +510,38 @@ def _build_filter_clauses(
             )
         """)
 
+    fauna_sql = None
     if config.fauna_criteria:
-        fauna_parts = []
-        for i, fc in enumerate(config.fauna_criteria):
-            fauna_parts.append(f"""
-                EXISTS (
-                    SELECT 1
-                    FROM ecocompensation.fauna f
-                    WHERE f.nom_vernaculaire = :fauna_species_{i}
-                      AND ST_DWithin(p.geom_2154, f.geometry, :fauna_dist_m_{i})
-                )
-            """)
-        keys.append("fauna_criteria")
-        combine = "and" if str(config.fauna_combine).lower() == "and" else "or"
-        joiner = " AND " if combine == "and" else " OR "
-        labels.append(
-            f"Faune ({len(config.fauna_criteria)} espèce(s), {'ET' if combine == 'and' else 'OU'})"
-        )
-        clauses.append("(" + joiner.join(f"({p})" for p in fauna_parts) + ")")
+        fauna_parts = [f"({fauna_exists_sql('p.geom_2154', i)})" for i, _fc in enumerate(config.fauna_criteria)]
+        fauna_sql = chain_sql(fauna_parts, config.fauna_joins, config.fauna_combine)
 
+    flora_sql = None
     if config.flora_criteria:
-        keys.append("flora_criteria")
-        combine = "and" if str(config.flora_combine).lower() == "and" else "or"
-        labels.append(flora_step_label(config))
-        if combine == "and":
-            clauses.append("""
-                NOT EXISTS (
-                    SELECT 1
-                    FROM unnest(CAST(:flora_keys AS text[]), CAST(:flora_dists AS float8[])) AS c(k, d)
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM ecocompensation.flore_observation o
-                        WHERE o.taxon_key = c.k
-                          AND ST_DWithin(p.geom_2154, o.geom, c.d)
-                    )
-                )
-            """)
-        else:
-            clauses.append("""
+        flora_parts = []
+        for i, _fc in enumerate(config.flora_criteria):
+            flora_parts.append(f"""
                 EXISTS (
                     SELECT 1
-                    FROM unnest(CAST(:flora_keys AS text[]), CAST(:flora_dists AS float8[])) AS c(k, d)
-                    JOIN ecocompensation.flore_observation o ON o.taxon_key = c.k
-                    WHERE ST_DWithin(p.geom_2154, o.geom, c.d)
+                    FROM ecocompensation.flore_observation o
+                    WHERE o.taxon_key = :flora_key_{i}
+                      AND ST_DWithin(p.geom_2154, o.geom, :flora_dist_{i})
                 )
             """)
+        flora_sql = chain_sql(flora_parts, config.flora_joins, config.flora_combine)
+
+    if fauna_sql and flora_sql:
+        op = "AND" if str(config.bio_combine).lower() == "and" else "OR"
+        keys.append("bio_combine")
+        labels.append(f"Faune {'et' if op == 'AND' else 'ou'} flore")
+        clauses.append(f"(({fauna_sql}) {op} ({flora_sql}))")
+    elif fauna_sql:
+        keys.append("fauna_criteria")
+        labels.append(f"Faune ({len(config.fauna_criteria)} espèce(s))")
+        clauses.append(fauna_sql)
+    elif flora_sql:
+        keys.append("flora_criteria")
+        labels.append(flora_step_label(config))
+        clauses.append(flora_sql)
 
     if config.zone_humide_mode == "intersect":
         keys.append("zone_humide_mode")
@@ -678,10 +680,11 @@ def _filter_params(project_id: str, config: FilterConfig) -> dict:
         params["miller_th"] = config.miller_thresh
     for i, fc in enumerate(config.fauna_criteria):
         params[f"fauna_species_{i}"] = fc.species
+        params[f"fauna_aliases_{i}"] = aliases_only(fc.aliases)
         params[f"fauna_dist_m_{i}"] = fc.dist_m
-    if config.flora_criteria:
-        params["flora_keys"] = [fc.taxon_key for fc in config.flora_criteria]
-        params["flora_dists"] = [float(fc.dist_m) for fc in config.flora_criteria]
+    for i, fc in enumerate(config.flora_criteria):
+        params[f"flora_key_{i}"] = fc.taxon_key
+        params[f"flora_dist_{i}"] = float(fc.dist_m)
     if config.troncons_hydros_max_dist_m is not None:
         params["troncons_hydros_max_dist_m"] = config.troncons_hydros_max_dist_m
     if config.surfaces_hydros_max_dist_m is not None:
@@ -852,6 +855,7 @@ def _enrich_survivors(
     troncons_max_dist_m: float = 100.0,
     enrich_surfaces_hydro: bool = False,
     surfaces_max_dist_m: float = 100.0,
+    fauna_names: dict[str, list[str]] | None = None,
 ) -> None:
     if not idus:
         return
@@ -883,7 +887,7 @@ def _enrich_survivors(
                 conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
                 conn.execute(
                     text(_SQL_ENRICH_FAUNA_BATCH),
-                    {"pid": project_id, "idus": batch, "species": species},
+                    {"pid": project_id, "idus": batch, "species": species, "names": (fauna_names or {}).get(species, [species])},
                 )
             log(
                 f"ENRICH_BATCH:{i}/{len(batches)}:fauna:{species}:"
@@ -949,15 +953,18 @@ def filter_config_dict(config: FilterConfig) -> dict:
         "miller_thresh": config.miller_thresh,
         "cesbio_libelles": config.cesbio_libelles,
         "fauna_criteria": [
-            {"species": fc.species, "dist_m": fc.dist_m}
+            {"species": fc.species, "dist_m": fc.dist_m, "aliases": list(fc.aliases)}
             for fc in config.fauna_criteria
         ],
         "fauna_combine": "and" if str(config.fauna_combine).lower() == "and" else "or",
+        "fauna_joins": list(config.fauna_joins),
         "flora_criteria": [
             {"taxon_key": fc.taxon_key, "label": fc.label, "dist_m": fc.dist_m}
             for fc in config.flora_criteria
         ],
         "flora_combine": "and" if str(config.flora_combine).lower() == "and" else "or",
+        "flora_joins": list(config.flora_joins),
+        "bio_combine": "and" if str(config.bio_combine).lower() == "and" else "or",
         "zone_humide_mode": config.zone_humide_mode,
         "zones_humides_probables_mode": config.zones_humides_probables_mode,
         "min_zone_humide_ha": config.min_zone_humide_ha,
@@ -1038,6 +1045,7 @@ def run(
         # ── 4. Enrichissement léger ─────────────────────────────────────────
         if surviving:
             species = [fc.species for fc in config.fauna_criteria]
+            fauna_names = {fc.species: criterion_names(fc.species, fc.aliases) for fc in config.fauna_criteria}
             flora = list(config.flora_criteria)
             enrich_zh = config.zone_humide_mode in ("intersect", "exclude")
             enrich_troncons = config.troncons_hydros_max_dist_m is not None
@@ -1055,6 +1063,7 @@ def run(
                 enrich_surfaces_hydro=enrich_surfaces,
                 surfaces_max_dist_m=max(config.surfaces_hydros_max_dist_m or 0.0, 0.0),
                 flora_criteria=flora,
+                fauna_names=fauna_names,
             )
             log(f"PHASE:enrich:done:{len(surviving)}")
 

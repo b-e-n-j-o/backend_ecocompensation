@@ -6,7 +6,7 @@ import geopandas as gpd
 import pytest
 from shapely.geometry import LineString, Point, Polygon
 
-from api.reserve_fonciere.flore_import import (
+from api.reserve_fonciere.ajout_de_foncier.flore.flore_import import (
     classify_new,
     fingerprint,
     map_columns,
@@ -67,7 +67,7 @@ def test_prepare_rejets_et_types(tmp_path: Path):
     assert {"Point", "LineString", "Polygon"} <= types
     reasons = " ".join(r["raison"] for r in report["rejets"])
     assert "vide" in reasons
-    from api.reserve_fonciere.flore_import import _parse_date
+    from api.reserve_fonciere.ajout_de_foncier.flore.flore_import import _parse_date
     with pytest.raises(ValueError, match="date"):
         _parse_date("pas-une-date")
     assert report["colonnes_inconnues"]

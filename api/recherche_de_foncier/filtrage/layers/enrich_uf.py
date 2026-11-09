@@ -19,6 +19,13 @@ from typing import Callable
 from sqlalchemy import text
 
 from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
+from api.recherche_de_foncier.filtrage.layers.faune import (
+    FAUNA_POINTS,
+    aliases_only,
+    chain_sql,
+    criterion_names,
+    fauna_exists_sql,
+)
 
 VEG_BATCH_SIZE   = 100
 FAUNA_BATCH_SIZE = 300
@@ -173,15 +180,15 @@ WHERE  ss.project_id = :pid
   AND  ss.subset_id  = va.subset_id
 """
 
-_SQL_FAUNA_BATCH = """
+_SQL_FAUNA_BATCH = f"""
 WITH fauna_agg AS (
     SELECT
         ss.subset_id,
         COALESCE(
             (
                 SELECT ROUND(ST_Distance(ss.geom_2154, f.geometry))::int
-                FROM   ecocompensation.fauna f
-                WHERE  f.nom_vernaculaire = :species
+                FROM   {FAUNA_POINTS} f
+                WHERE  f.nom_vernaculaire = ANY(CAST(:names AS text[]))
                 ORDER  BY ss.geom_2154 <-> f.geometry
                 LIMIT  1
             ),
@@ -208,6 +215,7 @@ def _subset_ids_passing_cheap_filters(
     cesbio_libelles: list[str] | None,
     fauna_criteria: list[dict] | None,
     fauna_combine: str,
+    fauna_joins: list[str] | None,
     log: Callable[[str], None],
 ) -> list[str]:
     """Miller, distance faune, puis intersection CESBIO sans calcul d'aire.
@@ -242,16 +250,11 @@ def _subset_ids_passing_cheap_filters(
         parts = []
         fauna_params: dict = {"pid": project_id, "batch": ids}
         for i, c in enumerate(criteria):
-            parts.append(f"""
-                EXISTS (
-                    SELECT 1 FROM ecocompensation.fauna f
-                    WHERE f.nom_vernaculaire = :fauna_species_{i}
-                      AND ST_DWithin(ss.geom_2154, f.geometry, :fauna_dist_m_{i})
-                )
-            """)
+            parts.append(f"({fauna_exists_sql('ss.geom_2154', i)})")
             fauna_params[f"fauna_species_{i}"] = str(c["species"]).strip()
+            fauna_params[f"fauna_aliases_{i}"] = aliases_only([str(a) for a in (c.get("aliases") or [])])
             fauna_params[f"fauna_dist_m_{i}"] = float(c.get("dist_m") or 0)
-        joiner = " AND " if str(fauna_combine).lower() == "and" else " OR "
+        expr = chain_sql(parts, fauna_joins, fauna_combine)
         with engine.begin() as conn:
             conn.execute(text("SET LOCAL statement_timeout = '3min'"))
             ids = [
@@ -261,7 +264,7 @@ def _subset_ids_passing_cheap_filters(
                         FROM ecocompensation_results.sous_ensembles ss
                         WHERE ss.project_id = :pid
                           AND ss.subset_id = ANY(CAST(:batch AS text[]))
-                          AND ({joiner.join(parts)})
+                          AND ({expr})
                         ORDER BY ss.subset_id
                     """),
                     fauna_params,
@@ -313,6 +316,7 @@ def run(
     cesbio_libelles: list[str] | None = None,
     fauna_criteria: list[dict] | None = None,
     fauna_combine: str = "or",
+    fauna_joins: list[str] | None = None,
 ) -> int:
     """
     Enrichit tous les sous-ensembles du projet avec veg_libelles + fauna_distances.
@@ -320,6 +324,14 @@ def run(
     """
     log = cb or (lambda m: None)
     species = species_list or []
+    name_by_species = {
+        str(c.get("species") or "").strip(): criterion_names(
+            str(c.get("species") or "").strip(),
+            [str(a) for a in (c.get("aliases") or [])],
+        )
+        for c in (fauna_criteria or [])
+        if str(c.get("species") or "").strip()
+    }
 
     with engine.begin() as conn:
         n = conn.execute(
@@ -346,6 +358,7 @@ def run(
             cesbio_libelles=cesbio_libelles,
             fauna_criteria=fauna_criteria,
             fauna_combine=fauna_combine,
+            fauna_joins=fauna_joins,
             log=log,
         )
     else:
@@ -390,7 +403,7 @@ def run(
                 with engine.begin() as conn:
                     conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
                     conn.execute(text(_SQL_FAUNA_BATCH),
-                                 {"pid": project_id, "batch": batch, "species": sp})
+                                 {"pid": project_id, "batch": batch, "species": sp, "names": name_by_species.get(sp, [sp])})
                 log(f"TILE_PROGRESS:{bi}/{n_fauna}:{bi*FAUNA_BATCH_SIZE} 🦎 {sp} {bi}/{n_fauna}")
             log(f"[ENRICH_UF] ✓ fauna '{sp}' mis à jour.")
     else:

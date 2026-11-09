@@ -22,6 +22,8 @@ from typing import Any
 
 import geopandas as gpd
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field
+from shapely.geometry import shape
 from pyproj import CRS
 from shapely.geometry import mapping
 from shapely.ops import transform
@@ -121,7 +123,7 @@ def _parse_date(raw: Any) -> date | None:
     s = str(raw).strip()
     if not s or s.lower() in ("none", "nan", "nat"):
         return None
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
         try:
             return datetime.strptime(s[:10], fmt).date()
         except ValueError:
@@ -143,22 +145,18 @@ def normalize_taxon(name: str) -> str:
 
 
 def fingerprint(nom: str, when: date | None, observateur: str | None, geom) -> str:
-    wkb = geom.wkb_hex if geom is not None else ""
-    # arrondi au cm : on quantifie les coordonnées via WKT arrondi
-    if geom is not None and not geom.is_empty:
-        wkt = geom.wkt
-        def repl(m):
-            return f"{round(float(m.group(0)), 2):.2f}"
-        wkt = re.sub(r"-?\d+\.\d+", repl, wkt)
-    else:
-        wkt = ""
-    payload = "|".join([
-        normalize_taxon(nom),
-        when.isoformat() if when else "",
-        (observateur or "").strip().lower(),
-        wkt,
-    ])
+    """Nom + géométrie arrondie au cm. La date et l'observateur ne comptent pas : ils sont souvent absents."""
+    del when, observateur
+    payload = "|".join([normalize_taxon(nom), geom_key(geom)])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def geom_key(geom) -> str:
+    if geom is None or geom.is_empty:
+        return ""
+    def repl(m):
+        return f"{round(float(m.group(0)), 2):.2f}"
+    return re.sub(r"-?\d+\.\d+", repl, geom.wkt)
 
 
 def _assume_lambert(gdf: gpd.GeoDataFrame) -> bool:
@@ -176,15 +174,23 @@ def _assume_lambert(gdf: gpd.GeoDataFrame) -> bool:
 
 
 def read_vector(path: Path) -> tuple[gpd.GeoDataFrame, str]:
-    if path.suffix.lower() == ".zip":
-        with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
-            shp = next((n for n in names if n.lower().endswith(".shp")), None)
-            if not shp:
-                raise ValueError("ZIP sans fichier .shp")
-        gdf = gpd.read_file(f"zip://{path}")
-    else:
-        gdf = gpd.read_file(path)
+    suffix = path.suffix.lower()
+    if suffix in {".shp", ".shx", ".dbf", ".prj", ".cpg"}:
+        raise ValueError("Shapefile incomplet : déposez un ZIP contenant .shp, .shx et .dbf")
+    try:
+        if suffix == ".zip":
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+                shp = next((n for n in names if n.lower().endswith(".shp")), None)
+                if not shp:
+                    raise ValueError("ZIP sans fichier .shp")
+            gdf = gpd.read_file(f"zip://{path}")
+        else:
+            gdf = gpd.read_file(path)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Fichier illisible ({suffix or 'sans extension'}) : {e}") from e
     crs_note = "inconnu"
     if gdf.crs is None:
         if _assume_lambert(gdf):
@@ -199,15 +205,38 @@ def read_vector(path: Path) -> tuple[gpd.GeoDataFrame, str]:
     return gdf, crs_note
 
 
-def prepare_import(path: Path, fichier: str | None = None) -> dict:
+def prepare_import(path: Path, fichier: str | None = None, colonne_nom: str | None = None) -> dict:
     if path.stat().st_size > MAX_BYTES:
         raise ValueError(f"Fichier trop volumineux (max {MAX_BYTES // (1024*1024)} Mo)")
     gdf, crs_note = read_vector(path)
     if len(gdf) > MAX_ROWS:
         raise ValueError(f"Trop de lignes ({len(gdf)} > {MAX_ROWS})")
+    columns = [c for c in gdf.columns if str(c).lower() not in ("geometry", "geom")]
     mapping_cols, unknown = map_columns(list(gdf.columns))
-    if "nom_taxon_cite" not in mapping_cols.values():
-        raise ValueError("Colonne obligatoire manquante : Nom_tax_ci (nom scientifique cité)")
+    if colonne_nom:
+        match = next((c for c in columns if c == colonne_nom or _fold(c) == _fold(colonne_nom)), None)
+        if not match:
+            raise ValueError(f"Colonne introuvable : {colonne_nom}")
+        mapping_cols = {k: v for k, v in mapping_cols.items() if v != "nom_taxon_cite"}
+        mapping_cols[match] = "nom_taxon_cite"
+        unknown = [c for c in unknown if c != match]
+    elif "nom_taxon_cite" not in mapping_cols.values():
+        return {
+            "fichier": fichier or path.name,
+            "crs_detecte": crs_note,
+            "colonnes": columns,
+            "colonne_nom": None,
+            "choix_requis": True,
+            "mapping_colonnes": mapping_cols,
+            "colonnes_inconnues": unknown,
+            "nb_lignes": int(len(gdf)),
+            "nb_valides": 0,
+            "nb_rejetees": 0,
+            "rejets": [],
+            "apercu": [],
+            "_rows": [],
+            "_geoms": [g for g in gdf.geometry if g is not None and not g.is_empty],
+        }
     inv = {v: k for k, v in mapping_cols.items()}
     valides = []
     rejets = []
@@ -281,6 +310,9 @@ def prepare_import(path: Path, fichier: str | None = None) -> dict:
     return {
         "fichier": fichier or path.name,
         "crs_detecte": crs_note,
+        "colonnes": columns,
+        "colonne_nom": next((k for k, v in mapping_cols.items() if v == "nom_taxon_cite"), None),
+        "choix_requis": False,
         "mapping_colonnes": mapping_cols,
         "colonnes_inconnues": unknown,
         "nb_lignes": int(len(gdf)),
@@ -290,6 +322,53 @@ def prepare_import(path: Path, fichier: str | None = None) -> dict:
         "apercu": apercu,
         "_rows": valides,
     }
+
+
+_IMPORT_TABLE = {
+    "ecocompensation.flore_observation": "ecocompensation.flore_import",
+    "ecocompensation.observation_faune": "ecocompensation.faune_import",
+}
+
+
+def count_known(engine, table: str, rows: list[dict]) -> tuple[int, list[str], bool]:
+    """Géométries déjà en base (tolérance 5 cm) et fichiers d'import d'origine."""
+    if table not in _IMPORT_TABLE:
+        raise ValueError(table)
+    geoms = [r["geom"] for r in rows if r.get("geom") is not None and not r["geom"].is_empty]
+    if not geoms:
+        return 0, [], False
+    wkts = [g.wkt for g in geoms]
+    import_table = _IMPORT_TABLE[table]
+    sql = text(f"""
+        SELECT inc.wkt, COALESCE(i.fichier, '') AS fichier
+        FROM unnest(CAST(:wkts AS text[])) AS inc(wkt)
+        JOIN {table} o
+          ON ST_DWithin(o.geom, ST_SetSRID(ST_GeomFromText(inc.wkt), 2154), 0.05)
+        LEFT JOIN {import_table} i ON i.id = o.import_id
+    """)
+    with engine.connect() as conn:
+        hits = conn.execute(sql, {"wkts": wkts}).mappings().all()
+    matched = {h["wkt"] for h in hits}
+    fichiers: list[str] = []
+    for h in hits:
+        name = (h["fichier"] or "").strip()
+        if name and name not in fichiers:
+            fichiers.append(name)
+    known = sum(1 for w in wkts if w in matched)
+    tous = bool(geoms) and all(g.wkt in matched for g in geoms)
+    return known, fichiers, tous
+
+
+def mark_existing(report: dict, table: str) -> dict:
+    rows = report.get("_rows") or [{"geom": g} for g in (report.get("_geoms") or [])]
+    try:
+        known, fichiers, tous = count_known(get_engine(), table, rows)
+    except Exception:
+        known, fichiers, tous = 0, [], False
+    report["nb_doublons"] = known
+    report["deja_en_base"] = tous
+    report["fichiers_deja"] = fichiers
+    return report
 
 
 def classify_new(rows: list[dict], existing: set[str]) -> tuple[list[dict], int]:
@@ -386,6 +465,7 @@ def import_path(path: Path, dry_run: bool = True, source: str | None = None, eng
 async def import_flore(
     dry_run: bool = Query(True),
     source: str | None = Query(None),
+    colonne_nom: str | None = Query(None),
     file: UploadFile = File(...),
 ):
     raw = await file.read()
@@ -396,11 +476,12 @@ async def import_flore(
         tmp.write(raw)
         tmp_path = Path(tmp.name)
     try:
-        report = prepare_import(tmp_path, fichier=file.filename)
+        report = prepare_import(tmp_path, fichier=file.filename, colonne_nom=colonne_nom)
         if dry_run:
+            mark_existing(report, "ecocompensation.flore_observation")
             report.pop("_rows", None)
+            report.pop("_geoms", None)
             report["dry_run"] = True
-            report["nb_doublons"] = 0
             return report
         return write_import(get_engine(), report, source)
     except ValueError as e:
@@ -485,6 +566,59 @@ def delete_import(import_id: int):
     if not deleted:
         raise HTTPException(404, "Import introuvable")
     return {"status": "ok", "id": import_id}
+
+
+class ZonePointsBody(BaseModel):
+    names: list[str] = Field(default_factory=list)
+    buffer_m: float = Field(3000, ge=0, le=50_000)
+    geometry: dict
+
+
+@router.post("/zone-points")
+def zone_points(body: ZonePointsBody):
+    """Observations flore de ces taxons, dans la zone bufferisée."""
+    names = [n.strip() for n in body.names if n and n.strip()]
+    if not names:
+        return {"type": "FeatureCollection", "features": []}
+    try:
+        geom = shape(body.geometry)
+    except Exception as e:
+        raise HTTPException(400, "Géométrie illisible") from e
+    if geom.is_empty:
+        return {"type": "FeatureCollection", "features": []}
+    srid = 2154 if abs(geom.bounds[0]) > 1000 else 4326
+    zone = """
+        CASE WHEN :srid = 2154
+             THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
+             ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
+        END
+    """
+    sql = text(f"""
+        SELECT COALESCE(taxon_key, nom_taxon_cite) AS nom,
+               ST_AsGeoJSON(ST_Transform(ST_Centroid(geom), 4326)) AS geojson
+        FROM ecocompensation.flore_observation
+        WHERE (taxon_key = ANY(:names) OR nom_taxon_cite = ANY(:names))
+          AND ST_DWithin(geom, {zone}, :buf)
+        LIMIT 2000
+    """)
+    with get_engine().begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '12s'"))
+        rows = conn.execute(sql, {
+            "names": names,
+            "gj": json.dumps(body.geometry),
+            "srid": srid,
+            "buf": float(body.buffer_m),
+        }).mappings().all()
+    features = []
+    for r in rows:
+        if not r["geojson"]:
+            continue
+        features.append({
+            "type": "Feature",
+            "properties": {"source": "flore", "nom": r["nom"]},
+            "geometry": json.loads(r["geojson"]),
+        })
+    return {"type": "FeatureCollection", "features": features}
 
 
 def main() -> None:

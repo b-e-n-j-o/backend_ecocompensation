@@ -48,6 +48,7 @@ def eng():
         CREATE TABLE ecocompensation.pm_ilot_membre (owner_key text, idu text);
         CREATE TABLE ecocompensation.vegetation_sur_cesbio (libelle_prio text, source text, geom geometry);
         CREATE TABLE ecocompensation.fauna (nom_vernaculaire text, geometry geometry);
+        CREATE TABLE ecocompensation.observation_faune (nom_espece text, geom geometry);
         CREATE TABLE ecocompensation_results.parcelles (project_id uuid, idu text, zone_humide_ha float);
         """)
         cx.execute(text(f"""

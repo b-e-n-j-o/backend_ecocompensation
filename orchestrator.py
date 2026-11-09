@@ -183,6 +183,7 @@ async def run_orchestration(
     uf_cesbio_libelles: list[str] | None = None,
     uf_fauna_criteria: list[dict] | None = None,
     uf_fauna_combine: str = "or",
+    uf_fauna_joins: list[str] | None = None,
 ) -> dict[str, LayerResult]:
     """
     Exécute les couches (toutes si ``layer_keys`` est None, sinon sous-ensemble).
@@ -273,6 +274,7 @@ async def run_orchestration(
                     cesbio_libelles=uf_cesbio_libelles,
                     fauna_criteria=uf_fauna_criteria,
                     fauna_combine=uf_fauna_combine,
+                    fauna_joins=uf_fauna_joins,
                 )
             else:
                 result = await _run_layer_with_progress(

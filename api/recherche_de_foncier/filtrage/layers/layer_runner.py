@@ -83,6 +83,7 @@ def _make_enrich_uf(key: str, table: str, fn):
         cesbio_libelles=None,
         fauna_criteria=None,
         fauna_combine="or",
+        fauna_joins=None,
     ):
         def inner(e, p, a, c):
             return fn(
@@ -92,6 +93,7 @@ def _make_enrich_uf(key: str, table: str, fn):
                 cesbio_libelles=cesbio_libelles,
                 fauna_criteria=fauna_criteria,
                 fauna_combine=fauna_combine,
+                fauna_joins=fauna_joins,
             )
         return _wrap(key, table, inner, engine, project_id, aoi_id, cb)
     wrapped.__name__ = f"layer_{key}"
@@ -107,6 +109,7 @@ def _make_sub_uf(key: str, table: str, fn):
         *,
         min_area_ha: float | None = None,
         max_uf_parcelles: int | None = None,
+        max_k: int | None = None,
     ):
         from db import get_engine_ppm
         engine_ppm = get_engine_ppm()
@@ -117,6 +120,8 @@ def _make_sub_uf(key: str, table: str, fn):
                 kwargs["min_area_ha"] = min_area_ha
             if max_uf_parcelles is not None:
                 kwargs["max_uf_parcelles"] = max_uf_parcelles
+            if max_k is not None:
+                kwargs["max_k"] = max_k
             n = fn(engine, project_id, aoi_id, cb, **kwargs) or 0
             return LayerResult(
                 layer_key=key, table=table,

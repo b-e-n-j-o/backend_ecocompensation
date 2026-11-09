@@ -11,6 +11,19 @@ from typing import Callable
 from sqlalchemy import text
 
 try:
+    from api.recherche_de_foncier.filtrage.layers.faune import FAUNA_POINTS
+except ImportError:
+    import importlib.util
+    from pathlib import Path
+
+    _faune_path = Path(__file__).resolve().parents[2] / "faune.py"
+    _faune_spec = importlib.util.spec_from_file_location("faune_points", _faune_path)
+    _faune_mod = importlib.util.module_from_spec(_faune_spec)
+    assert _faune_spec and _faune_spec.loader
+    _faune_spec.loader.exec_module(_faune_mod)
+    FAUNA_POINTS = _faune_mod.FAUNA_POINTS
+
+try:
     from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
 except ImportError:  # tests rpg qui court-circuitent le paquet api
     import importlib.util
@@ -97,8 +110,8 @@ WITH fa AS (
     SELECT il.num_ilot,
            COALESCE((
                SELECT ROUND(ST_Distance(il.geom_2154, f.geometry))::int
-               FROM ecocompensation.fauna f
-               WHERE f.nom_vernaculaire = :species
+               FROM {FAUNA_POINTS} f
+               WHERE f.nom_vernaculaire = ANY(CAST(:names AS text[]))
                ORDER BY il.geom_2154 <-> f.geometry
                LIMIT 1), -1) AS dist_m
     FROM {RES_TABLE} il
@@ -143,7 +156,7 @@ def run(engine, project_id: str, species: list[str],
         for bi, batch in enumerate(_batches(ids, FAUNA_BATCH_SIZE), 1):
             with engine.begin() as conn:
                 conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
-                conn.execute(text(SQL_FAUNA), {"pid": project_id, "batch": batch, "species": sp})
+                conn.execute(text(SQL_FAUNA), {"pid": project_id, "batch": batch, "species": sp, "names": [sp]})
             log(f"[ILOTS_RPG] faune '{sp}' {bi}/{n_f}")
     if not species:
         log("[ILOTS_RPG] aucune espèce : fauna_distances ignorée")
