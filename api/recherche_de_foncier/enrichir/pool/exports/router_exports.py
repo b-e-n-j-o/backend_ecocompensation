@@ -453,12 +453,33 @@ def export_fiche_filtrage(
     last = proj.get("last_results")
     if isinstance(last, str):
         last = json.loads(last)
-    if not isinstance(last, dict) or not (last.get("funnel") or last.get("filter_config")):
+    if not isinstance(last, dict):
+        last = {}
+    cfg = last.get("filter_config")
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except json.JSONDecodeError:
+            cfg = None
+    if not isinstance(cfg, dict) or not cfg:
+        stored = proj.get("last_filter")
+        if isinstance(stored, str):
+            try:
+                stored = json.loads(stored)
+            except json.JSONDecodeError:
+                stored = None
+        cfg = stored if isinstance(stored, dict) else {}
+    funnel = last.get("funnel") or []
+    if isinstance(funnel, str):
+        try:
+            funnel = json.loads(funnel)
+        except json.JSONDecodeError:
+            funnel = []
+    if not isinstance(funnel, list):
+        funnel = []
+    if not funnel and not cfg:
         raise HTTPException(400, "Aucun filtrage enregistré pour cette étude.")
     radius = last.get("final_radius_km")
-    cfg = last.get("filter_config") or {}
-    if not isinstance(cfg, dict):
-        cfg = {}
     if radius is None:
         radius = cfg.get("buffer_km")
     total = last.get("total")
@@ -475,7 +496,7 @@ def export_fiche_filtrage(
         "computed_at": last.get("run_created_at"),
         "buffer_km": radius,
         "filter_config": cfg,
-        "funnel": last.get("funnel") or [],
+        "funnel": funnel,
         "total": int(total or 0),
         "aoi_total": last.get("n_tiled"),
     }

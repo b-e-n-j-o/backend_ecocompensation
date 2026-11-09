@@ -21,6 +21,7 @@ from api.recherche_de_foncier.filtrage.layers.compensation_zone_humide import (
     aoi_to_surfaces_hydros,
     aoi_to_troncons_hydros,
 )
+from api.recherche_de_foncier.filtrage.layers.faune import criterion_names
 from api.recherche_de_foncier.filtrage.layers.filter_pipeline import _enrich_survivors, ensure_columns
 
 logger = logging.getLogger(__name__)
@@ -272,10 +273,15 @@ def run_analyse_foncier(
     projet_gdf,
     foncier_gdf,
     occupation_sol: bool,
-    hydro: bool,
+    hydro_troncons: bool,
+    hydro_surfaces: bool,
     fauna_species: list[str],
-    flora: list[dict[str, str]],
+    fauna_aliases: dict[str, list[str]] | None = None,
+    flora: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    flora = flora or []
+    fauna_aliases = fauna_aliases or {}
+    hydro = hydro_troncons or hydro_surfaces
     projet = _as_multi(projet_gdf.union_all())
     if projet is None:
         raise ValueError("Le fichier projet ne contient aucune géométrie exploitable.")
@@ -300,8 +306,9 @@ def run_analyse_foncier(
     ensure_columns(engine)
     idus = [idu for idu, _geom in features]
 
-    if hydro:
+    if hydro_troncons:
         aoi_to_troncons_hydros.run(engine, project_id, aoi_id, logger.info)
+    if hydro_surfaces:
         aoi_to_surfaces_hydros.run(engine, project_id, aoi_id, logger.info)
 
     _enrich_survivors(
@@ -310,8 +317,14 @@ def run_analyse_foncier(
         idus,
         fauna_species,
         logger.info,
-        enrich_troncons_hydro=hydro,
-        enrich_surfaces_hydro=hydro,
+        enrich_troncons_hydro=hydro_troncons,
+        troncons_max_dist_m=50_000.0,
+        enrich_surfaces_hydro=hydro_surfaces,
+        surfaces_max_dist_m=50_000.0,
+        fauna_names={
+            name: criterion_names(name, fauna_aliases.get(name))
+            for name in fauna_species
+        },
     )
     if flora:
         with engine.begin() as conn:
@@ -326,8 +339,16 @@ def run_analyse_foncier(
         "study_type": "analyse",
         "occupation_sol": occupation_sol,
         "hydro": hydro,
-        "fauna_criteria": [{"species": name, "dist_m": None} for name in fauna_species],
-        "flora_criteria": [],
+        "hydro_troncons": hydro_troncons,
+        "hydro_surfaces": hydro_surfaces,
+        "fauna_criteria": [
+            {"species": name, "dist_m": None, "aliases": fauna_aliases.get(name) or []}
+            for name in fauna_species
+        ],
+        "flora_criteria": [
+            {"taxon_key": item["taxon_key"], "label": item["label"], "dist_m": None}
+            for item in flora
+        ],
     }
     run_id = pool_service.persist_parcelles_pool_run(
         engine,

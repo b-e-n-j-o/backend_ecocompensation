@@ -43,6 +43,25 @@ def _species(raw: str | None) -> list[str]:
     return [str(item).strip() for item in data if str(item).strip()]
 
 
+def _aliases(raw: str | None) -> dict[str, list[str]]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "fauna_aliases n'est pas un JSON valide.") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(400, "fauna_aliases doit être un objet.")
+    out: dict[str, list[str]] = {}
+    for key, value in data.items():
+        species = str(key).strip()
+        if not species:
+            continue
+        names = value if isinstance(value, list) else []
+        out[species] = [str(item).strip() for item in names if str(item).strip()]
+    return out
+
+
 def _flora(raw: str | None) -> list[dict[str, str]]:
     if not raw:
         return []
@@ -70,7 +89,10 @@ def analyse_foncier(
     name: str = Form("Analyse de foncier"),
     occupation_sol: str = Form("true"),
     hydro: str = Form("true"),
+    hydro_troncons: str = Form(""),
+    hydro_surfaces: str = Form(""),
     fauna_species: str = Form("[]"),
+    fauna_aliases: str = Form("{}"),
     flora_criteria: str = Form("[]"),
 ):
     projet_gdf = _load_geodataframe_from_upload(projet)
@@ -82,8 +104,10 @@ def analyse_foncier(
             projet_gdf=projet_gdf,
             foncier_gdf=foncier_gdf,
             occupation_sol=_flag(occupation_sol, True),
-            hydro=_flag(hydro, True),
+            hydro_troncons=_flag(hydro_troncons, _flag(hydro, True)),
+            hydro_surfaces=_flag(hydro_surfaces, _flag(hydro, True)),
             fauna_species=_species(fauna_species),
+            fauna_aliases=_aliases(fauna_aliases),
             flora=_flora(flora_criteria),
         )
     except ValueError as exc:

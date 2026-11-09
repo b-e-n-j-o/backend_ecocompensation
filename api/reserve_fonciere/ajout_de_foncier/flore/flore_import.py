@@ -599,7 +599,7 @@ def zone_points(body: ZonePointsBody):
         FROM ecocompensation.flore_observation
         WHERE (taxon_key = ANY(:names) OR nom_taxon_cite = ANY(:names))
           AND ST_DWithin(geom, {zone}, :buf)
-        LIMIT 2000
+        LIMIT 1000
     """)
     with get_engine().begin() as conn:
         conn.execute(text("SET LOCAL statement_timeout = '12s'"))

@@ -22,13 +22,27 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from shapely.geometry import shape
+from shapely.ops import transform as shapely_transform
 from sqlalchemy import bindparam, text
+from sqlalchemy.exc import OperationalError
 
 from db import get_engine
 from api.recherche_de_foncier.enrichir.pool.exports.qgis_encoding import write_geodataframe_shapefile_qgis
 
 router = APIRouter()
 _engine = get_engine()
+_to_l93 = None
+
+
+def _geom_2154_wkt(geom, srid: int) -> str:
+    """Passe la zone en Lambert-93 une fois, hors SQL, pour laisser l'index GiST travailler."""
+    global _to_l93
+    if srid != 2154:
+        if _to_l93 is None:
+            from pyproj import Transformer
+            _to_l93 = Transformer.from_crs(4326, 2154, always_xy=True)
+        geom = shapely_transform(_to_l93.transform, geom)
+    return geom.wkt
 
 _FAUNA_POINT_COLS = """
     id_obs,
@@ -587,33 +601,30 @@ def zone_count(body: ZoneCountBody):
     if geom.is_empty:
         return {"count": 0}
     srid = 2154 if abs(geom.bounds[0]) > 1000 else 4326
+    cap = 1000
     sql = text("""
         SELECT COUNT(*)::int
-        FROM ecocompensation.fauna f
-        WHERE f.nom_vernaculaire = :species
-          AND f.geometry && ST_Expand(
-                CASE WHEN :srid = 2154
-                     THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
-                     ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
-                END,
-                :buf)
-          AND ST_DWithin(
-                f.geometry,
-                CASE WHEN :srid = 2154
-                     THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
-                     ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
-                END,
-                :buf)
+        FROM (
+            SELECT 1
+            FROM ecocompensation.fauna f
+            WHERE f.nom_vernaculaire = :species
+              AND f.geometry && ST_Expand(ST_GeomFromText(:wkt, 2154), :buf)
+            LIMIT :lim
+        ) s
     """)
-    with _engine.begin() as conn:
-        conn.execute(text("SET LOCAL statement_timeout = '8s'"))
-        n = conn.execute(sql, {
-            "species": body.species.strip(),
-            "gj": json.dumps(body.geometry),
-            "srid": srid,
-            "buf": float(body.buffer_m),
-        }).scalar_one()
-    return {"count": int(n)}
+    try:
+        with _engine.begin() as conn:
+            conn.execute(text("SET LOCAL statement_timeout = '12s'"))
+            n = conn.execute(sql, {
+                "species": body.species.strip(),
+                "wkt": _geom_2154_wkt(geom, srid),
+                "buf": float(body.buffer_m),
+                "lim": cap + 1,
+            }).scalar_one()
+    except OperationalError:
+        return {"count": cap, "capped": True}
+    n = int(n)
+    return {"count": min(n, cap), "capped": n > cap}
 
 
 class ZonePointsBody(BaseModel):
@@ -637,54 +648,42 @@ def zone_points(body: ZonePointsBody):
     if geom.is_empty:
         return {"type": "FeatureCollection", "features": []}
     srid = 2154 if abs(geom.bounds[0]) > 1000 else 4326
-    zone = """
-        CASE WHEN :srid = 2154
-             THEN ST_SetSRID(ST_GeomFromGeoJSON(:gj), 2154)
-             ELSE ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:gj), 4326), 2154)
-        END
-    """
+    params = {
+        "names": names,
+        "aliases": aliases,
+        "wkt": _geom_2154_wkt(geom, srid),
+        "buf": float(body.buffer_m),
+    }
+    perso_sql = """
+            UNION ALL
+            SELECT 'perso', o.nom_espece, o.geom
+            FROM ecocompensation.observation_faune o, zone
+            WHERE o.nom_espece IN :aliases
+              AND o.geom && ST_Expand(zone.g, :buf)
+    """ if aliases else ""
     sql = text(f"""
+        WITH zone AS (
+            SELECT ST_GeomFromText(:wkt, 2154) AS g
+        )
         SELECT src, nom, ST_AsGeoJSON(ST_Transform(ST_Centroid(geom), 4326)) AS geojson
         FROM (
             SELECT 'fauna' AS src, f.nom_vernaculaire AS nom, f.geometry AS geom
-            FROM ecocompensation.fauna f
-            WHERE f.nom_vernaculaire = ANY(:names)
-              AND ST_DWithin(f.geometry, {zone}, :buf)
-            UNION ALL
-            SELECT 'perso', o.nom_espece, o.geom
-            FROM ecocompensation.observation_faune o
-            WHERE to_regclass('ecocompensation.observation_faune') IS NOT NULL
-              AND o.nom_espece = ANY(:aliases)
-              AND ST_DWithin(o.geom, {zone}, :buf)
+            FROM ecocompensation.fauna f, zone
+            WHERE f.nom_vernaculaire IN :names
+              AND f.geometry && ST_Expand(zone.g, :buf)
+            {perso_sql}
         ) q
-        LIMIT 2000
-    """)
+        LIMIT 1000
+    """).bindparams(
+        bindparam("names", expanding=True),
+        *([bindparam("aliases", expanding=True)] if aliases else []),
+    )
     try:
         with _engine.begin() as conn:
-            conn.execute(text("SET LOCAL statement_timeout = '12s'"))
-            rows = conn.execute(sql, {
-                "names": names,
-                "aliases": aliases,
-                "gj": json.dumps(body.geometry),
-                "srid": srid,
-                "buf": float(body.buffer_m),
-            }).mappings().all()
-    except Exception:
-        with _engine.begin() as conn:
-            conn.execute(text("SET LOCAL statement_timeout = '12s'"))
-            rows = conn.execute(text(f"""
-                SELECT 'fauna' AS src, f.nom_vernaculaire AS nom,
-                       ST_AsGeoJSON(ST_Transform(ST_Centroid(f.geometry), 4326)) AS geojson
-                FROM ecocompensation.fauna f
-                WHERE f.nom_vernaculaire = ANY(:names)
-                  AND ST_DWithin(f.geometry, {zone}, :buf)
-                LIMIT 2000
-            """), {
-                "names": names,
-                "gj": json.dumps(body.geometry),
-                "srid": srid,
-                "buf": float(body.buffer_m),
-            }).mappings().all()
+            conn.execute(text("SET LOCAL statement_timeout = '20s'"))
+            rows = conn.execute(sql, params).mappings().all()
+    except OperationalError:
+        return {"type": "FeatureCollection", "features": []}
     features = []
     for r in rows:
         if not r["geojson"]:

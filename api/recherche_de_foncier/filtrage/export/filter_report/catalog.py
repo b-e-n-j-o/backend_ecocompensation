@@ -170,14 +170,25 @@ def build_criteria(config: dict[str, Any] | None, buffer_km: float | None = None
     ))
 
     # 1. Faune
-    fauna = c.get("fauna_criteria") or []
+    fauna = [f for f in (c.get("fauna_criteria") or []) if isinstance(f, dict)]
     combine = (c.get("fauna_combine") or "or").lower()
+
+    def _species(f: dict[str, Any]) -> str:
+        return str(f.get("species") or f.get("label") or f.get("taxon_key") or "espèce")
+
+    def _dist_label(f: dict[str, Any]) -> str:
+        d = f.get("dist_m")
+        try:
+            return fmt_dist(float(d)) if d is not None else "—"
+        except (TypeError, ValueError):
+            return "—"
+
     if fauna:
-        sp = [f"{f['species']} (≤ {fmt_dist(f['dist_m'])})" for f in fauna]
+        sp = [f"{_species(f)} (≤ {_dist_label(f)})" for f in fauna]
         if len(fauna) == 1:
-            label = f"Présence : {fauna[0]['species']} (≤ {fmt_dist(fauna[0]['dist_m'])})"
-            rule = (f"Une parcelle est conservée si au moins une observation de {fauna[0]['species']} "
-                    f"est située à moins de {fmt_dist(fauna[0]['dist_m'])} de la parcelle.")
+            label = f"Présence : {_species(fauna[0])} (≤ {_dist_label(fauna[0])})"
+            rule = (f"Une parcelle est conservée si au moins une observation de {_species(fauna[0])} "
+                    f"est située à moins de {_dist_label(fauna[0])} de la parcelle.")
         elif combine == "and":
             label = f"Présence de toutes les espèces cibles ({len(fauna)})"
             rule = ("Une parcelle est conservée si, pour chacune des espèces suivantes, au moins une "
@@ -191,21 +202,21 @@ def build_criteria(config: dict[str, Any] | None, buffer_km: float | None = None
     out.append(Criterion(
         key="fauna_criteria", theme="faune", name="Présence d'espèces", label=label, rule=rule,
         applied=ap(bool(fauna)),
-        params=([(f["species"], f"observation à ≤ {fmt_dist(f['dist_m'])}") for f in fauna]
+        params=([(_species(f), f"observation à ≤ {_dist_label(f)}") for f in fauna]
                 + ([("Combinaison", "toutes les espèces (ET)" if combine == "and" else "au moins une espèce (OU)")]
                    if len(fauna) > 1 else [])),
         source="Observations naturalistes",
     ))
 
     # 1 bis. Flore (jumeau de la faune)
-    flora = c.get("flora_criteria") or []
+    flora = [f for f in (c.get("flora_criteria") or []) if isinstance(f, dict)]
     fcomb = (c.get("flora_combine") or "or").lower()
-    fl = [f"{f.get('label') or f.get('taxon_key')} (≤ {fmt_dist(f['dist_m'])})" for f in flora]
+    fl = [f"{f.get('label') or f.get('taxon_key')} (≤ {_dist_label(f)})" for f in flora]
     if len(flora) == 1:
         f0 = flora[0]
-        flabel = f"Présence : {f0.get('label') or f0.get('taxon_key')} (≤ {fmt_dist(f0['dist_m'])})"
+        flabel = f"Présence : {f0.get('label') or f0.get('taxon_key')} (≤ {_dist_label(f0)})"
         frule = (f"Une parcelle est conservée si au moins une observation de {f0.get('label') or f0.get('taxon_key')} "
-                 f"est située à moins de {fmt_dist(f0['dist_m'])} de la parcelle.")
+                 f"est située à moins de {_dist_label(f0)} de la parcelle.")
     elif flora:
         flabel = (f"Présence de tous les taxons cibles ({len(flora)})" if fcomb == "and"
                   else f"Présence d'au moins un taxon cible ({len(flora)})")
@@ -216,7 +227,7 @@ def build_criteria(config: dict[str, Any] | None, buffer_km: float | None = None
     out.append(Criterion(
         key="flora_criteria", theme="flore", name="Présence de flore", label=flabel, rule=frule,
         applied=ap(bool(flora)),
-        params=([(f.get("label") or f.get("taxon_key"), f"observation à ≤ {fmt_dist(f['dist_m'])}") for f in flora]
+        params=([(f.get("label") or f.get("taxon_key"), f"observation à ≤ {_dist_label(f)}") for f in flora]
                 + ([("Combinaison", "tous les taxons (ET)" if fcomb == "and" else "au moins un taxon (OU)")]
                    if len(flora) > 1 else [])),
         source="Observations flore (bureau d'études / OBV-NA)",
