@@ -199,7 +199,7 @@ WITH fauna_agg AS (
       AND ss.subset_id  = ANY(CAST(:batch AS text[]))
 )
 UPDATE ecocompensation_results.sous_ensembles ss
-SET    fauna_distances = fauna_distances || jsonb_build_object(:species, fa.dist_m)
+SET    fauna_distances = fauna_distances || jsonb_build_object(CAST(:species AS text), fa.dist_m)
 FROM   fauna_agg fa
 WHERE  ss.project_id = :pid
   AND  ss.subset_id  = fa.subset_id

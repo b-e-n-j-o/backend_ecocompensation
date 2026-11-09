@@ -204,7 +204,7 @@ WITH fauna_agg AS (
       AND p.idu = ANY(:idus)
 )
 UPDATE ecocompensation_results.parcelles p
-SET    fauna_distances = fauna_distances || jsonb_build_object(:species, fa.dist_m)
+SET    fauna_distances = fauna_distances || jsonb_build_object(CAST(:species AS text), fa.dist_m)
 FROM   fauna_agg fa
 WHERE  p.project_id = :pid
   AND  p.idu = fa.idu

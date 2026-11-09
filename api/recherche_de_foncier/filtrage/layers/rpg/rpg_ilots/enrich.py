@@ -117,7 +117,7 @@ WITH fa AS (
     FROM {RES_TABLE} il
     WHERE il.project_id = CAST(:pid AS uuid) AND il.num_ilot = ANY(CAST(:batch AS text[]))
 )
-UPDATE {RES_TABLE} il SET fauna_distances = il.fauna_distances || jsonb_build_object(:species, fa.dist_m)
+UPDATE {RES_TABLE} il SET fauna_distances = il.fauna_distances || jsonb_build_object(CAST(:species AS text), fa.dist_m)
 FROM fa
 WHERE il.project_id = CAST(:pid AS uuid) AND il.num_ilot = fa.num_ilot
 """
