@@ -52,6 +52,7 @@ def write_etude_geopackage(
     aoi_id: str | None,
     metrics_by_idu: dict[str, list[dict[str, Any]]] | None,
     results_uf: dict | None,
+    ilot_ids: set[str] | None = None,
 ) -> list[str]:
     layers: dict[str, gpd.GeoDataFrame] = {}
     skipped: list[str] = []
@@ -80,7 +81,7 @@ def write_etude_geopackage(
 
     if include_ilots:
         try:
-            layers.update(build_ilots_geodataframes(engine, project_id))
+            layers.update(build_ilots_geodataframes(engine, project_id, num_ilots=ilot_ids))
         except ValueError as exc:
             skipped.append(f"îlots RPG : {exc}")
 

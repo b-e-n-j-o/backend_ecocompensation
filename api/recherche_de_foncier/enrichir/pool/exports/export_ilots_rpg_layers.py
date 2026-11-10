@@ -39,9 +39,16 @@ def _gdf(rows: list[dict], geoms) -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(rows, geometry=[_as_shapely(g) for g in geoms], crs="EPSG:2154")
 
 
-def build_ilots_geodataframes(engine: "Engine", project_id: str) -> dict[str, gpd.GeoDataFrame]:
+def build_ilots_geodataframes(
+    engine: "Engine",
+    project_id: str,
+    *,
+    num_ilots: set[str] | None = None,
+) -> dict[str, gpd.GeoDataFrame]:
     results = get_results(engine, project_id)
     ilots = (results or {}).get("ilots") or []
+    if num_ilots is not None:
+        ilots = [il for il in ilots if str(il.get("num_ilot")) in num_ilots]
     if not ilots:
         raise ValueError("Aucun îlot RPG dans les résultats.")
     by_id = {str(il["num_ilot"]): il for il in ilots}

@@ -28,6 +28,7 @@ from api.recherche_de_foncier.enrichir.pool.exports.export_uf_classement_csv imp
 from api.recherche_de_foncier.enrichir.pool.exports.export_classement_shp import export_classement_shp
 from api.recherche_de_foncier.enrichir.pool.exports.export_uf_classement_shp import export_uf_classement_shp
 from api.recherche_de_foncier.enrichir.pool.exports.export_etude_gpkg import write_etude_geopackage
+from api.recherche_de_foncier.enrichir.pool.exports.export_jauge import filter_ilots, filter_parcelles, filter_results_uf
 from api.recherche_de_foncier.enrichir.pool.exports.export_zip_readme import add_export_readme
 
 _FILTER_REPORT_DIR = (
@@ -402,6 +403,8 @@ def export_etude_gpkg(
         description="Liste séparée par des virgules : parcelles, uf, ilots",
     ),
     run_id: str | None = Query(None, description="Run pool parcelles — sinon dernier last_results"),
+    max_distance_km: float | None = Query(None, description="Jauge : distance max au projet, en km"),
+    min_surface_ha: float | None = Query(None, description="Jauge : surface minimale, en ha"),
 ):
     """Un GeoPackage QGIS : les couches cochées + zone projet + aire d'étude."""
     wanted = {p.strip().lower() for p in layers.split(",") if p.strip()}
@@ -409,12 +412,27 @@ def export_etude_gpkg(
     if not wanted or unknown:
         raise HTTPException(400, "Paramètre layers : parcelles, uf, ilots.")
     proj = _get_project(project_id)
+    jauge = max_distance_km is not None or (min_surface_ha is not None and min_surface_ha > 0)
     parcelles, options, aoi_id, metrics = _load_parcelles_export(project_id, proj, run_id)
+    if jauge and "parcelles" in wanted:
+        parcelles = filter_parcelles(parcelles, max_distance_km, min_surface_ha)
     results_uf = proj.get("last_results_uf")
     if isinstance(results_uf, str):
         results_uf = json.loads(results_uf)
     if not isinstance(results_uf, dict):
         results_uf = None
+    elif jauge and "uf" in wanted:
+        results_uf = filter_results_uf(results_uf, max_distance_km, min_surface_ha)
+    ilot_ids: set[str] | None = None
+    if jauge and "ilots" in wanted:
+        from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots.api import get_results
+
+        raw_ilots = (get_results(engine, project_id) or {}).get("ilots") or []
+        ilot_ids = {
+            str(il.get("num_ilot"))
+            for il in filter_ilots(raw_ilots, max_distance_km, min_surface_ha)
+            if il.get("num_ilot") is not None
+        }
     with tempfile.NamedTemporaryFile(delete=False, suffix=".gpkg") as nf:
         gpkg_path = Path(nf.name)
     try:
@@ -430,6 +448,7 @@ def export_etude_gpkg(
             aoi_id=aoi_id,
             metrics_by_idu=metrics,
             results_uf=results_uf,
+            ilot_ids=ilot_ids,
         )
     except ValueError as e:
         gpkg_path.unlink(missing_ok=True)
