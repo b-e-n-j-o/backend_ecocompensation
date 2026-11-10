@@ -137,6 +137,11 @@ class FiltreOptions:
                         "mode": c.get("mode", "within_radius"),
                         "radius_m": float(c.get("radius_m", c.get("dist_m", 500.0))),
                         "dist_m": float(c.get("dist_m", c.get("radius_m", 500.0))),
+                        "aliases": [
+                            str(a).strip()
+                            for a in (c.get("aliases") or [])
+                            if str(a or "").strip()
+                        ],
                         "sources": [
                             s
                             for s in (c.get("sources") or ["pct", "lin", "surf"])

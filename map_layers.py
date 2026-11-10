@@ -6,7 +6,7 @@ map_layers.py
 
 GeoJSON pour la carte résultats (couches nationales clippées à l'AOI) :
   - cesbio        : ecocompensation.vegetation_sur_cesbio
-  - fauna         : ecocompensation.fauna (espèces du filtre)
+  - fauna         : fauna régionale + observation_faune (espèces du filtre, une seule couche)
   - fauna_buffer  : buffers ST_Buffer par observation / espèce
 """
 
@@ -108,19 +108,23 @@ def _parse_filter_map_config(opts: dict) -> FilterMapConfig:
         cesbio = [str(x).strip() for x in ces if str(x).strip()]
 
     fauna: list[FaunaMapCriterion] = []
-    raw_fauna = inner.get("fauna_criteria")
+    raw_fauna = inner.get("fauna_criteria") or inner.get("faune_criteria")
     if isinstance(raw_fauna, list):
         for item in raw_fauna:
             if not isinstance(item, dict):
                 continue
-            species = str(item.get("species") or "").strip()
+            species = str(item.get("species") or item.get("tax_nom_val") or "").strip()
             if not species:
                 continue
             try:
-                dist_m = float(item.get("dist_m") or 0)
+                dist_m = float(item.get("dist_m") if item.get("dist_m") is not None else item.get("radius_m") or 0)
             except (TypeError, ValueError):
                 dist_m = 0.0
             fauna.append(FaunaMapCriterion(species=species, dist_m=dist_m))
+            for alias in item.get("aliases") or []:
+                name = str(alias or "").strip()
+                if name and name != species:
+                    fauna.append(FaunaMapCriterion(species=name, dist_m=dist_m))
     elif inner.get("fauna_species"):
         # legacy orchestrator
         species_list = inner.get("fauna_species") or []
@@ -133,6 +137,21 @@ def _parse_filter_map_config(opts: dict) -> FilterMapConfig:
         cesbio_libelles=list(dict.fromkeys(cesbio)),
         fauna_criteria=fauna,
     )
+
+
+def _obs_geom_2154(column: str = "o.geom") -> str:
+    """geom est déclarée sans SRID : Lambert 93, WGS84, ou 0 selon l'import."""
+    return f"""
+        CASE
+            WHEN ST_SRID({column}) = 2154 THEN {column}
+            WHEN ST_SRID({column}) = 4326 THEN ST_Transform({column}, 2154)
+            WHEN ST_SRID({column}) = 0
+             AND abs(ST_X(ST_PointOnSurface({column}))) <= 180
+             AND abs(ST_Y(ST_PointOnSurface({column}))) <= 90
+                THEN ST_Transform(ST_SetSRID({column}, 4326), 2154)
+            ELSE ST_SetSRID(ST_Force2D({column}), 2154)
+        END
+    """
 
 
 def _aoi_subquery() -> str:
@@ -205,6 +224,7 @@ def get_fauna_aoi_geojson(
     dists = [c.dist_m for c in criteria]
 
     conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
+    params = {"pid": project_id, "species": species, "dists": dists}
     rows = conn.execute(
         text(f"""
             WITH aoi AS ({_aoi_subquery()}),
@@ -228,15 +248,54 @@ def get_fauna_aoi_geojson(
                 )::json AS geometry
             FROM ecocompensation.fauna f
             CROSS JOIN aoi
-            JOIN crit c ON f.nom_vernaculaire = c.species
+            JOIN crit c ON lower(btrim(f.nom_vernaculaire::text)) = lower(btrim(c.species))
             LEFT JOIN ecocompensation.fauna_taxa_ref tr
               ON lower(btrim(f.nom_vernaculaire::text)) = lower(btrim(tr.tax::text))
             WHERE ST_DWithin(f.geometry, aoi.geom, c.dist_m)
             ORDER BY f.id_obs
             LIMIT 15000
         """),
-        {"pid": project_id, "species": species, "dists": dists},
+        params,
     ).mappings().all()
+    conn.execute(text("SAVEPOINT user_fauna_pts"))
+    try:
+        user_rows = conn.execute(
+            text(f"""
+                WITH aoi AS ({_aoi_subquery()}),
+                crit AS (
+                    SELECT *
+                    FROM unnest(CAST(:species AS text[]), CAST(:dists AS float8[])) AS t(species, dist_m)
+                )
+                SELECT
+                    'user-' || o.id::text AS id_obs,
+                    o.nom_espece AS nom_vernaculaire,
+                    NULL::text AS nom_taxref,
+                    NULL::int AS cd_ref,
+                    'Données utilisateur' AS niveau_patrimonialite,
+                    'Inconnu' AS protection_nationale,
+                    GeometryType(o.g2154) AS geom_type,
+                    o.date_observation AS date_debut,
+                    NULL::date AS date_fin,
+                    ST_AsGeoJSON(ST_Transform(ST_PointOnSurface(o.g2154), 4326), 6)::json AS geometry
+                FROM (
+                    SELECT id, nom_espece, date_observation, ({_obs_geom_2154("geom")}) AS g2154
+                    FROM ecocompensation.observation_faune
+                ) o
+                CROSS JOIN aoi
+                JOIN crit c
+                  ON lower(btrim(o.nom_espece)) = lower(btrim(c.species))
+                  OR lower(btrim(o.nom_espece)) = lower(btrim(regexp_replace(c.species, '\\s*\\([^)]*\\)\\s*$', '')))
+                WHERE o.g2154 IS NOT NULL
+                  AND ST_DWithin(o.g2154, aoi.geom, c.dist_m)
+                LIMIT 15000
+            """),
+            params,
+        ).mappings().all()
+        rows = list(rows) + list(user_rows)
+        conn.execute(text("RELEASE SAVEPOINT user_fauna_pts"))
+    except Exception:
+        conn.execute(text("ROLLBACK TO SAVEPOINT user_fauna_pts"))
+        logger.exception("Observations faune utilisateur ignorées project_id=%s", project_id)
 
     features = []
     for r in rows:
@@ -277,7 +336,7 @@ def get_fauna_buffer_aoi_geojson(
                     )::json AS geometry
                 FROM ecocompensation.fauna f
                 CROSS JOIN aoi
-                WHERE f.nom_vernaculaire = :species
+                WHERE lower(btrim(f.nom_vernaculaire::text)) = lower(btrim(:species))
                   AND ST_DWithin(f.geometry, aoi.geom, :dist_m)
                 LIMIT 5000
             """),
@@ -287,6 +346,43 @@ def get_fauna_buffer_aoi_geojson(
                 "dist_m": crit.dist_m,
             },
         ).mappings().all()
+        conn.execute(text("SAVEPOINT user_fauna_buf"))
+        try:
+            user_rows = conn.execute(
+                text(f"""
+                    WITH aoi AS ({_aoi_subquery()})
+                    SELECT
+                        'user-' || o.id::text AS id_obs,
+                        o.nom_espece AS nom_vernaculaire,
+                        :dist_m AS buffer_m,
+                        ST_AsGeoJSON(
+                            ST_Transform(ST_Buffer(o.g2154, :dist_m), 4326),
+                            6
+                        )::json AS geometry
+                    FROM (
+                        SELECT id, nom_espece, ({_obs_geom_2154("geom")}) AS g2154
+                        FROM ecocompensation.observation_faune
+                    ) o
+                    CROSS JOIN aoi
+                    WHERE (
+                        lower(btrim(o.nom_espece)) = lower(btrim(:species))
+                        OR lower(btrim(o.nom_espece)) = lower(btrim(regexp_replace(:species, '\\s*\\([^)]*\\)\\s*$', '')))
+                    )
+                      AND o.g2154 IS NOT NULL
+                      AND ST_DWithin(o.g2154, aoi.geom, :dist_m)
+                    LIMIT 5000
+                """),
+                {
+                    "pid": project_id,
+                    "species": crit.species,
+                    "dist_m": crit.dist_m,
+                },
+            ).mappings().all()
+            rows = list(rows) + list(user_rows)
+            conn.execute(text("RELEASE SAVEPOINT user_fauna_buf"))
+        except Exception:
+            conn.execute(text("ROLLBACK TO SAVEPOINT user_fauna_buf"))
+            logger.exception("Buffers observations utilisateur ignorés project_id=%s", project_id)
 
         for r in rows:
             geom = r.get("geometry")

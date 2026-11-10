@@ -44,7 +44,7 @@ class EspecesProfiler(BasePoolProfiler):
         for c in criteria:
             if not isinstance(c, dict):
                 continue
-            tax = str(c.get("tax_nom_val", "") or "").strip()
+            tax = str(c.get("tax_nom_val") or c.get("species") or "").strip()
             if not tax:
                 continue
             mode = str(c.get("mode", "") or "").strip().lower()
@@ -52,9 +52,15 @@ class EspecesProfiler(BasePoolProfiler):
             radius_m = None
             if isinstance(radius, (int, float)):
                 radius_m = max(0.0, float(radius))
+            aliases = [
+                str(a).strip()
+                for a in (c.get("aliases") or [])
+                if str(a or "").strip()
+            ]
             cleaned.append(
                 {
                     "tax_nom_val": tax,
+                    "aliases": aliases,
                     "mode": mode,
                     "radius_m": radius_m,
                 }
@@ -70,12 +76,13 @@ class EspecesProfiler(BasePoolProfiler):
         seen_species = set()
         selected_species: list[str] = []
         for c in selected_criteria:
-            s = str(c["tax_nom_val"]).strip()
-            k = s.lower()
-            if k in seen_species:
-                continue
-            seen_species.add(k)
-            selected_species.append(s)
+            for raw in [c["tax_nom_val"], *c.get("aliases", [])]:
+                s = str(raw).strip()
+                k = s.lower()
+                if not s or k in seen_species:
+                    continue
+                seen_species.add(k)
+                selected_species.append(s)
 
         species_norm = [s.lower().strip() for s in selected_species]
         within_radius = [
@@ -97,7 +104,13 @@ class EspecesProfiler(BasePoolProfiler):
                 JOIN ecocompensation_results.parcelles p
                   ON p.project_id = pp.project_id
                  AND p.idu = pp.idu
-                JOIN ecocompensation_results.fauna f
+                JOIN (
+                    SELECT nom_vernaculaire, geom_2154, project_id
+                    FROM ecocompensation_results.fauna
+                    UNION ALL
+                    SELECT o.nom_espece, o.geom, CAST(:project_id AS uuid)
+                    FROM ecocompensation.observation_faune o
+                ) f
                   ON f.project_id = pp.project_id
                  AND f.geom_2154 IS NOT NULL
                  AND lower(btrim(f.nom_vernaculaire::text)) = ANY(CAST(:species_norm AS text[]))
@@ -179,7 +192,13 @@ class EspecesProfiler(BasePoolProfiler):
                             ST_MakeValid(p.geom_2154),
                             ST_MakeValid(f.geom_2154)
                         ) AS dist_m
-                    FROM ecocompensation_results.fauna f
+                    FROM (
+                        SELECT nom_vernaculaire, geom_2154, project_id
+                        FROM ecocompensation_results.fauna
+                        UNION ALL
+                        SELECT o.nom_espece, o.geom, CAST(:project_id AS uuid)
+                        FROM ecocompensation.observation_faune o
+                    ) f
                     WHERE f.project_id = pp.project_id
                       AND f.geom_2154 IS NOT NULL
                       AND lower(btrim(f.nom_vernaculaire::text)) = ANY(CAST(:species_norm AS text[]))

@@ -763,9 +763,38 @@ def _spatial_filter(
     tiles = plan.tiles if plan else []
 
     with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_filtre_rejets (
+                project_id uuid NOT NULL,
+                run_id uuid NULL,
+                idu text NOT NULL,
+                step_key text NOT NULL,
+                step_label text NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(
+            text("""
+                DELETE FROM ecocompensation_results.parcelles_filtre_rejets
+                WHERE project_id = CAST(:project_id AS uuid) AND run_id IS NULL
+            """),
+            params,
+        )
         cumulative: list[str] = []
         for step_idx, (step_key, label, clause) in enumerate(zip(step_keys, labels, all_clauses)):
             cumulative.append(clause)
+            held = " AND ".join(f"({c})" for c in ["p.project_id = :project_id", *cumulative[:-1]])
+            conn.execute(
+                text(f"""
+                    INSERT INTO ecocompensation_results.parcelles_filtre_rejets
+                        (project_id, idu, step_key, step_label)
+                    SELECT p.project_id, p.idu, :step_key, :step_label
+                    FROM ecocompensation_results.parcelles p
+                    WHERE {held}
+                      AND NOT ({clause})
+                """),
+                {**params, "step_key": step_key, "step_label": label},
+            )
             where = " AND ".join(f"({c})" for c in cumulative)
             t0 = time.perf_counter()
             if tiles:

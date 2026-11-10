@@ -108,7 +108,10 @@ def _existing_cols(conn, table: str, wanted: tuple[str, ...]) -> list[str]:
     return [c for c in wanted if c in set(rows)]
 
 
-def attach_filter_fields(engine, project_id: str, parcels: list[dict], species: list[str], log: Log) -> None:
+def attach_filter_fields(
+    engine, project_id: str, parcels: list[dict], species: list[str], log: Log,
+    aliases_by_species: dict[str, list[str]] | None = None,
+) -> None:
     """Complète chaque parcelle avec les champs du filtrage (ZH, hydro, faune) — en place."""
     idus = sorted({p["idu"] for p in parcels})
     if not idus:
@@ -135,14 +138,20 @@ def attach_filter_fields(engine, project_id: str, parcels: list[dict], species: 
             missing = [i for i in idus if sp not in ((by_idu.get(i) or {}).get("fauna_distances") or {})]
             if not missing:
                 continue
+            names = [sp, *((aliases_by_species or {}).get(sp) or [])]
             t0 = time.perf_counter()
             rows = conn.execute(
                 text(f"""
                     SELECT p.idu,
                            COALESCE((
                                SELECT ROUND(ST_Distance(p.geom_2154, f.geometry))::int
-                               FROM ecocompensation.fauna f
-                               WHERE f.nom_vernaculaire = :sp
+                               FROM (
+                                   SELECT geometry FROM ecocompensation.fauna
+                                   WHERE nom_vernaculaire = ANY(CAST(:names AS text[])) AND geometry IS NOT NULL
+                                   UNION ALL
+                                   SELECT geom FROM ecocompensation.observation_faune
+                                   WHERE nom_espece = ANY(CAST(:names AS text[])) AND geom IS NOT NULL
+                               ) f
                                ORDER BY p.geom_2154 <-> f.geometry
                                LIMIT 1
                            ), -1) AS dist_m
@@ -150,7 +159,7 @@ def attach_filter_fields(engine, project_id: str, parcels: list[dict], species: 
                           WHERE project_id = CAST(:pid AS uuid) AND idu = ANY(CAST(:idus AS text[]))
                           ORDER BY idu) p
                 """),
-                {"pid": project_id, "idus": missing, "sp": sp},
+                {"pid": project_id, "idus": missing, "names": names},
             ).mappings().all()
             for r in rows:
                 fauna.setdefault(str(r["idu"]), {})[sp] = int(r["dist_m"])

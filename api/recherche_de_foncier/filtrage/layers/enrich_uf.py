@@ -371,20 +371,47 @@ def run(
                 {"pid": project_id, "batch": subset_ids},
             ).fetchall()
         ]
-    n_veg = math.ceil(len(uf_ids) / UF_VEG_BATCH_SIZE) or 0
-    log(f"[ENRICH_UF] 🌿 Vég : {len(uf_ids)} unités foncières, lots de {UF_VEG_BATCH_SIZE}")
-    for bi, start in enumerate(range(0, len(uf_ids), UF_VEG_BATCH_SIZE), 1):
-        batch = uf_ids[start:start + UF_VEG_BATCH_SIZE]
-        t0 = time.perf_counter()
-        with engine.begin() as conn:
-            conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
-            conn.execute(text(_SQL_VEG_BATCH), {"pid": project_id, "batch": batch})
-        dt = time.perf_counter() - t0
-        log(f"[ENRICH_UF] 🌿 Vég lot {bi}/{n_veg} : {len(batch)} UF, {dt:.1f}s")
-    log("[ENRICH_UF] ✓ occupation du sol écrite sur les unités foncières.")
+    enrich_uf_entities(
+        engine,
+        project_id,
+        uf_ids=uf_ids,
+        subset_ids=subset_ids,
+        species=species,
+        name_by_species=name_by_species,
+        log=log,
+    )
+    return len(subset_ids)
 
-    # Faune
-    if species:
+
+def enrich_uf_entities(
+    engine,
+    project_id: str,
+    *,
+    uf_ids: list[str],
+    subset_ids: list[str],
+    species: list[str],
+    name_by_species: dict[str, list[str]] | None = None,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """CESBIO sur l'UF (somme des parcelles) + distance faune sur la géométrie unifiée du sous-ensemble."""
+    log = log or (lambda m: None)
+    names = name_by_species or {}
+    if uf_ids:
+        log(f"UF_SOL:0/{len(uf_ids)}")
+        n_veg = math.ceil(len(uf_ids) / UF_VEG_BATCH_SIZE) or 0
+        log(f"[ENRICH_UF] 🌿 Vég : {len(uf_ids)} unités foncières, lots de {UF_VEG_BATCH_SIZE}")
+        for bi, start in enumerate(range(0, len(uf_ids), UF_VEG_BATCH_SIZE), 1):
+            batch = uf_ids[start:start + UF_VEG_BATCH_SIZE]
+            t0 = time.perf_counter()
+            with engine.begin() as conn:
+                conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
+                conn.execute(text(_SQL_VEG_BATCH), {"pid": project_id, "batch": batch})
+            dt = time.perf_counter() - t0
+            log(f"UF_SOL:{min(start + len(batch), len(uf_ids))}/{len(uf_ids)}")
+            log(f"[ENRICH_UF] 🌿 Vég lot {bi}/{n_veg} : {len(batch)} UF, {dt:.1f}s")
+        log("[ENRICH_UF] ✓ occupation du sol écrite sur les unités foncières.")
+
+    if species and subset_ids:
         n_fauna = math.ceil(len(subset_ids) / FAUNA_BATCH_SIZE)
         for sp in species:
             log(f"[ENRICH_UF] 🦎 Fauna '{sp}' : {n_fauna} batch(s)")
@@ -392,14 +419,47 @@ def run(
                 batch = subset_ids[start:start + FAUNA_BATCH_SIZE]
                 with engine.begin() as conn:
                     conn.execute(text(f"SET LOCAL statement_timeout = '{STMT_TIMEOUT}'"))
-                    conn.execute(text(_SQL_FAUNA_BATCH),
-                                 {"pid": project_id, "batch": batch, "species": sp, "names": name_by_species.get(sp, [sp])})
+                    conn.execute(
+                        text(_SQL_FAUNA_BATCH),
+                        {
+                            "pid": project_id,
+                            "batch": batch,
+                            "species": sp,
+                            "names": names.get(sp, [sp]),
+                        },
+                    )
                 log(f"TILE_PROGRESS:{bi}/{n_fauna}:{bi*FAUNA_BATCH_SIZE} 🦎 {sp} {bi}/{n_fauna}")
             log(f"[ENRICH_UF] ✓ fauna '{sp}' mis à jour.")
-    else:
+    elif not species:
         log("[ENRICH_UF] Aucune espèce — fauna_distances ignorée.")
 
-    return len(subset_ids)
+
+def fauna_criteria_from_project_filter(raw) -> list[dict]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, dict):
+        return []
+    inner = raw.get("options") if isinstance(raw.get("options"), dict) else raw
+    items = inner.get("fauna_criteria") or inner.get("faune_criteria") or []
+    out: list[dict] = []
+    if not isinstance(items, list):
+        return out
+    for c in items:
+        if not isinstance(c, dict):
+            continue
+        species = str(c.get("species") or c.get("tax_nom_val") or "").strip()
+        if not species:
+            continue
+        try:
+            dist_m = float(c.get("dist_m") if c.get("dist_m") is not None else c.get("radius_m") or 0)
+        except (TypeError, ValueError):
+            dist_m = 0.0
+        aliases = [str(a).strip() for a in (c.get("aliases") or []) if str(a).strip()]
+        out.append({"species": species, "dist_m": dist_m, "aliases": aliases})
+    return out
 
 
 # ── build_uf_pool_response() ──────────────────────────────────────────────────
@@ -498,7 +558,7 @@ def build_uf_pool_response(
                   AND p.idu = ANY(ss.idus)
             ) zh ON TRUE
             WHERE ss.project_id = :project_id
-              AND ss.miller >= :miller_th{fauna_sql}
+              AND (ss.siren = 'manuel' OR (ss.miller >= :miller_th{fauna_sql}))
             ORDER BY zh.zone_humide_ha DESC NULLS LAST, ss.uf_id, ss.surface_ha DESC
         """
     else:
@@ -520,8 +580,10 @@ def build_uf_pool_response(
                 {"(ss.fauna_distances->>:fauna_species)::int" if fauna_species else "NULL::int"} AS dist_fauna_m
             FROM ecocompensation_results.sous_ensembles ss
             WHERE ss.project_id         = :project_id
-              AND ss.miller              >= :miller_th
-              {cesbio_sql}{fauna_sql}
+              AND (
+                    ss.siren = 'manuel'
+                    OR (ss.miller >= :miller_th {cesbio_sql}{fauna_sql})
+                  )
             ORDER BY ss.uf_id, ss.surface_ha DESC
         """
 
@@ -560,18 +622,13 @@ def build_uf_pool_response(
             }
 
     # Ranking des UF : surface humide (ZH) ou surface parcelle (faune)
+    manual = [uid for uid in by_uf if uf_meta[uid].get("siren") == "manuel"]
+    others = [uid for uid in by_uf if uid not in set(manual)]
     if is_zh:
-        ranked_uf_ids = sorted(
-            by_uf.keys(),
-            key=lambda uid: by_uf[uid][0].get("zone_humide_ha", 0),
-            reverse=True,
-        )[:limit_uf]
+        others.sort(key=lambda uid: by_uf[uid][0].get("zone_humide_ha", 0), reverse=True)
     else:
-        ranked_uf_ids = sorted(
-            by_uf.keys(),
-            key=lambda uid: by_uf[uid][0]["surface_ha"],
-            reverse=True,
-        )[:limit_uf]
+        others.sort(key=lambda uid: by_uf[uid][0]["surface_ha"], reverse=True)
+    ranked_uf_ids = manual + others[: max(0, limit_uf - len(manual))]
 
     result = []
     for rang, uf_id in enumerate(ranked_uf_ids, 1):

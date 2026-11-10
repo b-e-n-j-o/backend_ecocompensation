@@ -202,7 +202,7 @@ def get_results_layer_geojson(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return JSONResponse(
             content=fc,
-            headers={"Cache-Control": "private, max-age=300"},
+            headers={"Cache-Control": "private, no-cache"},
         )
 
     table = LAYER_TABLE_MAP.get(layer_key)
@@ -335,3 +335,60 @@ def get_results_layer_geojson(
             "Cache-Control": "private, max-age=300",
         },
     )
+
+
+@router.get(
+    "/api/projects/{project_id}/geojson/pm-parcelles",
+    summary="Parcelles personnes morales sources, dans l'emprise du projet",
+    tags=["geojson"],
+)
+def get_pm_parcelles_geojson(project_id: str) -> JSONResponse:
+    """Même table que la construction des unités foncières, géométries brutes ∩ AOI."""
+    from db import get_engine_ppm
+    from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import PARCELLES_PM_TABLE
+
+    with engine.begin() as conn:
+        aoi = conn.execute(
+            text("""
+                SELECT ST_AsText(a.geom_2154) AS wkt
+                FROM ecocompensation.projects p
+                JOIN ecocompensation.aoi a ON a.id = p.aoi_id
+                WHERE p.id = CAST(:pid AS uuid)
+            """),
+            {"pid": project_id},
+        ).scalar()
+    if not aoi:
+        raise HTTPException(404, "AOI du projet introuvable")
+
+    ppm = get_engine_ppm()
+    with ppm.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout = '60s'"))
+        rows = conn.execute(
+            text(f"""
+                SELECT
+                    idu, siren, denomination, forme_juridique,
+                    ST_AsGeoJSON(ST_Transform(geom_2154, 4326))::json AS geometry
+                FROM {PARCELLES_PM_TABLE}
+                WHERE geom_2154 && ST_GeomFromText(:w, 2154)
+                  AND ST_Intersects(geom_2154, ST_GeomFromText(:w, 2154))
+                  AND siren IS NOT NULL AND siren != ''
+                  AND geom_2154 IS NOT NULL
+            """),
+            {"w": aoi},
+        ).mappings().all()
+
+    features = [
+        {
+            "type": "Feature",
+            "geometry": row["geometry"],
+            "properties": {
+                "idu": row["idu"],
+                "siren": row["siren"],
+                "denomination": row["denomination"],
+                "forme_juridique": row["forme_juridique"],
+            },
+        }
+        for row in rows
+        if row["geometry"] is not None
+    ]
+    return JSONResponse({"type": "FeatureCollection", "features": features})

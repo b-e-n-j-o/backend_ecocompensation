@@ -96,6 +96,18 @@ CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_project_indesirable
 
 CREATE INDEX IF NOT EXISTS idx_project_indesirables_project_updated
 ON ecocompensation_results.parcelles_project_indesirables(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS ecocompensation_results.parcelles_filtre_rejets (
+    project_id uuid NOT NULL,
+    run_id uuid NULL,
+    idu text NOT NULL,
+    step_key text NOT NULL,
+    step_label text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_filtre_rejets_project_run
+ON ecocompensation_results.parcelles_filtre_rejets(project_id, run_id);
 """
 
 _ensure_tables_lock = threading.Lock()
@@ -673,6 +685,16 @@ def purge_old_runs(conn, project_id: str, keep_last: int = 5) -> None:
     conn.execute(
         text(
             """
+            DELETE FROM ecocompensation_results.parcelles_filtre_rejets
+            WHERE project_id = CAST(:project_id AS uuid)
+              AND run_id = ANY(CAST(:run_ids AS uuid[]))
+            """
+        ),
+        {"project_id": project_id, "run_ids": old_ids},
+    )
+    conn.execute(
+        text(
+            """
             DELETE FROM ecocompensation_results.parcelles_pool_runs
             WHERE project_id = CAST(:project_id AS uuid)
               AND id = ANY(CAST(:run_ids AS uuid[]))
@@ -702,6 +724,17 @@ def persist_parcelles_pool_run(
             total_count=len(parcelles),
         )
         insert_pool_parcelles(conn, project_id=project_id, run_id=run_id, parcelles=parcelles)
+        conn.execute(
+            text(
+                """
+                UPDATE ecocompensation_results.parcelles_filtre_rejets
+                SET run_id = CAST(:run_id AS uuid)
+                WHERE project_id = CAST(:project_id AS uuid)
+                  AND run_id IS NULL
+                """
+            ),
+            {"run_id": run_id, "project_id": project_id},
+        )
         if result_summary:
             conn.execute(
                 text(

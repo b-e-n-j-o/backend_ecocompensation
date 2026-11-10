@@ -136,7 +136,8 @@ def build_uf_export(
         raise ValueError("Aucune géométrie de parcelle UF trouvée en base pour ce classement.")
 
     species = [c["species"] for c in options.faune_criteria if c.get("species")]
-    attach_filter_fields(engine, project_id, parcels, species, log)
+    aliases = {c["species"]: list(c.get("aliases") or []) for c in options.faune_criteria if c.get("species")}
+    attach_filter_fields(engine, project_id, parcels, species, log, aliases)
     run_id, metrics_by_idu = ensure_uf_parcel_metrics(
         engine, project_id, parcels, options_raw, force=force_metrics, log=log
     )

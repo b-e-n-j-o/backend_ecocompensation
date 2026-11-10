@@ -1,0 +1,68 @@
+{
+    "kind": "kerfoncier.filter_preset.v1",
+    "options": {
+      "funnel_mode": false,
+      "vegetation_hybride": {
+        "zdv_natures": [],
+        "cesbio_libelles": [
+          "Maïs",
+          "Pelouses",
+          "Prairies",
+          "Protéagineux",
+          "Soja",
+          "Tournesol",
+          "Tubercules/racines",
+          "Verger",
+          "Vergers",
+          "Vigne",
+          "Vignes",
+          "Céréales à pailles",
+          "Colza",
+          "Lande herbacée",
+          "Lande ligneuse",
+          "Landes ligneuses",
+          "Forêts de conifères",
+          "Forêt fermée de conifères",
+          "Forêt fermée mixte"
+        ],
+        "mode": "OR"
+      },
+      "arrachage_vignes_mode": "ignore",
+      "zone_humide_mode": "ignore",
+      "remontee_nappes_classefiab": [],
+      "ebc_mode": "ignore",
+      "natura2000_mode": "exclude",
+      "reserves_naturelles_mode": "ignore",
+      "znieff_mode": "ignore",
+      "carhab_nom_eunis": [],
+      "excluded_layers": [
+        "geomce",
+        "preemption_ens",
+        "ens",
+        "natura_2000"
+      ],
+      "troncon_hydro_mode": "none",
+      "troncon_hydro_radius_m": 500,
+      "surface_hydro_mode": "none",
+      "surface_hydro_radius_m": 500,
+      "faune_criteria": [
+        {
+          "tax_nom_val": "Crapaud calamite (Le)",
+          "mode": "within_radius",
+          "radius_m": 600,
+          "sources": []
+        }
+      ],
+      "fauna_combine": "or",
+      "miller_threshold": null,
+      "min_area_ha": 2.5,
+      "radius_start_km": 10,
+      "radius_min_km": 1,
+      "target_count": 50,
+      "zones_humides_probables_mode": "ignore",
+      "min_zone_humide_ha": 0,
+      "troncons_hydros_max_dist_m": null,
+      "surfaces_hydros_max_dist_m": null,
+      "same_bassin_versant": false
+    }
+  }

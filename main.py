@@ -44,7 +44,7 @@ import geopandas as gpd
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import (
-    FastAPI, HTTPException, Request, UploadFile, File, Form, Query,
+    FastAPI, HTTPException, Request, UploadFile, File, Form, Query, Body,
     WebSocket, WebSocketDisconnect, BackgroundTasks,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -1390,6 +1390,32 @@ def get_uf_pool(
         study_type=resolved_study_type,
         min_zone_humide_ha=resolved_min_zh,
     )
+
+
+@app.post("/api/projects/{project_id}/uf-manuelle")
+def post_uf_manuelle(project_id: str, body: dict = Body(...)):
+    """Regroupe des parcelles contiguës du cadastre en une unité foncière du pool UF."""
+    from api.recherche_de_foncier.enrichir.pool.ajout_uf import AjoutUfError, add_manual_uf
+
+    _get_project(project_id)
+    idus = body.get("idus") if isinstance(body, dict) else None
+    if not isinstance(idus, list):
+        raise HTTPException(400, "Fournir la liste idus.")
+    try:
+        return add_manual_uf(engine, project_id, [str(i) for i in idus])
+    except AjoutUfError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/projects/{project_id}/uf/{uf_id}")
+def delete_unite_fonciere(project_id: str, uf_id: str):
+    from api.recherche_de_foncier.enrichir.pool.ajout_uf import AjoutUfError, delete_uf
+
+    _get_project(project_id)
+    try:
+        return delete_uf(engine, project_id, uf_id)
+    except AjoutUfError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 # ─────────────────────────────────────────────

@@ -26,6 +26,35 @@ _durete_jobs_lock = threading.Lock()
 _DURETE_JOBS_MAX = 50
 
 
+class FiltreRejetsBody(BaseModel):
+    run_id: str
+    idus: list[str] = Field(default_factory=list)
+
+
+@router.post("/{project_id}/filtre-rejets")
+def filtre_rejets(project_id: str, body: FiltreRejetsBody):
+    """Raison du premier critère qui a écarté chaque parcelle de ce run."""
+    idus = [str(i).strip() for i in body.idus if str(i).strip()][:5000]
+    if not idus:
+        return {"rejets": {}}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT idu, step_label
+                    FROM ecocompensation_results.parcelles_filtre_rejets
+                    WHERE project_id = CAST(:project_id AS uuid)
+                      AND run_id = CAST(:run_id AS uuid)
+                      AND idu = ANY(CAST(:idus AS text[]))
+                """),
+                {"project_id": project_id, "run_id": body.run_id, "idus": idus},
+            ).mappings().all()
+    except Exception:
+        logger.exception("filtre-rejets illisible project_id=%s", project_id)
+        return {"rejets": {}}
+    return {"rejets": {str(r["idu"]): str(r["step_label"]) for r in rows}}
+
+
 def _project_exists(project_id: str) -> bool:
     with engine.begin() as conn:
         row = conn.execute(

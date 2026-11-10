@@ -58,19 +58,25 @@ def _cleaned_faune_criteria(faune_criteria: list[Any]) -> list[dict[str, Any]]:
     for crit in faune_criteria:
         if not isinstance(crit, dict):
             continue
-        tax = str(crit.get("tax_nom_val", "") or "").strip()
+        tax = str(crit.get("tax_nom_val") or crit.get("species") or "").strip()
         mode = str(crit.get("mode", "intersect") or "").strip().lower()
         radius = float(crit.get("radius_m", 500.0) or 0.0)
         if not tax or mode not in ("intersect", "within_radius"):
             continue
-        out.append(
-            {
-                "tax": tax,
-                "mode": mode,
-                "radius_m": radius,
-                "geom_sources_sql": _geom_sources_sql(crit),
-            }
-        )
+        names = [tax]
+        for alias in crit.get("aliases") or []:
+            name = str(alias or "").strip()
+            if name and name not in names:
+                names.append(name)
+        for name in names:
+            out.append(
+                {
+                    "tax": name,
+                    "mode": mode,
+                    "radius_m": radius,
+                    "geom_sources_sql": _geom_sources_sql(crit),
+                }
+            )
     return out
 
 
@@ -84,7 +90,13 @@ def _assemble_tier1_or_sql(criteria: list[dict[str, Any]]) -> tuple[str, dict[st
             f"""
             EXISTS (
                 SELECT 1
-                FROM ecocompensation_results.fauna f
+                FROM (
+                    SELECT nom_vernaculaire, geom_2154, project_id
+                    FROM ecocompensation_results.fauna
+                    UNION ALL
+                    SELECT nom_espece, geom, CAST(:project_id AS uuid)
+                    FROM ecocompensation.observation_faune
+                ) f
                 WHERE f.project_id = CAST(:project_id AS uuid)
                   AND lower(btrim(f.nom_vernaculaire::text)) = lower(btrim(CAST(:faune_tax_{i} AS text)))
                   AND ({g})
@@ -110,7 +122,13 @@ def _assemble_nb_especes_sql(criteria: list[dict[str, Any]]) -> str:
     return f"""
         (
             SELECT COUNT(DISTINCT lower(btrim(f.nom_vernaculaire::text)))
-            FROM ecocompensation_results.fauna f
+            FROM (
+                SELECT nom_vernaculaire, geom_2154, project_id
+                FROM ecocompensation_results.fauna
+                UNION ALL
+                SELECT nom_espece, geom, CAST(:project_id AS uuid)
+                FROM ecocompensation.observation_faune
+            ) f
             WHERE f.project_id = CAST(:project_id AS uuid)
               AND ST_Intersects(p.geom_2154, f.geom_2154)
               AND {or_sql}
@@ -133,7 +151,13 @@ def _assemble_min_dist_faune_sql(criteria: list[dict[str, Any]]) -> str:
     return f"""
         (
             SELECT MIN(ST_Distance(p.geom_2154, f.geom_2154))
-            FROM ecocompensation_results.fauna f
+            FROM (
+                SELECT nom_vernaculaire, geom_2154, project_id
+                FROM ecocompensation_results.fauna
+                UNION ALL
+                SELECT nom_espece, geom, CAST(:project_id AS uuid)
+                FROM ecocompensation.observation_faune
+            ) f
             WHERE f.project_id = CAST(:project_id AS uuid)
               AND f.geom_2154 IS NOT NULL
               AND {or_sql}
