@@ -54,6 +54,34 @@ def fauna_exists_sql(geom_col: str, i: int) -> str:
                 )
     """
 
+def nearest_fauna_distance_sql(geom_expr: str) -> str:
+    """Distance (m) au point le plus proche, ou NULL s'il n'y en a pas.
+
+    Deux recherches séparées : un UNION ALL empêche l'index GiST
+    (ORDER BY geom <-> … LIMIT 1) et force un parcours de tous les points.
+    """
+    return f"""
+        LEAST(
+            (
+                SELECT ROUND(ST_Distance({geom_expr}, f.geometry))::int
+                FROM ecocompensation.fauna f
+                WHERE f.geometry IS NOT NULL
+                  AND f.nom_vernaculaire = ANY(CAST(:names AS text[]))
+                ORDER BY {geom_expr} <-> f.geometry
+                LIMIT 1
+            ),
+            (
+                SELECT ROUND(ST_Distance({geom_expr}, o.geom))::int
+                FROM ecocompensation.observation_faune o
+                WHERE o.geom IS NOT NULL
+                  AND o.nom_espece = ANY(CAST(:names AS text[]))
+                ORDER BY {geom_expr} <-> o.geom
+                LIMIT 1
+            )
+        )
+    """
+
+
 FAUNA_POINTS = """(
     SELECT f.nom_vernaculaire AS nom_vernaculaire, f.geometry AS geometry
     FROM ecocompensation.fauna f

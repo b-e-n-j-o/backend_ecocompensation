@@ -394,6 +394,7 @@ def _persist_pipeline_results(
         "funnel": funnel,
         "filter_config": options_json,
         "final_radius_km": buffer_km,
+        "enrich_error": result.enrich_error,
     }
 
     pool_parcelles = [
@@ -474,6 +475,7 @@ def _persist_pipeline_results(
         "filter_config": options_json,
         "pool_run_id": run_id,
         "pipeline": "filter_v2",
+        "enrich_error": result.enrich_error,
     }
 
     with engine.begin() as conn:

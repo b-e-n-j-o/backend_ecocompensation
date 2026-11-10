@@ -4,8 +4,10 @@ Un polygone de végétation chevauche deux parcelles. Deux sous-ensembles
 partagent la parcelle du milieu. veg_profile.area_m2 doit coller à
 ST_Area(ST_Intersection(géométrie du sous-ensemble, végétation)), à 1 m².
 
-    TEST_PG_URL=postgresql+psycopg://postgres:test@127.0.0.1/kertest \\
+    TEST_PG_URL=postgresql+psycopg://postgres:test@127.0.0.1:54329/postgres \\
         pytest tests/test_enrich_uf_veg_profile.py
+
+La base eco_legacy est séparée du schéma de smoke : ce test la reconstruit.
 """
 from __future__ import annotations
 
@@ -14,10 +16,11 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
-URL = os.environ.get("TEST_PG_URL", "")
+from tests.db.urls import assert_local_psycopg, with_database
+
+_RAW = os.environ.get("TEST_PG_URL", "")
+URL = with_database(assert_local_psycopg(_RAW), "eco_legacy") if _RAW else ""
 pytestmark = pytest.mark.skipif(not URL, reason="TEST_PG_URL non défini")
-if URL and not any(h in URL for h in ("@localhost", "@127.0.0.1")):
-    raise RuntimeError("TEST_PG_URL doit pointer sur une base locale jetable")
 
 PID = "33333333-3333-3333-3333-333333333333"
 

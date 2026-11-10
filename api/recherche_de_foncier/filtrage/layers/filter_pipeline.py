@@ -31,11 +31,11 @@ from sqlalchemy import text
 
 from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
 from api.recherche_de_foncier.filtrage.layers.faune import (
-    FAUNA_POINTS,
     aliases_only,
     chain_sql,
     criterion_names,
     fauna_exists_sql,
+    nearest_fauna_distance_sql,
 )
 
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_parcelles_v2 import (
@@ -125,6 +125,7 @@ class FilterPipelineResult:
     funnel: list[dict] = field(default_factory=list)
     duration_s: float = 0.0
     error: str | None = None
+    enrich_error: str | None = None
 
     @property
     def success(self) -> bool:
@@ -189,16 +190,7 @@ _SQL_ENRICH_FAUNA_BATCH = f"""
 WITH fauna_agg AS (
     SELECT
         p.idu,
-        COALESCE(
-            (
-                SELECT ROUND(ST_Distance(p.geom_2154, f.geometry))::int
-                FROM   {FAUNA_POINTS} f
-                WHERE  f.nom_vernaculaire = ANY(CAST(:names AS text[]))
-                ORDER  BY p.geom_2154 <-> f.geometry
-                LIMIT  1
-            ),
-            -1
-        ) AS dist_m
+        COALESCE({nearest_fauna_distance_sql("p.geom_2154")}, -1) AS dist_m
     FROM ecocompensation_results.parcelles p
     WHERE p.project_id = :pid
       AND p.idu = ANY(:idus)
@@ -1051,21 +1043,26 @@ def run(
             enrich_troncons = config.troncons_hydros_max_dist_m is not None
             enrich_surfaces = config.surfaces_hydros_max_dist_m is not None
             log(f"PHASE:enrich:start:{len(surviving)}")
-            _enrich_survivors(
-                engine,
-                project_id,
-                surviving,
-                species,
-                log,
-                enrich_zone_humide=enrich_zh,
-                enrich_troncons_hydro=enrich_troncons,
-                troncons_max_dist_m=max(config.troncons_hydros_max_dist_m or 0.0, 0.0),
-                enrich_surfaces_hydro=enrich_surfaces,
-                surfaces_max_dist_m=max(config.surfaces_hydros_max_dist_m or 0.0, 0.0),
-                flora_criteria=flora,
-                fauna_names=fauna_names,
-            )
-            log(f"PHASE:enrich:done:{len(surviving)}")
+            try:
+                _enrich_survivors(
+                    engine,
+                    project_id,
+                    surviving,
+                    species,
+                    log,
+                    enrich_zone_humide=enrich_zh,
+                    enrich_troncons_hydro=enrich_troncons,
+                    troncons_max_dist_m=max(config.troncons_hydros_max_dist_m or 0.0, 0.0),
+                    enrich_surfaces_hydro=enrich_surfaces,
+                    surfaces_max_dist_m=max(config.surfaces_hydros_max_dist_m or 0.0, 0.0),
+                    flora_criteria=flora,
+                    fauna_names=fauna_names,
+                )
+                log(f"PHASE:enrich:done:{len(surviving)}")
+            except Exception as enrich_exc:
+                logger.exception("Enrichissement non bloquant project_id=%s", project_id)
+                result.enrich_error = str(enrich_exc)
+                log(f"PHASE:enrich:warning:{enrich_exc}")
 
         result.duration_s = round(time.perf_counter() - t_global, 1)
         log(f"PHASE:complete:{len(surviving)}:{result.duration_s}s")

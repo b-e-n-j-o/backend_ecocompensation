@@ -1,10 +1,10 @@
 """
 Tests du module rpg_ilots contre un PostGIS LOCAL jetable.
 
-    TEST_PG_URL=postgresql+psycopg2://postgres:test@localhost/kertest pytest tests/test_rpg_ilots.py
+    TEST_PG_URL=postgresql+psycopg://postgres:test@127.0.0.1:54329/postgres pytest api/recherche_de_foncier/filtrage/layers/rpg/tests/test_rpg_ilots.py
 
-Les tests créent/vident les schémas ecocompensation / ecocompensation_results de la base de test :
-ils refusent de tourner si l'URL ne pointe pas sur localhost.
+psycopg 3 uniquement. La base eco_legacy est reconstruite par le test
+(schéma minimal), distincte de eco_test qui porte le snapshot.
 """
 import asyncio
 import os
@@ -15,10 +15,11 @@ from dataclasses import dataclass, field
 import pytest
 from sqlalchemy import create_engine, text
 
-URL = os.environ.get("TEST_PG_URL", "")
+from tests.db.urls import assert_local_psycopg, with_database
+
+_RAW = os.environ.get("TEST_PG_URL", "")
+URL = with_database(assert_local_psycopg(_RAW), "eco_legacy") if _RAW else ""
 pytestmark = pytest.mark.skipif(not URL, reason="TEST_PG_URL non défini")
-if URL and not any(h in URL for h in ("@localhost", "@127.0.0.1")):
-    raise RuntimeError("TEST_PG_URL doit pointer sur une base locale jetable")
 
 PID = "11111111-1111-1111-1111-111111111111"
 AID = "22222222-2222-2222-2222-222222222222"

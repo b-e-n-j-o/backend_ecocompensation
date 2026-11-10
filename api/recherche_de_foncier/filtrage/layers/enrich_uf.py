@@ -20,11 +20,11 @@ from sqlalchemy import text
 
 from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
 from api.recherche_de_foncier.filtrage.layers.faune import (
-    FAUNA_POINTS,
     aliases_only,
     chain_sql,
     criterion_names,
     fauna_exists_sql,
+    nearest_fauna_distance_sql,
 )
 
 VEG_BATCH_SIZE   = 100
@@ -184,16 +184,7 @@ _SQL_FAUNA_BATCH = f"""
 WITH fauna_agg AS (
     SELECT
         ss.subset_id,
-        COALESCE(
-            (
-                SELECT ROUND(ST_Distance(ss.geom_2154, f.geometry))::int
-                FROM   {FAUNA_POINTS} f
-                WHERE  f.nom_vernaculaire = ANY(CAST(:names AS text[]))
-                ORDER  BY ss.geom_2154 <-> f.geometry
-                LIMIT  1
-            ),
-            -1
-        ) AS dist_m
+        COALESCE({nearest_fauna_distance_sql("ss.geom_2154")}, -1) AS dist_m
     FROM ecocompensation_results.sous_ensembles ss
     WHERE ss.project_id = :pid
       AND ss.subset_id  = ANY(CAST(:batch AS text[]))

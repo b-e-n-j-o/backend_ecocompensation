@@ -11,7 +11,7 @@ from typing import Callable
 from sqlalchemy import text
 
 try:
-    from api.recherche_de_foncier.filtrage.layers.faune import FAUNA_POINTS
+    from api.recherche_de_foncier.filtrage.layers.faune import nearest_fauna_distance_sql
 except ImportError:
     import importlib.util
     from pathlib import Path
@@ -21,7 +21,7 @@ except ImportError:
     _faune_mod = importlib.util.module_from_spec(_faune_spec)
     assert _faune_spec and _faune_spec.loader
     _faune_spec.loader.exec_module(_faune_mod)
-    FAUNA_POINTS = _faune_mod.FAUNA_POINTS
+    nearest_fauna_distance_sql = _faune_mod.nearest_fauna_distance_sql
 
 try:
     from api.recherche_de_foncier.filtrage.layers.cesbio_tables import VEG_TABLE_CALC
@@ -108,12 +108,7 @@ WHERE il.project_id = CAST(:pid AS uuid) AND il.num_ilot = veg.num_ilot
 SQL_FAUNA = f"""
 WITH fa AS (
     SELECT il.num_ilot,
-           COALESCE((
-               SELECT ROUND(ST_Distance(il.geom_2154, f.geometry))::int
-               FROM {FAUNA_POINTS} f
-               WHERE f.nom_vernaculaire = ANY(CAST(:names AS text[]))
-               ORDER BY il.geom_2154 <-> f.geometry
-               LIMIT 1), -1) AS dist_m
+           COALESCE({nearest_fauna_distance_sql("il.geom_2154")}, -1) AS dist_m
     FROM {RES_TABLE} il
     WHERE il.project_id = CAST(:pid AS uuid) AND il.num_ilot = ANY(CAST(:batch AS text[]))
 )

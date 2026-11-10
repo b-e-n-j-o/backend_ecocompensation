@@ -4,8 +4,10 @@ Une dalle entièrement dans la parcelle compte pour ST_Area(dalle).
 Une dalle qui déborde compte pour l'intersection, pas pour la surface de la dalle.
 Le pourcentage est cette surface divisée par ST_Area(parcelle).
 
-    TEST_PG_URL=postgresql+psycopg://postgres:test@127.0.0.1/kertest \\
+    TEST_PG_URL=postgresql+psycopg://postgres:test@127.0.0.1:54329/postgres \\
         pytest tests/test_profile_cesbio_pct.py
+
+La base eco_legacy est séparée du schéma de smoke : ce test la reconstruit.
 """
 from __future__ import annotations
 
@@ -14,10 +16,11 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
-URL = os.environ.get("TEST_PG_URL", "")
+from tests.db.urls import assert_local_psycopg, with_database
+
+_RAW = os.environ.get("TEST_PG_URL", "")
+URL = with_database(assert_local_psycopg(_RAW), "eco_legacy") if _RAW else ""
 pytestmark = pytest.mark.skipif(not URL, reason="TEST_PG_URL non défini")
-if URL and not any(h in URL for h in ("@localhost", "@127.0.0.1")):
-    raise RuntimeError("TEST_PG_URL doit pointer sur une base locale jetable")
 
 PID = "44444444-4444-4444-4444-444444444444"
 RID = "55555555-5555-5555-5555-555555555555"

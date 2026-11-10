@@ -1,0 +1,17 @@
+# PostGIS local pour les tests. Pas de volume nommé : la base est jetable.
+# Choix compose plutôt que testcontainers : le schéma fait ~8k lignes, le chargement
+# passe par psql du conteneur, et les tests existants lisent déjà TEST_PG_URL.
+services:
+  postgis:
+    image: postgis/postgis:17-3.5
+    ports:
+      - "54329:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

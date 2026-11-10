@@ -241,6 +241,141 @@ def recompute_metrics(project_id: str, run_id: str, score_only: bool = Query(Fal
     return {"status": "ok", "project_id": project_id, "run_id": run_id, "mode": "all_metrics"}
 
 
+@router.post("/{project_id}/pool/runs/{run_id}/recompute-enrich")
+def recompute_enrich(project_id: str, run_id: str):
+    """Relance distances faune / flore / hydro sans refaire le filtre."""
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Projet {project_id} introuvable")
+    from api.recherche_de_foncier.enrichir.pool.add_parcelles import (
+        _pool_attrs,
+        _upsert_filter_enrich,
+    )
+    from api.recherche_de_foncier.filtrage.layers.faune import criterion_names
+    from api.recherche_de_foncier.filtrage.layers.filter_pipeline import (
+        FloraCriterion,
+        _enrich_survivors,
+    )
+
+    aoi_id = _project_aoi_id(project_id)
+    with engine.begin() as conn:
+        pool_service.ensure_tables(conn)
+        run = conn.execute(
+            text(
+                """
+                SELECT options_json
+                FROM ecocompensation_results.parcelles_pool_runs
+                WHERE id = CAST(:rid AS uuid) AND project_id = CAST(:pid AS uuid)
+                """
+            ),
+            {"rid": run_id, "pid": project_id},
+        ).mappings().first()
+        if not run:
+            raise HTTPException(404, "Run introuvable")
+        idus = [
+            str(r[0])
+            for r in conn.execute(
+                text(
+                    """
+                    SELECT idu FROM ecocompensation_results.parcelles_pool
+                    WHERE run_id = CAST(:rid AS uuid)
+                    """
+                ),
+                {"rid": run_id},
+            )
+        ]
+    options = run["options_json"] if isinstance(run["options_json"], dict) else {}
+    fauna_criteria = options.get("fauna_criteria") or []
+    species_list = [
+        str(fc.get("species") or "").strip()
+        for fc in fauna_criteria
+        if isinstance(fc, dict) and str(fc.get("species") or "").strip()
+    ]
+    fauna_names = {
+        str(fc.get("species") or "").strip(): criterion_names(
+            str(fc.get("species") or "").strip(),
+            fc.get("aliases") if isinstance(fc.get("aliases"), list) else [],
+        )
+        for fc in fauna_criteria
+        if isinstance(fc, dict) and str(fc.get("species") or "").strip()
+    }
+    flora = [
+        FloraCriterion(
+            taxon_key=str(fc.get("taxon_key") or ""),
+            label=str(fc.get("label") or fc.get("taxon_key") or ""),
+            dist_m=float(fc.get("dist_m") or 0),
+        )
+        for fc in (options.get("flora_criteria") or [])
+        if isinstance(fc, dict) and str(fc.get("taxon_key") or "").strip()
+    ]
+    zh_mode = str(options.get("zone_humide_mode") or "ignore")
+
+    def _num(key: str) -> float | None:
+        raw = options.get(key)
+        try:
+            return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    troncons_m = _num("troncons_hydros_max_dist_m")
+    surfaces_m = _num("surfaces_hydros_max_dist_m")
+    enrich_error: str | None = None
+    if idus:
+        try:
+            _enrich_survivors(
+                engine,
+                project_id,
+                idus,
+                species_list,
+                logger.info,
+                enrich_zone_humide=zh_mode in ("intersect", "exclude"),
+                enrich_troncons_hydro=troncons_m is not None,
+                troncons_max_dist_m=max(troncons_m or 0.0, 0.0),
+                enrich_surfaces_hydro=surfaces_m is not None,
+                surfaces_max_dist_m=max(surfaces_m or 0.0, 0.0),
+                flora_criteria=flora,
+                fauna_names=fauna_names,
+            )
+        except Exception as exc:
+            logger.exception("Relance enrichissement project_id=%s run_id=%s", project_id, run_id)
+            enrich_error = str(exc)
+        if enrich_error is None:
+            with engine.begin() as conn:
+                for idu in idus:
+                    attrs = _pool_attrs(conn, project_id, aoi_id, idu)
+                    if attrs:
+                        _upsert_filter_enrich(
+                            conn,
+                            project_id,
+                            run_id,
+                            idu,
+                            attrs,
+                            include_zone_humide=zh_mode in ("intersect", "exclude"),
+                        )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE ecocompensation.projects
+                SET last_results = jsonb_set(
+                    COALESCE(last_results, '{}'::jsonb),
+                    '{enrich_error}',
+                    CASE WHEN :err IS NULL THEN 'null'::jsonb ELSE to_jsonb(CAST(:err AS text)) END
+                )
+                WHERE id = CAST(:pid AS uuid)
+                  AND last_results->>'pool_run_id' = :rid
+                """
+            ),
+            {"pid": project_id, "rid": run_id, "err": enrich_error},
+        )
+    return {
+        "status": "ok" if enrich_error is None else "partial",
+        "project_id": project_id,
+        "run_id": run_id,
+        "n": len(idus),
+        "enrich_error": enrich_error,
+    }
+
+
 def _prune_durete_jobs() -> None:
     if len(_durete_jobs) <= _DURETE_JOBS_MAX:
         return
