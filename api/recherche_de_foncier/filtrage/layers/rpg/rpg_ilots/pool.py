@@ -1,11 +1,11 @@
 """
 pool.py — filtre les îlots enrichis (colonnes, pas de jointure spatiale) et construit le JSON de réponse.
 
-Mêmes seuils que les UF PM (build_uf_pool_response) :
+Mêmes seuils que les terrains de personnes morales :
   - miller >= miller_thresh
   - mode faune : veg_libelles && cesbio_libelles (si fournis), distance 1re espèce <= dist_m
   - mode ZH    : zone_humide_ha = somme sur les parcelles de l'îlot présentes dans le pool parcelles
-Puis score éco (compute_subset_score_eco) et prospect PM (pm_dominant = SIREN) via uf_profiling.
+Puis score éco et prospect PM (pm_dominant = SIREN).
 """
 from __future__ import annotations
 
@@ -88,9 +88,9 @@ def select_ilots(engine, project_id: str, p: IlotsRpgParams) -> list[dict]:
 
 
 def attach_profiling(engine, ilots: list[dict], p: IlotsRpgParams) -> list[dict]:
-    """Score éco + prospect PM, puis classement par (score, surface). Réutilise uf_profiling."""
-    from api.recherche_de_foncier.filtrage.layers.uf_profiling import (
-        _empty_pm_payload, compute_subset_score_eco, lookup_prospects_by_siren)
+    """Score éco + prospect PM, puis classement par (score, surface)."""
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.pool import (
+        _empty_pm, compute_score_eco, lookup_prospects_by_siren)
 
     sirens = [il["pm_dominant"] for il in ilots if il.get("pm_dominant")]
     try:
@@ -101,11 +101,11 @@ def attach_profiling(engine, ilots: list[dict], p: IlotsRpgParams) -> list[dict]
         prospects = {}
 
     for il in ilots:
-        il["score_eco"] = compute_subset_score_eco(
+        il["score_eco"] = compute_score_eco(
             il["distance_centre_km"], il["fauna_distances"], p.fauna_criteria,
             zone_humide_ha=il["zone_humide_ha"], study_type=p.study_type)
         siren = il.get("pm_dominant")
-        il["pm_prospect"] = prospects.get(siren, _empty_pm_payload(siren)) if siren else None
+        il["pm_prospect"] = prospects.get(siren, _empty_pm(siren, None)) if siren else None
     return ilots
 
 

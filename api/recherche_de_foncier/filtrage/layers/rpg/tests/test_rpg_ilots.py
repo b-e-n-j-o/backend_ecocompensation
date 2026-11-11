@@ -128,12 +128,12 @@ def test_enrich_et_pool(eng):
 
 @pytest.fixture
 def fake_profiling(monkeypatch):
-    """Simule api.recherche_de_foncier.filtrage.layers.uf_profiling (absent hors appli)."""
-    mod = types.ModuleType("uf_profiling")
-    mod.compute_subset_score_eco = lambda d, f, c, zone_humide_ha=0, study_type="": {"total_score": 4}
+    """Simule le score et le prospect PM utilisés par les îlots."""
+    mod = types.ModuleType("pool")
+    mod.compute_score_eco = lambda d, f, c, zone_humide_ha=0, study_type="": {"total_score": 4}
     mod.lookup_prospects_by_siren = lambda conn, s: {x: {"siren": x, "intersects_pm_database": True} for x in s}
-    mod._empty_pm_payload = lambda siren=None, denomination=None: {"siren": siren}
-    parts = "api.recherche_de_foncier.filtrage.layers.uf_profiling".split(".")
+    mod._empty_pm = lambda siren=None, denomination=None: {"siren": siren}
+    parts = "api.recherche_de_foncier.filtrage.layers.unites_foncieres.pool".split(".")
     for i in range(1, len(parts)):
         monkeypatch.setitem(sys.modules, ".".join(parts[:i]), types.ModuleType(parts[i - 1]))
     monkeypatch.setitem(sys.modules, ".".join(parts), mod)

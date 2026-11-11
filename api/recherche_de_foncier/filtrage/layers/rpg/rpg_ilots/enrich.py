@@ -1,5 +1,5 @@
 """
-enrich.py — végétation CESBIO + distances faune par îlot (même logique que enrich_uf.py, table ilots_rpg).
+enrich.py — végétation CESBIO + distances faune par îlot (table ilots_rpg).
 """
 from __future__ import annotations
 

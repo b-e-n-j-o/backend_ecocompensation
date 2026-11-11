@@ -176,14 +176,7 @@ async def run_orchestration(
     *,
     layer_keys: list[str] | None = None,
     dry_run: bool = False,
-    uf_max_parcelles: int | None = None,
-    uf_min_area_ha: float = 7.0,
     fauna_species: list[str] | None = None,
-    uf_miller_thresh: float | None = None,
-    uf_cesbio_libelles: list[str] | None = None,
-    uf_fauna_criteria: list[dict] | None = None,
-    uf_fauna_combine: str = "or",
-    uf_fauna_joins: list[str] | None = None,
 ) -> dict[str, LayerResult]:
     """
     Exécute les couches (toutes si ``layer_keys`` est None, sinon sous-ensemble).
@@ -260,26 +253,9 @@ async def run_orchestration(
 
         # ── Exécution avec drain de progression ──────────────────────────────
         try:
-            if key == "sous_ensembles":
-                result = await _run_layer_with_progress(
-                    fn, engine, project_id, aoi_id, key, push, loop,
-                    min_area_ha=uf_min_area_ha,
-                    max_uf_parcelles=uf_max_parcelles,
-                )
-            elif key == "enrich_uf":
-                result = await _run_layer_with_progress(
-                    fn, engine, project_id, aoi_id, key, push, loop,
-                    species_list=fauna_species,
-                    miller_thresh=uf_miller_thresh,
-                    cesbio_libelles=uf_cesbio_libelles,
-                    fauna_criteria=uf_fauna_criteria,
-                    fauna_combine=uf_fauna_combine,
-                    fauna_joins=uf_fauna_joins,
-                )
-            else:
-                result = await _run_layer_with_progress(
-                    fn, engine, project_id, aoi_id, key, push, loop,
-                )
+            result = await _run_layer_with_progress(
+                fn, engine, project_id, aoi_id, key, push, loop,
+            )
         except Exception as e:
             logger.exception("Erreur couche %s", key)
             result = LayerResult(
@@ -291,10 +267,6 @@ async def run_orchestration(
 
         if dry_run and not result.error:
             cleanup_dry_run_writes(engine, layer_cfg["table"], project_id)
-            if key == "sous_ensembles":
-                cleanup_dry_run_writes(
-                    engine, "ecocompensation_results.unites_foncieres", project_id
-                )
 
         results[key] = result
 
@@ -340,7 +312,6 @@ async def run_orchestration(
 
 
 PARCELLES_PHASE_KEYS = ("parcelles",)
-UF_PHASE_KEYS = ("sous_ensembles", "enrich_uf")
 
 
 async def fetch_project_two_phases(
@@ -350,16 +321,14 @@ async def fetch_project_two_phases(
     push: ProgressPush = _noop_push,
     *,
     dry_run: bool = False,
-    uf_max_parcelles: int | None = None,
-    uf_min_area_ha: float = 7.0,
     fauna_species: list[str] | None = None,
     include_sig_layers: bool = True,
 ) -> dict[str, LayerResult]:
     """
     Fetch en deux temps :
       1. Parcelles (tiling cadastre) → event ``phase:parcelles_ready``
-      2. UF (sous_ensembles = PPM → k-sous-ensembles → enrich_uf) → event ``phase:uf_ready``
-      3. (optionnel) autres couches SIG du registre
+      2. (optionnel) autres couches SIG du registre
+    Les unités foncières sont calculées après le filtre parcelles, pas ici.
     """
     all_results: dict[str, LayerResult] = {}
 
@@ -372,29 +341,12 @@ async def fetch_project_two_phases(
     all_results.update(phase1_results)
     await push({
         "event":     "phase:parcelles_ready",
-        "message":   "Parcelles disponibles — analyse UF en cours…",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
-
-    uf_results = await run_orchestration(
-        engine, project_id, aoi_id, push,
-        layer_keys=list(UF_PHASE_KEYS),
-        dry_run=dry_run,
-        uf_max_parcelles=uf_max_parcelles,
-        uf_min_area_ha=uf_min_area_ha,
-        fauna_species=fauna_species,
-    )
-    all_results.update(uf_results)
-
-    await push({
-        "event":     "phase:uf_ready",
-        "message":   "Unités foncières disponibles",
+        "message":   "Parcelles disponibles",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
     if include_sig_layers:
-        phase12 = set(PARCELLES_PHASE_KEYS) | set(UF_PHASE_KEYS)
-        sig_keys = [cfg["key"] for cfg in LAYER_REGISTRY if cfg["key"] not in phase12]
+        sig_keys = [cfg["key"] for cfg in LAYER_REGISTRY if cfg["key"] not in PARCELLES_PHASE_KEYS]
         if sig_keys:
             sig_results = await run_orchestration(
                 engine, project_id, aoi_id, push,

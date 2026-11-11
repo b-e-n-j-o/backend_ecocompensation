@@ -108,7 +108,7 @@ Toute intersection écarte la parcelle. Clé API → défaut coché.
 
 | Champ | Défaut | Effet |
 |---|---|---|
-| `include_unites_foncieres` | `True` | `False` = pool parcelles sans UF |
+| `include_unites_foncieres` | `True` | `False` = pool parcelles sans UF. Le calcul est `unites_foncieres/`, après le filtre, pas une couche de `layer_runner` |
 
 ## Couches projet (`layer_runner`)
 
@@ -116,8 +116,6 @@ Découpe AOI → tables `ecocompensation_results.*`, avant ou pour le filtre.
 
 | Clé | Rapide | Table | Rôle |
 |---|---|---|---|
-| `sous_ensembles` | non | `sous_ensembles` | UF : PPM → clustering SIREN → sous-ensembles |
-| `enrich_uf` | non | `sous_ensembles` | Flags végétation / faune sur les UF |
 | `parcelles` | oui | `parcelles` | Candidats cadastraux |
 | `zone_humide` | oui | `zone_humide` | ZH établies |
 | `espaces_naturels_sensibles_ens` | oui | `espaces_naturels_sensibles_ens` | ENS (copie projet) |

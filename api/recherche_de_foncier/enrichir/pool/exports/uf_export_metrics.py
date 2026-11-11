@@ -12,7 +12,7 @@ réutilisé tant que la liste des parcelles ne change pas (clé = hash des IDU +
 
 En complément, les champs « filtrage » (zone humide, hydro, faune…) sont lus sur
 ecocompensation_results.parcelles quand ils existent, et les distances faune
-manquantes sont calculées (même SQL que enrich_uf, mais par parcelle).
+manquantes sont calculées (même SQL que l'enrichissement des parcelles, mais par parcelle).
 """
 from __future__ import annotations
 
@@ -26,11 +26,11 @@ from typing import Any, Callable
 from sqlalchemy import text
 
 from api.recherche_de_foncier.enrichir.pool import pool_service
+from api.recherche_de_foncier.filtrage.layers.unites_foncieres.tables import P as UF_TABLE
 
 logger = logging.getLogger(__name__)
 
 SCOPE = "uf_export"
-UF_TABLE = "ecocompensation_results.unites_foncieres"
 RES_PARCELLES = "ecocompensation_results.parcelles"
 
 # Champs de ecocompensation_results.parcelles relus s'ils existent (fallback filter_enrich

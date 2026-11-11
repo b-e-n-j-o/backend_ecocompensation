@@ -7,7 +7,7 @@ Depuis backend/ :
 
 Le SQL qui isole les parcelles du propriétaire dans l'emprise est SQL_BLOC.
 Le regroupement en blocs qui se touchent se fait ensuite en Python (même règle
-que aoi_to_sub_uf : ST_Touches ou contact de bord). Le plus gros bloc est celui
+que le calcul des terrains : ST_Touches ou contact de bord). Le plus gros bloc est celui
 des 127. Une seconde requête évalue excluded, anchor, occ_ok_area, area.
 """
 from __future__ import annotations

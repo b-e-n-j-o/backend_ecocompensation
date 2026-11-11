@@ -50,34 +50,12 @@ def eng():
             run_id uuid,
             idu text
         );
-        CREATE TABLE ecocompensation_results.unites_foncieres (
-            project_id uuid,
-            idu text,
-            geom_2154 geometry(Geometry, 2154)
-        );
-        CREATE TABLE ecocompensation_results.sous_ensembles (
-            project_id uuid,
-            subset_id text,
-            idus text[],
-            geom_2154 geometry(Geometry, 2154),
-            veg_libelles text[] NOT NULL DEFAULT '{}',
-            veg_profile jsonb NOT NULL DEFAULT '{}'
-        );
         """)
         cx.execute(text("""
             INSERT INTO ecocompensation_results.parcelles (project_id, idu, geom_2154)
             VALUES (CAST(:pid AS uuid), 'P1', ST_MakeEnvelope(0, 0, 100, 100, 2154));
             INSERT INTO ecocompensation_results.parcelles_pool (project_id, run_id, idu)
             VALUES (CAST(:pid AS uuid), CAST(:rid AS uuid), 'P1');
-            INSERT INTO ecocompensation_results.unites_foncieres (project_id, idu, geom_2154)
-            SELECT project_id, idu, geom_2154
-            FROM ecocompensation_results.parcelles
-            WHERE idu = 'P1';
-            INSERT INTO ecocompensation_results.sous_ensembles
-                (project_id, subset_id, idus, geom_2154)
-            SELECT project_id, 'ss-p1', ARRAY['P1'], geom_2154
-            FROM ecocompensation_results.parcelles
-            WHERE idu = 'P1';
             INSERT INTO ecocompensation.vegetation_sur_cesbio (libelle_prio, source, geom)
             VALUES
               ('Forêt fermée de conifères', 'bdtopo', ST_MakeEnvelope(0, 0, 99.5, 100, 2154)),
@@ -104,29 +82,3 @@ def test_somme_pct_parcelle_inferieure_a_100(eng):
     assert "Forêt ouverte" in by_label
     assert len(by_label) == 2
 
-
-def test_profile_cesbio_et_enrich_uf_meme_pct(eng):
-    from api.recherche_de_foncier.enrichir.pool.profilers.profile_cesbio import _SQL_PROFILE_VEG_BATCH
-    from api.recherche_de_foncier.filtrage.layers.enrich_uf import _SQL_VEG_BATCH
-
-    with eng.begin() as cx:
-        profile_rows = cx.execute(
-            text(_SQL_PROFILE_VEG_BATCH),
-            {"pid": PID, "rid": RID, "idus": ["P1"]},
-        ).mappings().all()
-        cx.execute(text(_SQL_VEG_BATCH), {"pid": PID, "batch": ["ss-p1"]})
-        raw = cx.execute(
-            text("""
-                SELECT veg_profile
-                FROM ecocompensation_results.sous_ensembles
-                WHERE project_id = CAST(:pid AS uuid) AND subset_id = 'ss-p1'
-            """),
-            {"pid": PID},
-        ).scalar_one()
-
-    profile = {r["libelle_prio"]: float(r["pct"]) for r in profile_rows}
-    stored = raw if isinstance(raw, dict) else {}
-    enrich = {label: float(item["pct"]) for label, item in stored.items()}
-    assert set(profile) == set(enrich)
-    for label, pct in profile.items():
-        assert enrich[label] == pytest.approx(pct, abs=0.01)

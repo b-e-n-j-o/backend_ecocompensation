@@ -63,9 +63,9 @@
       "role": "candidats",
       "declencheur": "toujours",
       "source": { "schema": "public", "table": "parcelles_personnes_morales" },
-      "resultat": { "schema": "ecocompensation_results", "table": "sous_ensembles" },
+      "resultat": { "schema": "ecocompensation_results", "table": "uf_terrains" },
       "emprise": { "statut": "a_verifier", "note": "" },
-      "notes": "Base PPM. Repli ecocompensation.parcelles_personnes_morales. Écrit aussi ecocompensation_results.unites_foncieres. Relu au profilage."
+      "notes": "Base PPM. Calcul après le filtre parcelles. Écrit aussi les parcelles candidates du terrain. Relu pour le JSON last_results_uf."
     },
     {
       "id": "vegetation_sur_cesbio",

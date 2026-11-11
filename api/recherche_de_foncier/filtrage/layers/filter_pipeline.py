@@ -437,7 +437,38 @@ def _has_source_geometry(engine, project_id: str) -> bool:
     return bool(found)
 
 
-def _build_filter_clauses(
+class NoSourceGeometry(RuntimeError):
+    """search_mode=within_foncier mais le projet n'a pas de géométrie source."""
+
+
+def resolve_spatial_mode(engine, project_id: str, config: FilterConfig,
+                         log: Callable[[str], None]) -> str | None:
+    has_source = _has_source_geometry(engine, project_id)
+    if config.search_mode == "within_foncier":
+        if not has_source:
+            log("WITHIN_FONCIER:error_no_geom")
+            raise NoSourceGeometry(project_id)
+        log("WITHIN_FONCIER:enabled")
+        return "within_foncier"
+    if has_source:
+        log("SOURCE_EXCLUSION:enabled")
+        return "exclude_source"
+    log("SOURCE_EXCLUSION:skipped_no_geom")
+    return None
+
+
+def flora_exists_sql(geom_col: str, i: int) -> str:
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM ecocompensation.flore_observation o
+            WHERE o.taxon_key = :flora_key_{i}
+              AND ST_DWithin({geom_col}, o.geom, :flora_dist_{i})
+        )
+    """
+
+
+def build_filter_clauses(
     config: FilterConfig,
     *,
     spatial_mode: str | None = None,
@@ -509,16 +540,7 @@ def _build_filter_clauses(
 
     flora_sql = None
     if config.flora_criteria:
-        flora_parts = []
-        for i, _fc in enumerate(config.flora_criteria):
-            flora_parts.append(f"""
-                EXISTS (
-                    SELECT 1
-                    FROM ecocompensation.flore_observation o
-                    WHERE o.taxon_key = :flora_key_{i}
-                      AND ST_DWithin(p.geom_2154, o.geom, :flora_dist_{i})
-                )
-            """)
+        flora_parts = [flora_exists_sql("p.geom_2154", i) for i, _fc in enumerate(config.flora_criteria)]
         flora_sql = chain_sql(flora_parts, config.flora_joins, config.flora_combine)
 
     if fauna_sql and flora_sql:
@@ -662,7 +684,7 @@ def _build_filter_clauses(
     return keys, labels, clauses
 
 
-def _filter_params(project_id: str, config: FilterConfig) -> dict:
+def filter_params(project_id: str, config: FilterConfig) -> dict:
     params: dict = {
         "project_id": project_id,
         "cesbio_libelles": config.cesbio_libelles,
@@ -742,22 +764,13 @@ def _spatial_filter(
     config: FilterConfig,
     log: Callable[[str], None],
 ) -> tuple[list[str], list[dict]]:
-    has_source = _has_source_geometry(engine, project_id)
-    if config.search_mode == "within_foncier":
-        if not has_source:
-            log("WITHIN_FONCIER:error_no_geom")
-            return [], []
-        spatial_mode = "within_foncier"
-        log("WITHIN_FONCIER:enabled")
-    elif has_source:
-        spatial_mode = "exclude_source"
-        log("SOURCE_EXCLUSION:enabled")
-    else:
-        spatial_mode = None
-        log("SOURCE_EXCLUSION:skipped_no_geom")
+    try:
+        spatial_mode = resolve_spatial_mode(engine, project_id, config, log)
+    except NoSourceGeometry:
+        return [], []
 
-    step_keys, labels, all_clauses = _build_filter_clauses(config, spatial_mode=spatial_mode)
-    params = _filter_params(project_id, config)
+    step_keys, labels, all_clauses = build_filter_clauses(config, spatial_mode=spatial_mode)
+    params = filter_params(project_id, config)
     funnel_steps: list[dict] = []
     plan = plan_aoi_tiles(engine, aoi_id, config.min_area_ha)
     tiles = plan.tiles if plan else []

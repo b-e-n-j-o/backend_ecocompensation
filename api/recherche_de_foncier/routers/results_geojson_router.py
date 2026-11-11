@@ -21,6 +21,13 @@ from sqlalchemy import text
 
 from db import get_engine
 from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
+from api.recherche_de_foncier.filtrage.layers.filter_map_layers import (
+    FILTER_MAP_BY_KEY,
+    LEGACY_GEOJSON_KEYS,
+    active_layer_defs,
+    fetch_filter_layer,
+)
+from api.recherche_de_foncier.filtrage.layers.unites_foncieres.params import config_from_dict
 from map_layers import (
     get_cesbio_aoi_geojson,
     get_fauna_aoi_geojson,
@@ -164,6 +171,21 @@ def _materialize_results_layer_if_missing(project_id: str, layer_key: str, table
         )
 
 
+@router.get("/api/projects/{project_id}/geojson/filter-layers")
+def list_filter_map_layers(project_id: str):
+    """Définitions des couches actives selon projects.filter_config, sans géométrie."""
+    raw = None
+    with engine.connect() as conn:
+        raw = conn.execute(
+            text("SELECT filter_config FROM ecocompensation.projects WHERE id = CAST(:pid AS uuid)"),
+            {"pid": project_id},
+        ).scalar_one_or_none()
+    if isinstance(raw, str) and raw.strip():
+        raw = json.loads(raw)
+    config = config_from_dict(raw if isinstance(raw, dict) else None)
+    return {"layers": active_layer_defs(config)}
+
+
 @router.get(
     "/api/projects/{project_id}/geojson/results/{layer_key}",
     summary="GeoJSON d'une couche de résultats thématiques pour un projet",
@@ -185,6 +207,24 @@ def get_results_layer_geojson(
 
     Exemple : GET /api/projects/abc123/geojson/results/cesbio?run_id=…
     """
+    layer_key = {"espaces_naturels_sensibles_ens": "ens"}.get(layer_key, layer_key)
+    if layer_key in FILTER_MAP_BY_KEY and layer_key not in LEGACY_GEOJSON_KEYS:
+        try:
+            with engine.begin() as conn:
+                raw = conn.execute(
+                    text("SELECT filter_config FROM ecocompensation.projects WHERE id = CAST(:pid AS uuid)"),
+                    {"pid": project_id},
+                ).scalar_one_or_none()
+            if isinstance(raw, str) and raw.strip():
+                raw = json.loads(raw)
+            config = config_from_dict(raw if isinstance(raw, dict) else None)
+            with engine.begin() as conn:
+                fc = fetch_filter_layer(conn, project_id, layer_key, config)
+        except Exception as exc:
+            logger.exception("Erreur GeoJSON filtre %s projet %s", layer_key, project_id)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse(content=fc, headers={"Cache-Control": "private, no-cache"})
+
     if layer_key in NATIONAL_MAP_LAYER_KEYS:
         try:
             with engine.begin() as conn:
@@ -345,7 +385,7 @@ def get_results_layer_geojson(
 def get_pm_parcelles_geojson(project_id: str) -> JSONResponse:
     """Même table que la construction des unités foncières, géométries brutes ∩ AOI."""
     from db import get_engine_ppm
-    from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import PARCELLES_PM_TABLE
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.build import PARCELLES_PM_TABLE
 
     with engine.begin() as conn:
         aoi = conn.execute(

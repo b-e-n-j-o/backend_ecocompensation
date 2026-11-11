@@ -23,7 +23,7 @@ L'intérêt métier est de proposer **des zones plus grandes que la parcelle seu
 - La duplication de code (enrichissement CESBIO / faune) est **assumée** : on sait où se trouve le code RPG et où se trouve le code PM.
 - Les seuls points de contact avec l'existant sont :
   - l'appel dans `filter_orchestrator.py` ;
-  - la réutilisation, en lecture seule, de `compute_subset_score_eco`, `lookup_prospects_by_siren` et `_empty_pm_payload` dans `uf_profiling.py`.
+  - la réutilisation, en lecture seule, de `compute_score_eco`, `lookup_prospects_by_siren` et `_empty_pm` dans `unites_foncieres/pool.py`.
 
 ## 3. Prérequis en base (préparés hors appli)
 
@@ -88,7 +88,7 @@ WS : progress (layer_key="ilots_rpg") … puis phase:ilots_rpg_ready | error
 
 ### 4.3 `enrich.py`
 
-C'est la même logique que `enrich_uf.py`, sur la table `ilots_rpg` :
+C'est la même logique que l'enrichissement des unités foncières, sur la table `ilots_rpg` :
 
 - `veg_libelles` / `veg_profile` : classes `libelle_prio` de `ecocompensation.vegetation_sur_cesbio` (`VEG_TABLE`). Surface calculée parcelle par parcelle (dalle contenue : `ST_Area(dalle)`, sinon intersection), puis sommé sur l'îlot. Le pourcentage est cette somme divisée par la surface de l'îlot. Traité par lots de 100 îlots.
 - `fauna_distances` : `{espèce: distance_m}` vers l'observation la plus proche dans `ecocompensation.fauna` (valeur `-1` si aucune). Traité par lots de 300 îlots.
@@ -177,7 +177,7 @@ Clé : `(project_id, num_ilot)`. Une ligne par îlot candidat et par projet.
 |---|---|
 | `filter_pipeline.py` (`FilterConfig`) | `include_ilots_rpg: bool = False` |
 | Endpoint ou parsing de la requête → `FilterConfig` | Transmettre `include_ilots_rpg` comme `include_unites_foncieres` |
-| `filter_orchestrator.py` | Import de `run_ilots_rpg_after_filter` ; `"include_ilots_rpg"` dans `_filter_options_json` ; `asyncio.create_task(run_ilots_rpg_after_filter(...))` après le bloc UF PM |
+| `filter_orchestrator.py` | Import de `run_ilots_rpg_after_filter` ; `"include_ilots_rpg"` dans `_filter_options_json` ; `_run_post_filter_phases` enchaîne les UF puis les îlots |
 | Front | Module dédié « Îlots agricoles » (à faire) : types, appel API et lecture de `last_results_ilots_rpg`, couche carte (UF et contour de l'îlot), fiche îlot |
 
 ## 7. Choix d'implémentation (et pourquoi)
@@ -190,7 +190,7 @@ Clé : `(project_id, num_ilot)`. Une ligne par îlot candidat et par projet.
 | **`min_parcelles = 2`** | Un îlot d'une seule parcelle cadastrale est déjà présent dans le pool parcelles |
 | **Membre si au moins 50 % de la parcelle est dans l'îlot** | Évite les parcelles de bordure et garantit qu'une parcelle n'appartient qu'à un seul îlot |
 | **Mêmes seuils que les UF PM** | Comportement homogène pour l'écologue |
-| **Filtre faune sur la 1re espèce seulement** | Aligné sur `build_uf_pool_response`. Toutes les espèces comptent dans le score |
+| **Filtre faune sur la 1re espèce seulement** | Aligné sur le calcul des terrains de personnes morales. Toutes les espèces comptent dans le score |
 | **`min_zone_humide_ha` appliqué en mode ZH** | ⚠️ Différence avec le code PM, qui reçoit ce paramètre sans l'appliquer. À harmoniser |
 | **Les UF îlots ne repassent pas le filtre parcelles** | Comme les UF PM : phase séparée, après le filtre parcelles |
 | **Pré-calcul de la composition îlot → parcelles, filtrage à la volée** | La composition définit l'entité (comme `pm_ilot_membre`). Le reste dépend du projet |
@@ -216,7 +216,7 @@ Ce qui est couvert :
 - construction (seuils, îlot partiellement hors AOI, relance sans doublons) ;
 - enrichissement CESBIO et faune ;
 - filtres faune, CESBIO et ZH ;
-- runner complet avec un `uf_profiling` simulé.
+- runner complet avec un score et un prospect PM simulés.
 
 ## 10. Mettre à jour les données (nouveau millésime ou département)
 

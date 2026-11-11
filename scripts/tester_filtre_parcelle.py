@@ -33,8 +33,8 @@ from api.recherche_de_foncier.filtrage.layers.filter_pipeline import (
     FaunaCriterion,
     FilterConfig,
     FloraCriterion,
-    _build_filter_clauses,
-    _filter_params,
+    build_filter_clauses,
+    filter_params,
     _has_source_geometry,
 )
 from db import get_engine
@@ -174,8 +174,8 @@ def main() -> None:
         else:
             spatial_mode = None
 
-        keys, labels, clauses = _build_filter_clauses(config, spatial_mode=spatial_mode)
-        params = _filter_params(args.project_id, config)
+        keys, labels, clauses = build_filter_clauses(config, spatial_mode=spatial_mode)
+        params = filter_params(args.project_id, config)
         params["wkt"] = wkt
 
         steps = []

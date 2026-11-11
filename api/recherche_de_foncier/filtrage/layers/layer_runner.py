@@ -7,9 +7,8 @@ layer_runner.py
 Registre filter_v2. Chaque module aoi_to_*.py expose :
     run(engine, project_id: str, aoi_id: str, cb=None) -> int
 
-Couches spéciales :
-    - sous_ensembles : aoi_to_sub_uf — PPM → clustering SIREN → k-sous-ensembles
-    - enrich_uf      : flags végétation / faune sur sous_ensembles
+Les unités foncières des personnes morales ne passent plus par ce registre :
+elles sont lancées après le filtre parcelles.
 """
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import run as _run_sub_uf
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_parcelles_v2 import run as _run_parcelles
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_espaces_naturels_sensibles_ens import run as _run_ens
 from api.recherche_de_foncier.filtrage.layers.common.aoi_to_preemption_ens import run as _run_preemption_ens
@@ -30,7 +28,6 @@ from api.recherche_de_foncier.filtrage.layers.compensation_zone_humide.aoi_to_zo
     run as _run_zones_humides_probables,
 )
 from api.recherche_de_foncier.filtrage.layers.compensation_zone_humide.aoi_to_bd_topo_et_cesbio import run as _run_bd_topo
-from api.recherche_de_foncier.filtrage.layers.enrich_uf import run as _run_enrich_uf
 
 
 @dataclass
@@ -71,96 +68,7 @@ def _make(key, table, fn):
     return wrapped
 
 
-def _make_enrich_uf(key: str, table: str, fn):
-    def wrapped(
-        engine,
-        project_id,
-        aoi_id,
-        cb=None,
-        *,
-        species_list=None,
-        miller_thresh=None,
-        cesbio_libelles=None,
-        fauna_criteria=None,
-        fauna_combine="or",
-        fauna_joins=None,
-    ):
-        def inner(e, p, a, c):
-            return fn(
-                e, p, a, c,
-                species_list=species_list,
-                miller_thresh=miller_thresh,
-                cesbio_libelles=cesbio_libelles,
-                fauna_criteria=fauna_criteria,
-                fauna_combine=fauna_combine,
-                fauna_joins=fauna_joins,
-            )
-        return _wrap(key, table, inner, engine, project_id, aoi_id, cb)
-    wrapped.__name__ = f"layer_{key}"
-    return wrapped
-
-
-def _make_sub_uf(key: str, table: str, fn):
-    def wrapped(
-        engine,
-        project_id,
-        aoi_id,
-        cb=None,
-        *,
-        min_area_ha: float | None = None,
-        max_uf_parcelles: int | None = None,
-        max_k: int | None = None,
-    ):
-        from db import get_engine_ppm
-        engine_ppm = get_engine_ppm()
-        t0 = time.perf_counter()
-        try:
-            kwargs: dict = {"engine_ppm": engine_ppm}
-            if min_area_ha is not None:
-                kwargs["min_area_ha"] = min_area_ha
-            if max_uf_parcelles is not None:
-                kwargs["max_uf_parcelles"] = max_uf_parcelles
-            if max_k is not None:
-                kwargs["max_k"] = max_k
-            n = fn(engine, project_id, aoi_id, cb, **kwargs) or 0
-            return LayerResult(
-                layer_key=key, table=table,
-                n_inserted=n, duration_s=time.perf_counter() - t0,
-                skipped=(n == 0),
-            )
-        except Exception as e:
-            logger.exception("Erreur couche %s", key)
-            return LayerResult(
-                layer_key=key, table=table,
-                duration_s=time.perf_counter() - t0, error=str(e),
-            )
-    wrapped.__name__ = f"layer_{key}"
-    return wrapped
-
-
 LAYER_REGISTRY: list[dict] = [
-    {
-        "key": "sous_ensembles",
-        "label": "Unités foncières (PPM → sous-ensembles)",
-        "table": "ecocompensation_results.sous_ensembles",
-        "fast": False,
-        "fn": _make_sub_uf(
-            "sous_ensembles",
-            "ecocompensation_results.sous_ensembles",
-            _run_sub_uf,
-        ),
-    },
-    {
-        "key": "enrich_uf",
-        "label": "Flags UF (végétation + faune)",
-        "table": "ecocompensation_results.sous_ensembles",
-        "fast": False,
-        "fn": _make_enrich_uf(
-            "enrich_uf",
-            "ecocompensation_results.sous_ensembles",
-            _run_enrich_uf,
-        ),
-    },
     {
         "key": "parcelles",
         "label": "Parcelles cadastrales",

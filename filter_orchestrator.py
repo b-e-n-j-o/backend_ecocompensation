@@ -24,9 +24,8 @@ from sqlalchemy import text
 from api.recherche_de_foncier.filtrage.layers.compensation_zone_humide.aoi_to_bd_topo_et_cesbio import run as _run_bd_topo_et_cesbio
 from api.recherche_de_foncier.filtrage.layers.filter_pipeline import FilterConfig, FilterPipelineResult, run as run_filter_pipeline
 from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
-from orchestrator import UF_PHASE_KEYS, run_orchestration
-from api.recherche_de_foncier.filtrage.layers.uf_profiling import build_uf_pool_with_profiling
 from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots.runner import run_ilots_rpg_after_filter
+from api.recherche_de_foncier.filtrage.layers.unites_foncieres.runner import run_uf_after_filter
 from api.recherche_de_foncier.enrichir.pool import pool_service
 from api.recherche_de_foncier.enrichir.pool.pool_service import persist_parcelles_pool_run
 from api.recherche_de_foncier.enrichir.pool.profiler_registry import profiling_summary_label
@@ -45,8 +44,7 @@ FILTER_PHASES = [
 ]
 
 UF_FILTER_PHASES = [
-    {"key": "sous_ensembles", "label": "Unités foncières (PPM → sous-ensembles)"},
-    {"key": "enrich_uf", "label": "Enrichissement UF (végétation / faune)"},
+    {"key": "unites_foncieres", "label": "Unités foncières (personnes morales)"},
 ]
 
 FULL_PIPELINE_PHASES = FILTER_PHASES + UF_FILTER_PHASES
@@ -496,135 +494,15 @@ def _persist_pipeline_results(
     return run_id
 
 
-def _get_aoi_centre(engine, aoi_id: str) -> tuple[float, float]:
-    with engine.begin() as conn:
-        row = conn.execute(
-            text("""
-                SELECT ST_X(ST_Centroid(geom_2154)) AS cx,
-                       ST_Y(ST_Centroid(geom_2154)) AS cy
-                FROM ecocompensation.aoi WHERE id = CAST(:aid AS uuid)
-            """),
-            {"aid": aoi_id},
-        ).mappings().one_or_none()
-    if not row:
-        raise RuntimeError(f"AOI introuvable: {aoi_id}")
-    return float(row["cx"]), float(row["cy"])
-
-
-async def _run_uf_after_filter(
-    engine,
-    project_id: str,
-    aoi_id: str,
-    config: FilterConfig,
-    push: ProgressPush,
-) -> None:
-    """Phase UF en arrière-plan : PPM → sous-ensembles → enrich_uf → last_results_uf."""
-    fauna_species = [fc.species for fc in config.fauna_criteria if fc.species.strip()]
-    logger.info("[filter_orchestrator] UF phase START project_id=%s", project_id)
-
-    async def uf_push(data: dict) -> None:
-        if data.get("event") == "start":
-            data = {
-                **data,
-                "event": "uf_start",
-                "message": "Démarrage calcul unités foncières",
-            }
-        elif data.get("event") == "complete":
-            data = {**data, "event": "uf_complete"}
-        ev = data.get("event", "")
-        lk = data.get("layer_key", "")
-        msg = data.get("message", "")
-        if ev in ("running", "done", "error", "skipped", "progress", "uf_start") or ev.startswith("phase:"):
-            logger.info(
-                "[filter_orchestrator] UF project_id=%s event=%s layer=%s %s",
-                project_id,
-                ev,
-                lk,
-                (msg[:240] if msg else ""),
-            )
-        await push(data)
-
-    try:
-        await uf_push({
-            "event": "progress",
-            "layer_key": "sous_ensembles",
-            "message": "PHASE:uf:start",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        await run_orchestration(
-            engine,
-            project_id,
-            aoi_id,
-            uf_push,
-            layer_keys=list(UF_PHASE_KEYS),
-            fauna_species=fauna_species or None,
-            uf_min_area_ha=config.min_area_ha,
-            uf_miller_thresh=config.miller_thresh,
-            uf_cesbio_libelles=(
-                [] if config.search_mode == "within_foncier" else list(config.cesbio_libelles)
-            ),
-            uf_fauna_criteria=[
-                {"species": fc.species, "dist_m": fc.dist_m}
-                for fc in config.fauna_criteria
-                if fc.species.strip()
-            ],
-            uf_fauna_combine=config.fauna_combine,
-            uf_fauna_joins=config.fauna_joins,
+async def _run_post_filter_phases(engine, project_id, aoi_id, config, push) -> None:
+    """Après le pool parcelles : UF puis îlots RPG, séquentiellement, en arrière-plan."""
+    if config.include_unites_foncieres:
+        from db import get_engine_ppm
+        await run_uf_after_filter(
+            engine, project_id, aoi_id, config, push, engine_ppm=get_engine_ppm(),
         )
-        cx, cy = _get_aoi_centre(engine, aoi_id)
-        fauna_criteria = [
-            {"species": fc.species, "dist_m": fc.dist_m}
-            for fc in config.fauna_criteria
-            if fc.species.strip()
-        ]
-        uf_result = build_uf_pool_with_profiling(
-            engine,
-            project_id,
-            cx,
-            cy,
-            cesbio_libelles=config.cesbio_libelles,
-            fauna_species=fauna_species[0] if fauna_species else None,
-            fauna_dist_m=config.fauna_criteria[0].dist_m if config.fauna_criteria else 1000.0,
-            fauna_criteria=fauna_criteria or None,
-            miller_thresh=config.miller_thresh if config.miller_thresh is not None else 0.0,
-            study_type=(
-                "zones_humides_intra"
-                if config.search_mode == "within_foncier"
-                else "faune_buffer"
-            ),
-            min_zone_humide_ha=config.min_zone_humide_ha,
-        )
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    UPDATE ecocompensation.projects
-                    SET last_results_uf = CAST(:r AS jsonb),
-                        updated_at = now()
-                    WHERE id = CAST(:pid AS uuid)
-                """),
-                {
-                    "r": json.dumps(uf_result, ensure_ascii=False),
-                    "pid": project_id,
-                },
-            )
-        await uf_push({
-            "event": "phase:uf_ready",
-            "message": "Unités foncières disponibles",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        logger.info(
-            "[filter_orchestrator] UF phase DONE project_id=%s total_uf=%s",
-            project_id,
-            uf_result.get("total_uf"),
-        )
-    except Exception:
-        logger.exception("[filter_orchestrator] UF phase FAILED project_id=%s", project_id)
-        await uf_push({
-            "event": "error",
-            "layer_key": "sous_ensembles",
-            "message": "Erreur calcul unités foncières (voir logs serveur)",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+    if getattr(config, "include_ilots_rpg", False):
+        await run_ilots_rpg_after_filter(engine, project_id, aoi_id, config, push)
 
 
 def _run_pool_profiling(engine, project_id: str, run_id: str) -> None:
@@ -880,14 +758,6 @@ async def run_filter_orchestration(
             project_id,
             total_s,
         )
-        # UF personnes morales en arrière-plan (peut durer plusieurs minutes)
-        if config.include_unites_foncieres:
-            asyncio.create_task(
-                _run_uf_after_filter(engine, project_id, aoi_id, config, push)
-            )
-        if getattr(config, "include_ilots_rpg", False):
-            asyncio.create_task(
-                run_ilots_rpg_after_filter(engine, project_id, aoi_id, config, push)
-            )
+        asyncio.create_task(_run_post_filter_phases(engine, project_id, aoi_id, config, push))
 
     return result

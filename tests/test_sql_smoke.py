@@ -36,7 +36,6 @@ XFAIL: dict[str, str] = {}
 
 SCAN_FILES = [
     "api/recherche_de_foncier/filtrage/layers/filter_pipeline.py",
-    "api/recherche_de_foncier/filtrage/layers/enrich_uf.py",
     "api/recherche_de_foncier/filtrage/layers/flora_filter.py",
     "api/recherche_de_foncier/filtrage/layers/rpg/rpg_ilots/enrich.py",
     "api/recherche_de_foncier/filtrage/layers/rpg/rpg_ilots/build.py",
@@ -138,8 +137,8 @@ def _filter_cases() -> list[SmokeCase]:
         FaunaCriterion,
         FilterConfig,
         FloraCriterion,
-        _build_filter_clauses,
-        _filter_params,
+        build_filter_clauses,
+        filter_params,
     )
 
     specs: list[tuple[str, FilterConfig, str | None]] = []
@@ -229,11 +228,11 @@ def _filter_cases() -> list[SmokeCase]:
 
     cases = []
     for name, cfg, spatial in specs:
-        _keys, _labels, clauses = _build_filter_clauses(cfg, spatial_mode=spatial)
+        _keys, _labels, clauses = build_filter_clauses(cfg, spatial_mode=spatial)
         where = " AND ".join(f"({clause})" for clause in clauses)
         sql = f"SELECT COUNT(*) FROM ecocompensation_results.parcelles p WHERE {where}"
-        params = _filter_params(str(PID), cfg)
-        cases.append(SmokeCase(name, sql, params, "filter_pipeline.py:_build_filter_clauses"))
+        params = filter_params(str(PID), cfg)
+        cases.append(SmokeCase(name, sql, params, "filter_pipeline.py:build_filter_clauses"))
         if any(_is_array_param(key) for key in params):
             empty = dict(params)
             for key in empty:

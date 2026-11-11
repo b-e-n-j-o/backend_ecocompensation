@@ -28,7 +28,7 @@ Ces tables ne filtrent pas le thème. Elles définissent où l’on cherche.
 | Couche | Table source | Table écrite pour le projet | Rôle |
 |---|---|---|---|
 | Parcelles cadastrales candidates | `ecocompensation.parcelles` | `ecocompensation_results.parcelles` | Tuilage dans l’AOI, puis filtre surface minimale |
-| Unités foncières | `public.parcelles_personnes_morales` (base PPM), repli `ecocompensation.parcelles_personnes_morales` | `ecocompensation_results.sous_ensembles`, `ecocompensation_results.unites_foncieres` | Regroupement propriétaire après le filtre |
+| Unités foncières | `public.parcelles_personnes_morales` (base PPM) | `ecocompensation_results.uf_terrains` | Terrains de personnes morales, après le filtre parcelles |
 
 Emprise du cadastre et du fichier personnes morales : à vérifier.
 

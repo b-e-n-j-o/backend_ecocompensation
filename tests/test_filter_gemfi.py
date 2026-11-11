@@ -147,7 +147,7 @@ def _print_enrichment(engine, project_id: str, idus: list[str]) -> None:
 
 def run_unites_foncieres(engine, project_id: str, aoi_id: str, config: FilterConfig) -> None:
     """Même phase que l'orchestrateur après le filtre parcelles."""
-    from filter_orchestrator import _run_uf_after_filter
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.runner import run_uf_after_filter
 
     banner("Unités foncières")
     t_uf = time.perf_counter()
@@ -160,21 +160,21 @@ def run_unites_foncieres(engine, project_id: str, aoi_id: str, config: FilterCon
         if msg:
             print(f"  {msg}")
 
-    asyncio.run(_run_uf_after_filter(engine, project_id, aoi_id, config, _push))
+    asyncio.run(run_uf_after_filter(engine, project_id, aoi_id, config, _push))
     if errors:
         raise SystemExit(" ; ".join(errors))
 
     with engine.begin() as conn:
-        n_uf = conn.execute(
+        n_terrains = conn.execute(
             text("""
-                SELECT COUNT(*) FROM ecocompensation_results.unites_foncieres
+                SELECT COUNT(*) FROM ecocompensation_results.uf_terrains
                 WHERE project_id = CAST(:pid AS uuid)
             """),
             {"pid": project_id},
         ).scalar_one()
-        n_ss = conn.execute(
+        n_parcelles = conn.execute(
             text("""
-                SELECT COUNT(*) FROM ecocompensation_results.sous_ensembles
+                SELECT COUNT(*) FROM ecocompensation_results.uf_parcelles
                 WHERE project_id = CAST(:pid AS uuid)
             """),
             {"pid": project_id},
@@ -182,17 +182,15 @@ def run_unites_foncieres(engine, project_id: str, aoi_id: str, config: FilterCon
         stored = conn.execute(
             text("""
                 SELECT last_results_uf->>'total_uf' AS total_uf,
-                       last_results_uf->>'total_sous_ensembles' AS total_ss,
                        jsonb_array_length(COALESCE(last_results_uf->'unites_foncieres', '[]'::jsonb)) AS n_pool
                 FROM ecocompensation.projects
                 WHERE id = CAST(:pid AS uuid)
             """),
             {"pid": project_id},
         ).mappings().one()
-    print(f"  unités foncières en base : {n_uf}")
-    print(f"  sous-ensembles en base   : {n_ss}")
+    print(f"  terrains en base         : {n_terrains}")
+    print(f"  parcelles UF en base     : {n_parcelles}")
     print(f"  pool UF (total_uf)       : {stored['total_uf']}")
-    print(f"  sous-ensembles du pool   : {stored['total_ss']}")
     print(f"  unités dans la réponse   : {stored['n_pool']}")
     print(f"  durée UF                 : {time.perf_counter() - t_uf:.1f}s")
 
@@ -200,7 +198,7 @@ def run_unites_foncieres(engine, project_id: str, aoi_id: str, config: FilterCon
 def cleanup(engine, project_id: str, aoi_id: str) -> None:
     banner("Nettoyage")
     with engine.begin() as conn:
-        for tbl in ("parcelles", "sous_ensembles", "unites_foncieres"):
+        for tbl in ("parcelles", "uf_parcelles", "uf_terrains"):
             n = conn.execute(
                 text(f"DELETE FROM ecocompensation_results.{tbl} WHERE project_id = CAST(:pid AS uuid)"),
                 {"pid": project_id},

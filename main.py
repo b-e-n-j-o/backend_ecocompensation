@@ -56,7 +56,7 @@ from sqlalchemy import bindparam, text
 
 # ── Modules métier ────────────────────────────────────────────────────────────
 from orchestrator import run_orchestration, fetch_project_two_phases
-from filter_orchestrator import FULL_PIPELINE_PHASES, _run_uf_after_filter, run_filter_orchestration
+from filter_orchestrator import FULL_PIPELINE_PHASES, run_filter_orchestration
 from api.recherche_de_foncier.filtrage.layers.filter_pipeline import (
     FaunaCriterion,
     FilterConfig,
@@ -65,12 +65,9 @@ from api.recherche_de_foncier.filtrage.layers.filter_pipeline import (
 )
 from api.recherche_de_foncier.filtrage.layers.national_exclusions import DEFAULT_EXCLUDED_LAYERS
 from api.recherche_de_foncier.filtrage.layers.layer_runner import LAYER_REGISTRY
-from db import get_engine
+from db import get_engine, get_engine_ppm
 from api.project_kind import KIND_RECHERCHE, normalize_project_kind, project_kind_filter_values
-from api.recherche_de_foncier.filtrage.layers import enrich_uf
-from api.recherche_de_foncier.filtrage.layers.enrich_uf import ensure_columns as ensure_uf_columns
-from api.recherche_de_foncier.filtrage.layers.uf_profiling import build_uf_pool_with_profiling
-from api.recherche_de_foncier.filtrage.layers.uf_parcelles import build_uf_parcelles_geojson
+from api.recherche_de_foncier.filtrage.layers.unites_foncieres.tables import ensure_tables as ensure_uf_tables
 from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots import api as ilots_rpg_api
 from api.recherche_de_foncier.routers.foncier_router import router as foncier_router
 from api.recherche_de_foncier.routers.pool_router import all_runs_router as pool_all_runs_router
@@ -171,7 +168,7 @@ ws_manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     eng = get_engine()
     ensure_columns(eng)
-    ensure_uf_columns(eng)
+    ensure_uf_tables(eng)
     yield
 
 
@@ -419,21 +416,6 @@ def _get_project(project_id: str) -> dict:
     if not row:
         raise HTTPException(404, f"Projet {project_id} introuvable")
     return _project_row_out(row)
-
-
-def _get_aoi_centre(aoi_id: str) -> tuple[float, float]:
-    with engine.begin() as conn:
-        row = conn.execute(
-            text("""
-                SELECT ST_X(ST_Centroid(geom_2154)) AS cx,
-                       ST_Y(ST_Centroid(geom_2154)) AS cy
-                FROM ecocompensation.aoi WHERE id = :aid
-            """),
-            {"aid": aoi_id},
-        ).mappings().one_or_none()
-    if not row:
-        raise HTTPException(404, "AOI introuvable")
-    return row["cx"], row["cy"]
 
 
 # ─────────────────────────────────────────────
@@ -997,8 +979,10 @@ def delete_project(project_id: str):
         "ecocompensation_results.faune_pct",
         "ecocompensation_results.faune_lin",
         "ecocompensation_results.faune_surf",
-        "ecocompensation_results.unites_foncieres",   # ← nouveau
-        "ecocompensation_results.sous_ensembles",     # ← nouveau
+        "ecocompensation_results.unites_foncieres",
+        "ecocompensation_results.sous_ensembles",
+        "ecocompensation_results.uf_parcelles",
+        "ecocompensation_results.uf_terrains",
         "ecocompensation_results.parcelles_pool_indesirables",
         "ecocompensation_results.parcelles_project_indesirables",
         "ecocompensation_results.parcelles_pool_metrics",
@@ -1121,30 +1105,6 @@ async def start_filter_pipeline(
     return {"status": "started", "project_id": project_id}
 
 
-@app.get("/api/projects/{project_id}/uf-combinations-audit")
-def uf_combinations_audit(project_id: str, max_k: int = Query(5, ge=2, le=15)):
-    """Compte les combinaisons d'UF pour un k max, sans remplacer les résultats."""
-    proj = _get_project(project_id)
-    from api.recherche_de_foncier.filtrage.layers.common.aoi_to_sub_uf import audit_combinations
-    from db import get_engine_ppm
-
-    raw = proj.get("last_filter") or proj.get("filter_config") or {}
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            raw = {}
-    min_area = float(raw.get("min_area_ha") or 7) if isinstance(raw, dict) else 7.0
-    return audit_combinations(
-        engine,
-        project_id,
-        str(proj["aoi_id"]),
-        engine_ppm=get_engine_ppm(),
-        min_area_ha=min_area,
-        max_k=max_k,
-    )
-
-
 @app.post("/api/projects/{project_id}/filter-uf")
 async def start_uf_only(project_id: str):
     """Relance uniquement les unités foncières avec les paramètres du dernier filtre."""
@@ -1220,12 +1180,14 @@ async def start_uf_only(project_id: str):
 
     async def _run():
         try:
-            await _run_uf_after_filter(
+            from api.recherche_de_foncier.filtrage.layers.unites_foncieres.runner import run_uf_after_filter
+            await run_uf_after_filter(
                 engine,
                 project_id,
                 aoi_id,
                 config,
                 lambda d: ws_manager.broadcast(project_id, d),
+                engine_ppm=get_engine_ppm(),
             )
         finally:
             _running_filters.discard(project_id)
@@ -1258,8 +1220,6 @@ async def start_fetch(
                     aoi_id,
                     lambda d: ws_manager.broadcast(project_id, d),
                     dry_run=req.dry_run,
-                    uf_max_parcelles=req.uf_max_parcelles,
-                    uf_min_area_ha=req.uf_min_area_ha,
                     fauna_species=req.fauna_species,
                 )
             else:
@@ -1270,8 +1230,6 @@ async def start_fetch(
                     lambda d: ws_manager.broadcast(project_id, d),
                     layer_keys=req.layers,
                     dry_run=req.dry_run,
-                    uf_max_parcelles=req.uf_max_parcelles,
-                    uf_min_area_ha=req.uf_min_area_ha,
                     fauna_species=req.fauna_species,
                 )
         finally:
@@ -1293,8 +1251,8 @@ async def start_fetch(
 @app.get("/api/projects/{project_id}/sous-ensembles-status")
 def sous_ensembles_status(project_id: str):
     """
-    Indique si `ecocompensation_results.sous_ensembles` contient au moins une ligne
-    pour ce projet. Sans cela, le filtre UF ne peut pas s'exécuter (parcelles seules uniquement).
+    True s'il existe au moins un terrain retenu (ou manuel) pour ce projet.
+    Le nom de la route et le champ `has_sous_ensembles` restent ceux du front.
     """
     _get_project(project_id)
     with engine.begin() as conn:
@@ -1303,9 +1261,9 @@ def sous_ensembles_status(project_id: str):
                 """
                 SELECT EXISTS (
                     SELECT 1
-                    FROM ecocompensation_results.sous_ensembles
-                    WHERE project_id = :pid
-                    LIMIT 1
+                    FROM ecocompensation_results.uf_terrains
+                    WHERE project_id = CAST(:pid AS uuid)
+                      AND (verdict OR source = 'manuel')
                 )
                 """
             ),
@@ -1327,75 +1285,23 @@ def get_uf_pool(
     min_zone_humide_ha: float | None = Query(default=None, ge=0),
 ):
     """
-    Pool UF pré-filtré depuis les colonnes enrichies (sans spatial join).
-    Format compatible UnitesFoncieresTable.tsx.
+    Dernier JSON d'unités foncières enregistré par le calcul (last_results_uf).
+    Les paramètres de requête restent acceptés pour le front actuel.
     """
     proj = _get_project(project_id)
-    aoi_id = str(proj["aoi_id"])
-    cx, cy = _get_aoi_centre(aoi_id)
-
-    species = fauna_species.strip() if fauna_species else ""
-    if not species and proj.get("last_filter"):
-        try:
-            lf = proj["last_filter"]
-            if isinstance(lf, str):
-                lf = json.loads(lf)
-            fauna_list = lf.get("fauna_criteria") or []
-            if fauna_list and isinstance(fauna_list[0], dict):
-                species = str(fauna_list[0].get("tax_nom_val") or fauna_list[0].get("species") or "")
-        except Exception:
-            pass
-
-    libelles = [x.strip() for x in cesbio_libelles if x and str(x).strip()]
-    if not libelles:
-        libelles = ["Forêts de conifères", "Forêts de feuillus"]
-
-    fauna_criteria: list[dict] = []
-    if proj.get("last_filter"):
-        try:
-            lf = proj["last_filter"]
-            if isinstance(lf, str):
-                lf = json.loads(lf)
-            for fc in lf.get("fauna_criteria") or []:
-                if isinstance(fc, dict):
-                    fauna_criteria.append(fc)
-        except Exception:
-            pass
-
-    resolved_study_type = (study_type or "").strip() or "faune_buffer"
-    resolved_min_zh = min_zone_humide_ha
-    if resolved_min_zh is None and proj.get("last_filter"):
-        try:
-            lf = proj["last_filter"]
-            if isinstance(lf, str):
-                lf = json.loads(lf)
-            raw_min = lf.get("min_zone_humide_ha")
-            if raw_min is not None:
-                resolved_min_zh = float(raw_min)
-        except Exception:
-            pass
-    if resolved_min_zh is None:
-        resolved_min_zh = 0.0
-
-    return build_uf_pool_with_profiling(
-        engine,
-        project_id,
-        cx,
-        cy,
-        cesbio_libelles=libelles,
-        fauna_species=species or None,
-        fauna_dist_m=fauna_dist_m,
-        fauna_criteria=fauna_criteria or None,
-        miller_thresh=miller_thresh,
-        study_type=resolved_study_type,
-        min_zone_humide_ha=resolved_min_zh,
-    )
+    del cesbio_libelles, fauna_species, fauna_dist_m, miller_thresh, study_type, min_zone_humide_ha
+    raw = proj.get("last_results_uf")
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, dict):
+        return {"version": 2, "total_uf": 0, "unites_foncieres": [], "diagnostic": {}}
+    return raw
 
 
 @app.post("/api/projects/{project_id}/uf-manuelle")
 def post_uf_manuelle(project_id: str, body: dict = Body(...)):
     """Regroupe des parcelles contiguës du cadastre en une unité foncière du pool UF."""
-    from api.recherche_de_foncier.enrichir.pool.ajout_uf import AjoutUfError, add_manual_uf
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.manuel import AjoutUfError, add_manual_uf
 
     _get_project(project_id)
     idus = body.get("idus") if isinstance(body, dict) else None
@@ -1409,7 +1315,7 @@ def post_uf_manuelle(project_id: str, body: dict = Body(...)):
 
 @app.delete("/api/projects/{project_id}/uf/{uf_id}")
 def delete_unite_fonciere(project_id: str, uf_id: str):
-    from api.recherche_de_foncier.enrichir.pool.ajout_uf import AjoutUfError, delete_uf
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.manuel import AjoutUfError, delete_uf
 
     _get_project(project_id)
     try:
@@ -1440,9 +1346,7 @@ def get_results(project_id: str):
         "last_filter":     proj.get("last_filter"),
         "last_results":    proj.get("last_results"),
         "last_filter_uf":  proj.get("last_filter_uf"),
-        "last_results_uf": enrich_uf.attach_stored_veg_profiles(
-            engine, project_id, proj.get("last_results_uf"),
-        ),
+        "last_results_uf": proj.get("last_results_uf"),
         "last_results_ilots_rpg": ilots_rpg_api.get_results(engine, project_id),
         "layers_status":   proj.get("layers_status", {}),
         "buffer_km":       buffer_km,
@@ -1561,112 +1465,56 @@ def get_parcelles_geojson(
     return {"type": "FeatureCollection", "features": features}
 
 
-@app.get("/api/projects/{project_id}/geojson/uf-subsets")
-def get_uf_subsets_geojson(project_id: str):
-    """
-    GeoJSON des sous-ensembles UF (table sous_ensembles) pour le dernier filtre UF du projet.
-    Les propriétés contiennent au minimum `subset_id` (le scoring est fait côté frontend).
-    """
-    proj = _get_project(project_id)
-    if not proj.get("last_results_uf"):
-        raise HTTPException(400, "Aucun résultat UF")
-
-    results_uf = proj["last_results_uf"]
-    if isinstance(results_uf, str):
-        results_uf = json.loads(results_uf)
-
-    unites = results_uf.get("unites_foncieres", [])
-    meta_by_subset: dict[str, dict] = {}
-    subset_ids: list[str] = []
-    for uf in unites:
-        for ss in uf.get("sous_ensembles", []) or []:
-            sid = ss.get("subset_id")
-            if not sid:
-                continue
-            sid = str(sid)
-            subset_ids.append(sid)
-            score_eco = ss.get("score_eco") if isinstance(ss.get("score_eco"), dict) else {}
-            meta_by_subset[sid] = {
-                "uf_id": uf.get("uf_id"),
-                "uf_rang": uf.get("rang"),
-                "k": ss.get("k"),
-                "surface_ha": ss.get("surface_ha"),
-                "miller": ss.get("miller"),
-                "distance_centre_km": ss.get("distance_centre_km"),
-                "score_eco": score_eco.get("total_score") if score_eco else None,
-                "score_eco_max": score_eco.get("max_score") if score_eco else 6,
-                "veg_libelles": ss.get("veg_libelles") or [],
-                "fauna_distances": ss.get("fauna_distances") or {},
-            }
-
-    if not subset_ids:
-        raise HTTPException(400, "Aucun sous-ensemble UF dans les résultats")
-
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT
-                    s.subset_id,
-                    s.uf_id,
-                    s.k,
-                    s.siren,
-                    s.denomination,
-                    ROUND(s.surface_ha::numeric, 2) AS surface_ha,
-                    ROUND(s.miller::numeric, 3) AS miller,
-                    ST_AsGeoJSON(ST_Transform(s.geom_2154, 4326))::json AS geometry
-                FROM ecocompensation_results.sous_ensembles s
-                WHERE s.project_id = CAST(:pid AS uuid)
-                  AND s.subset_id = ANY(CAST(:subset_ids AS text[]))
-            """),
-            {"pid": project_id, "subset_ids": subset_ids},
-        ).mappings().all()
-
-    features = []
-    for r in rows:
-        sid = str(r["subset_id"])
-        extra = meta_by_subset.get(sid, {})
-        score = extra.get("score_eco")
-        score_max = extra.get("score_eco_max") or 6
-        score_ratio = round(float(score) / float(score_max), 4) if score is not None and score_max else None
-        features.append({
-            "type": "Feature",
-            "geometry": dict(r["geometry"]) if r["geometry"] else None,
-            "properties": {
-                "subset_id": sid,
-                "uf_id": r.get("uf_id") or extra.get("uf_id"),
-                "uf_rang": extra.get("uf_rang"),
-                "k": r.get("k") if r.get("k") is not None else extra.get("k"),
-                "siren": r.get("siren"),
-                "denomination": r.get("denomination"),
-                "surface_ha": float(r["surface_ha"]) if r.get("surface_ha") is not None else extra.get("surface_ha"),
-                "miller": float(r["miller"]) if r.get("miller") is not None else extra.get("miller"),
-                "distance_centre_km": extra.get("distance_centre_km"),
-                "score_eco": score,
-                "score_eco_max": score_max,
-                "score_ratio": score_ratio,
-                "veg_libelles": extra.get("veg_libelles") or [],
-                "fauna_distances": extra.get("fauna_distances") or {},
-            },
-        })
-
-    features = [f for f in features if f.get("geometry")]
-
-    if not features:
-        raise HTTPException(400, "Géométries des sous-ensembles introuvables en base")
-
-    return {"type": "FeatureCollection", "features": features}
-
 
 @app.get("/api/projects/{project_id}/geojson/uf-parcelles")
 def get_uf_parcelles_geojson(project_id: str):
-    """Parcelles retenues de chaque UF (présence dans les combinaisons) pour la carte UF."""
+    """Parcelles des unités foncières pour la carte UF."""
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.pool import build_geojson
+
     proj = _get_project(project_id)
     results_uf = proj.get("last_results_uf")
     if not results_uf:
         raise HTTPException(400, "Aucun résultat UF")
     if isinstance(results_uf, str):
         results_uf = json.loads(results_uf)
-    return build_uf_parcelles_geojson(engine, project_id, results_uf)
+    return build_geojson(engine, project_id, results_uf)
+
+
+@app.get("/api/projects/{project_id}/uf/{uf_id}/occupation-sol.geojson")
+def get_uf_occupation_sol_geojson(project_id: str, uf_id: str):
+    """Occupation du sol CESBIO d'une unité foncière."""
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.pool import build_veg_geojson
+
+    _get_project(project_id)
+    return build_veg_geojson(engine, project_id, uf_id)
+
+
+@app.get("/api/projects/{project_id}/parcelles/{idu}/occupation-sol.geojson")
+def get_parcelle_occupation_sol_geojson(project_id: str, idu: str):
+    """Occupation du sol CESBIO découpée sur une parcelle du pool, ou du cadastre national."""
+    from api.recherche_de_foncier.filtrage.layers.cesbio_clip import clip_cesbio_geojson
+
+    _get_project(project_id)
+    geom_sql = """
+        SELECT geom_2154 AS geom
+        FROM ecocompensation_results.parcelles
+        WHERE project_id = CAST(:pid AS uuid) AND idu = :idu AND geom_2154 IS NOT NULL
+        UNION ALL
+        SELECT geom_2154 AS geom
+        FROM ecocompensation.parcelles
+        WHERE idu = :idu AND geom_2154 IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM ecocompensation_results.parcelles
+              WHERE project_id = CAST(:pid AS uuid) AND idu = :idu AND geom_2154 IS NOT NULL
+          )
+        LIMIT 1
+    """
+    params = {"pid": project_id, "idu": idu}
+    with engine.connect() as conn:
+        found = conn.execute(text(f"SELECT geom IS NOT NULL AS ok FROM ({geom_sql}) s"), params).first()
+        if not found:
+            raise HTTPException(404, "Parcelle introuvable")
+        return clip_cesbio_geojson(conn, geom_sql, params)
 
 
 @app.get("/api/projects/{project_id}/ilots-rpg")
