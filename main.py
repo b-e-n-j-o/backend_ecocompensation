@@ -1545,6 +1545,28 @@ def get_ilots_rpg_geojson(project_id: str):
     return ilots_rpg_api.get_geojson(engine, project_id)
 
 
+@app.post("/api/projects/{project_id}/ilots-rpg/recompute-durete", status_code=202)
+def recompute_ilots_rpg_durete(project_id: str, body: dict | None = Body(default=None)):
+    """Dureté foncière des îlots : un LLM par SIREN (cache), score pondéré par la surface."""
+    _get_project(project_id)
+    from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots.durete import start_job
+
+    raw = (body or {}).get("num_ilots") or []
+    num_ilots = [str(x).strip() for x in raw if str(x).strip()] or None
+    job_id = start_job(engine, project_id, num_ilots)
+    return {"status": "accepted", "job_id": job_id, "project_id": project_id}
+
+
+@app.get("/api/projects/{project_id}/ilots-rpg/recompute-durete/jobs/{job_id}")
+def recompute_ilots_rpg_durete_job(project_id: str, job_id: str):
+    from api.recherche_de_foncier.filtrage.layers.rpg.rpg_ilots.durete import get_job
+
+    job = get_job(job_id)
+    if not job or job.get("project_id") != project_id:
+        raise HTTPException(404, "Job dureté îlots introuvable")
+    return job
+
+
 # ─────────────────────────────────────────────
 # WebSocket
 # ─────────────────────────────────────────────

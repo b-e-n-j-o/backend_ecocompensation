@@ -105,6 +105,7 @@ def build_ilots_geodataframes(
             "dist_centre_km": il.get("distance_centre_km"),
             "score_eco": score.get("total_score"),
             "score_eco_max": score.get("max_score"),
+            "durete_fonciere": (il.get("durete_fonciere") or {}).get("score_final"),
         })
         ilot_geoms.append(r["geom_2154"])
     if not ilot_geoms:
