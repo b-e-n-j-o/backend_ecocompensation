@@ -1313,6 +1313,21 @@ def post_uf_manuelle(project_id: str, body: dict = Body(...)):
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.put("/api/projects/{project_id}/uf/{uf_id}/parcelles")
+def put_uf_manuelle_parcelles(project_id: str, uf_id: str, body: dict = Body(...)):
+    """Recompose une UF assemblée à la main et recalcule ses métriques."""
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.manuel import AjoutUfError, replace_manual_uf
+
+    _get_project(project_id)
+    idus = body.get("idus") if isinstance(body, dict) else None
+    if not isinstance(idus, list):
+        raise HTTPException(400, "Fournir la liste idus.")
+    try:
+        return replace_manual_uf(engine, project_id, uf_id, [str(i) for i in idus])
+    except AjoutUfError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.delete("/api/projects/{project_id}/uf/{uf_id}")
 def delete_unite_fonciere(project_id: str, uf_id: str):
     from api.recherche_de_foncier.filtrage.layers.unites_foncieres.manuel import AjoutUfError, delete_uf

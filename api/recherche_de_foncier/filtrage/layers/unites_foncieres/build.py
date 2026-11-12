@@ -217,7 +217,7 @@ def _terrain_row(uf_id: str, source: str, parcelles: list[ParcelleUF], criteres:
     return {
         "uf_id": uf_id, "source": source,
         "siren": head.siren if source == "pm" else "manuel",
-        "denomination": head.denomination if source == "pm" else "Ajout manuel",
+        "denomination": head.denomination if source == "pm" else "Assemblée à la main",
         "forme_juridique": head.forme_juridique if source == "pm" else None,
         "nb_parcelles": len(parcelles), "idus": [p.idu for p in parcelles],
         "surface_ha": round(m.get("surface_ha", sum(p.surface_m2 for p in parcelles) / 1e4), 4),
