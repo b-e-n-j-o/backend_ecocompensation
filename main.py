@@ -1298,6 +1298,28 @@ def get_uf_pool(
     return raw
 
 
+@app.post("/api/projects/{project_id}/uf/recompute-durete", status_code=202)
+def recompute_uf_durete(project_id: str, body: dict | None = Body(default=None)):
+    """Dureté foncière légère des unités foncières : un score par SIREN."""
+    _get_project(project_id)
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.durete_legere import start_job
+
+    raw = (body or {}).get("uf_ids") or []
+    uf_ids = [str(x).strip() for x in raw if str(x).strip()] or None
+    job_id = start_job(engine, project_id, uf_ids)
+    return {"status": "accepted", "job_id": job_id, "project_id": project_id}
+
+
+@app.get("/api/projects/{project_id}/uf/recompute-durete/jobs/{job_id}")
+def recompute_uf_durete_job(project_id: str, job_id: str):
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.durete_legere import get_job
+
+    job = get_job(job_id)
+    if not job or job.get("project_id") != project_id:
+        raise HTTPException(404, "Job dureté unités foncières introuvable")
+    return job
+
+
 @app.post("/api/projects/{project_id}/uf-manuelle")
 def post_uf_manuelle(project_id: str, body: dict = Body(...)):
     """Regroupe des parcelles contiguës du cadastre en une unité foncière du pool UF."""
@@ -1362,7 +1384,9 @@ def get_results(project_id: str):
         "last_results":    proj.get("last_results"),
         "last_filter_uf":  proj.get("last_filter_uf"),
         "last_results_uf": proj.get("last_results_uf"),
-        "last_results_ilots_rpg": ilots_rpg_api.get_results(engine, project_id),
+        "last_results_ilots_rpg": ilots_rpg_api.attach_proprietaires(
+            engine, project_id, ilots_rpg_api.get_results(engine, project_id)
+        ),
         "layers_status":   proj.get("layers_status", {}),
         "buffer_km":       buffer_km,
     }
@@ -1535,7 +1559,7 @@ def get_parcelle_occupation_sol_geojson(project_id: str, idu: str):
 @app.get("/api/projects/{project_id}/ilots-rpg")
 def get_ilots_rpg(project_id: str):
     _get_project(project_id)
-    res = ilots_rpg_api.get_results(engine, project_id)
+    res = ilots_rpg_api.attach_proprietaires(engine, project_id, ilots_rpg_api.get_results(engine, project_id))
     return res or {"source": "rpg_ilots", "millesime": "2025", "total_candidats": 0, "total_ilots": 0, "ilots": []}
 
 

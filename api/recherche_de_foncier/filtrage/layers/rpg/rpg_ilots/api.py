@@ -11,12 +11,54 @@ Toutes portent ``num_ilot`` et ``rang``.
 from __future__ import annotations
 
 import json
+import logging
 
 from sqlalchemy import text
 
 from .params import RES_TABLE, SRC_SCHEMA
 
 GEOJSON_PRECISION = 6
+log = logging.getLogger(__name__)
+
+
+def attach_proprietaires(engine, project_id: str, results: dict | None) -> dict | None:
+    """Ajoute, à la lecture, chaque personne morale de l'îlot (pas seulement la dominante)."""
+    ilots = (results or {}).get("ilots") or []
+    if not ilots:
+        return results
+    from api.recherche_de_foncier.filtrage.layers.unites_foncieres.pool import (
+        _empty_pm,
+        lookup_prospects_by_siren,
+    )
+    from .durete import _load_owner_rows, _shares_by_ilot
+
+    millesime = str((results or {}).get("millesime") or "2025")
+    ids = [str(il["num_ilot"]) for il in ilots if il.get("num_ilot")]
+    try:
+        with engine.connect() as conn:
+            shares = _shares_by_ilot(_load_owner_rows(conn, project_id, ids, millesime))
+            sirens = [s["siren"] for slots in shares.values() for s in slots if s.get("siren")]
+            prospects = lookup_prospects_by_siren(conn, sirens)
+    except Exception:
+        log.exception("ILOTS_RPG | liste des propriétaires indisponible")
+        return results
+    for il in ilots:
+        slots = shares.get(str(il.get("num_ilot")), [])
+        il["proprietaires"] = []
+        for slot in slots:
+            siren = slot.get("siren")
+            base = prospects.get(siren) if siren else None
+            if not base:
+                base = _empty_pm(siren, slot.get("denomination") or None)
+            il["proprietaires"].append({
+                **base,
+                "siren": siren,
+                "denomination": base.get("denomination") or slot.get("denomination") or None,
+                "forme_juridique": base.get("forme_juridique") or slot.get("forme_juridique") or None,
+                "surface_ha": round(float(slot.get("ha") or 0), 2),
+                "surface_pct": slot.get("surface_pct"),
+            })
+    return results
 
 
 def get_results(engine, project_id: str) -> dict | None:

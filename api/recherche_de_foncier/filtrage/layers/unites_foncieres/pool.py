@@ -251,4 +251,32 @@ def build_geojson(engine, project_id: str, results_uf: dict) -> dict:
                 "score_ratio": round((sc.get("total_score") or 0) / (sc.get("max_score") or ECO_MAX), 4),
             },
         })
-    return {"type": "FeatureCollection", "features": features}
+    with engine.connect() as conn:
+        unions = conn.execute(text(f"""
+            SELECT uf_id,
+                   ST_AsGeoJSON(ST_Transform(ST_UnaryUnion(ST_Collect(geom_2154)), 4326), 6) AS geom
+            FROM {P}
+            WHERE project_id = CAST(:pid AS uuid) AND uf_id = ANY(CAST(:ufs AS text[]))
+            GROUP BY uf_id"""),
+            {"pid": project_id, "ufs": list(meta)}).mappings().all()
+    emprises = []
+    for r in unions:
+        if not r["geom"]:
+            continue
+        u = meta[r["uf_id"]]
+        sc = u.get("score_eco") or {}
+        emprises.append({
+            "type": "Feature", "id": r["uf_id"],
+            "geometry": json.loads(r["geom"]),
+            "properties": {
+                "uf_id": r["uf_id"], "uf_rang": u.get("rang"),
+                "denomination": u.get("denomination"),
+                "surface_ha": u.get("surface_ha"),
+                "score_ratio": round((sc.get("total_score") or 0) / (sc.get("max_score") or ECO_MAX), 4),
+            },
+        })
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "emprises": {"type": "FeatureCollection", "features": emprises},
+    }

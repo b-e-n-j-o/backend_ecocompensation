@@ -90,13 +90,14 @@ def analyser_pm(
     forme_juridique_input: str = "",
     domaine_public_confirme: Optional[list[str]] = None,
     max_workers: int = 4,
+    legere: bool = False,
 ) -> dict:
     t0 = datetime.now()
     sources = sources or Sources()
     siren = "".join(str(siren).split())
     log.info(
-        "DURETE V4 START | siren=%s idus_in=%s rpg=%s gpu=%s web=%s narration=%s",
-        siren, len(idus or []), avec_rpg, avec_gpu, avec_recherche_web, avec_narration,
+        "DURETE V4 START | siren=%s idus_in=%s rpg=%s gpu=%s web=%s narration=%s legere=%s",
+        siren, len(idus or []), avec_rpg, avec_gpu, avec_recherche_web, avec_narration, legere,
     )
     if not siren_valide(siren):
         return _erreur(siren, idus or [], f"SIREN invalide : '{siren}' (9 chiffres + clé de Luhn)", t0)
@@ -121,14 +122,19 @@ def analyser_pm(
         idus = list(dict.fromkeys(idus_ok))
     else:
         idus = (patrimoine or {}).get("idus") or []
-    if not idus:
+    if not idus and not legere:
         log.info("DURETE V4 STOP | siren=%s raison=aucun IDU", siren)
         return _erreur(siren, [], "Aucun IDU disponible (ni en entrée ni dans le fichier des PM)", t0)
-    try:
-        rows_idus = prov.par_idus(idus) if prov else []
-        droits = src_parcelles.analyser_droits(rows_idus, siren, idus) if prov else {}
-    except Exception as e:  # noqa: BLE001
-        avert.append(f"Droits par parcelle indisponibles : {e}")
+    if legere:
+        # Dureté foncière légère : identité et score de la personne morale seulement.
+        # Pas de DVF, RPG ni zonage (ce sont des lectures par parcelle).
+        droits = {}
+    else:
+        try:
+            rows_idus = prov.par_idus(idus) if prov else []
+            droits = src_parcelles.analyser_droits(rows_idus, siren, idus) if prov else {}
+        except Exception as e:  # noqa: BLE001
+            avert.append(f"Droits par parcelle indisponibles : {e}")
 
     # 2. Identité + BODACC (+ Sirene optionnel)
     raw = sources.fetch_annuaire(siren)
@@ -149,21 +155,24 @@ def analyser_pm(
         (bod or {}).get("nb_annonces") if isinstance(bod, dict) else None,
     )
 
-    # 3. Parcelles en parallèle (DVF + RPG + GPU)
-    millesime = (patrimoine or {}).get("millesime")
-    millesime_date = f"{millesime[:4]}-01-01" if millesime and millesime[:4].isdigit() else None
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        analyses = list(ex.map(lambda i: _analyser_parcelle(i, sources, profil.get("date_creation"),
-                                                             millesime_date, avec_rpg, avec_gpu), idus))
-    surfaces = (patrimoine or {}).get("surfaces") or {}
-    for a in analyses:
-        a["droits"] = droits.get(a["idu"])
-        a["surface_m2"] = surfaces.get(a["idu"]) or (a["droits"] or {}).get("surface_m2") or a.get("surface_m2_cadastre")
-        avert += [f"[{a['idu']}] {e}" for e in a.pop("erreurs")]
+    # 3. Parcelles en parallèle (DVF + RPG + GPU). Sauté en dureté légère.
+    analyses: list[dict] = []
+    if not legere:
+        millesime = (patrimoine or {}).get("millesime")
+        millesime_date = f"{millesime[:4]}-01-01" if millesime and millesime[:4].isdigit() else None
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            analyses = list(ex.map(lambda i: _analyser_parcelle(i, sources, profil.get("date_creation"),
+                                                                 millesime_date, avec_rpg, avec_gpu), idus))
+        surfaces = (patrimoine or {}).get("surfaces") or {}
+        for a in analyses:
+            a["droits"] = droits.get(a["idu"])
+            a["surface_m2"] = surfaces.get(a["idu"]) or (a["droits"] or {}).get("surface_m2") or a.get("surface_m2_cadastre")
+            avert += [f"[{a['idu']}] {e}" for e in a.pop("erreurs")]
 
     # 4. Score déterministe
     sc = calculer_score(profil, bod, analyses, patrimoine,
-                        {"avec_rpg": avec_rpg, "avec_gpu": avec_gpu,
+                        {"avec_rpg": False if legere else avec_rpg,
+                         "avec_gpu": False if legere else avec_gpu,
                          "domaine_public_confirme": domaine_public_confirme or []})
 
     log.info(
@@ -174,8 +183,8 @@ def analyser_pm(
     # 5. Recherche web + synthèse (LLM optionnel, jamais dans le score)
     client = llm if llm is not None else (get_llm(llm_provider, model)
                                          if (avec_recherche_web or avec_narration) else None)
-    web = rechercher(client, profil, sorted({parse_idu(i).insee for i in idus}),
-                     inclure_dirigeants_web) if avec_recherche_web else None
+    communes = sorted({parse_idu(i).insee for i in (idus or [])})
+    web = rechercher(client, profil, communes, inclure_dirigeants_web) if avec_recherche_web else None
     if avec_recherche_web:
         constats = (web or {}).get("constats") or []
         log.info(
@@ -188,7 +197,9 @@ def analyser_pm(
                 siren, c.get("effet_durete"), c.get("categorie"), c.get("date"), c.get("constat"),
             )
     synth = rediger(client if avec_narration else None, profil, sc, web)
-    out = _assembler(siren, idus, profil, bod, sir, patrimoine, sc, web, synth, avert, t0)
+    out = _assembler(siren, idus or [], profil, bod, sir, patrimoine, sc, web, synth, avert, t0)
+    if legere:
+        out["mode"] = "durete_fonciere_legere"
     log.info(
         "DURETE V4 DONE | siren=%s statut=%s score=%s duree_s=%s avertissements=%d",
         siren, out.get("statut"), out.get("score_final"), out.get("duree_s"), len(out.get("avertissements") or []),

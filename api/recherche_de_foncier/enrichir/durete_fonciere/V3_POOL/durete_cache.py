@@ -16,7 +16,7 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def get_cached_siren(conn, siren: str) -> dict | None:
+def get_cached_siren(conn, siren: str, cache_version: str | None = None) -> dict | None:
     """Retourne le résultat caché pour ce SIREN, ou None si absent/expiré."""
     row = conn.execute(
         text(
@@ -31,13 +31,13 @@ def get_cached_siren(conn, siren: str) -> dict | None:
               AND expires_at > :now
             """
         ),
-        {"siren": siren, "version": CACHE_VERSION, "now": _now_utc()},
+        {"siren": siren, "version": cache_version or CACHE_VERSION, "now": _now_utc()},
     ).mappings().one_or_none()
 
     if row is None:
         return None
 
-    logger.debug("DURETE CACHE HIT | siren=%s version=%s", siren, CACHE_VERSION)
+    logger.debug("DURETE CACHE HIT | siren=%s version=%s", siren, cache_version or CACHE_VERSION)
     return {
         "score_final": row["score_llm_base"],   # renommé pour compatibilité avec run_durete_for_siren
         "score_llm_base": row["score_llm_base"],
@@ -58,6 +58,7 @@ def set_cached_siren(
     res: dict,
     denomination: str = "",
     forme_juridique: str = "",
+    cache_version: str | None = None,
 ) -> None:
     """Persiste le résultat LLM pour ce SIREN. Écrase si déjà présent (upsert)."""
     expires_at = _now_utc() + timedelta(days=CACHE_TTL_DAYS)
@@ -95,7 +96,7 @@ def set_cached_siren(
         ),
         {
             "siren": siren,
-            "version": CACHE_VERSION,
+            "version": cache_version or CACHE_VERSION,
             "score_llm_base": res.get("score_final"),
             "niveau_durete": res.get("niveau_durete"),
             "explication": res.get("explication"),

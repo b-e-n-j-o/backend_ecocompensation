@@ -34,6 +34,9 @@ from .params import RES_TABLE, SRC_SCHEMA
 
 logger = logging.getLogger(__name__)
 
+# Cache distinct du score parcelle (v4) : ce score n'inclut pas RPG, zonage ni DVF.
+_CACHE_VERSION_LEGERE = "v4-legere"
+
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 _JOBS_MAX = 40
@@ -145,9 +148,11 @@ def _shares_by_ilot(rows: list[dict]) -> dict[str, list[dict]]:
                     "est_public": bool(g.get("est_public")),
                     "ha": 0.0,
                     "idus": [],
+                    "idu_m2": {},
                 }
                 owners[ilot][key] = slot
             slot["ha"] += m2 / 10000.0
+            slot["idu_m2"][idu] = slot["idu_m2"].get(idu, 0.0) + m2
             if idu not in slot["idus"]:
                 slot["idus"].append(idu)
     out: dict[str, list[dict]] = {}
@@ -233,19 +238,24 @@ def _analyse_siren(conn, slot: dict) -> dict:
             return payload
         return {"score_final": None, "statut": "skipped", "reason": "missing_or_invalid_siren"}
 
-    cached = get_cached_siren(conn, siren)
+    cached = get_cached_siren(conn, siren, _CACHE_VERSION_LEGERE)
     try:
         conn.commit()
     except Exception:
         pass
     if cached is not None:
         return cached
+    # Une commune suffit pour la recherche web. Aucune lecture de contour.
+    idu_web = slot["idus"][:1]
     res = run_durete_for_siren(
         siren=siren,
-        idus=slot["idus"],
+        idus=idu_web,
         denomination=slot["denomination"],
         forme_juridique=slot["forme_juridique"],
         avec_recherche_web=True,
+        avec_rpg=False,
+        avec_gpu=False,
+        legere=True,
     )
     if not isinstance(res, dict) or res.get("statut") == "erreur":
         return {
@@ -262,6 +272,7 @@ def _analyse_siren(conn, slot: dict) -> dict:
             res,
             denomination=slot["denomination"],
             forme_juridique=slot["forme_juridique"],
+            cache_version=_CACHE_VERSION_LEGERE,
         )
         conn.commit()
     except Exception:
@@ -281,11 +292,13 @@ def _representative_slots(shares: dict[str, list[dict]]) -> dict[str, dict]:
         for slot in slots:
             cur = out.get(slot["key"])
             if cur is None:
-                out[slot["key"]] = {**slot, "idus": list(slot["idus"])}
+                out[slot["key"]] = {**slot, "idus": list(slot["idus"]), "idu_m2": dict(slot.get("idu_m2") or {})}
                 continue
+            m2s = cur.setdefault("idu_m2", {})
             for idu in slot["idus"]:
                 if idu not in cur["idus"]:
                     cur["idus"].append(idu)
+                m2s[idu] = m2s.get(idu, 0.0) + float((slot.get("idu_m2") or {}).get(idu) or 0)
             if not cur["denomination"] and slot["denomination"]:
                 cur["denomination"] = slot["denomination"]
     return out
